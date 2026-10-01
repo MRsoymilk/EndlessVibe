@@ -31,7 +31,7 @@ pub struct Git { pub executable: PathBuf, pub author_name: String, pub author_em
 impl Default for Git { fn default() -> Self { Self { executable: "/usr/bin/git".into(), author_name: "EndlessVibe".into(), author_email: "endlessvibe@localhost".into() } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceConfig { pub id: String, pub path: PathBuf, #[serde(default)] pub projects: Vec<ProjectConfig>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_write: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_exec: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_git_commit: Option<bool> }
+pub struct WorkspaceConfig { pub id: String, pub path: PathBuf, #[serde(default, skip_serializing_if = "Vec::is_empty")] pub projects: Vec<ProjectConfig>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_write: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_exec: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_git_commit: Option<bool> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig { pub id: String, pub path: PathBuf, #[serde(default)] pub allow_write: bool, #[serde(default)] pub allow_exec: bool, #[serde(default)] pub allow_git_commit: bool }
