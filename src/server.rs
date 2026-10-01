@@ -16,6 +16,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
     Router::new()
         .route("/",get(web::home))
         .route("/activity",get(web::home))
+        .route("/operations",get(web::home))
         .route("/config",get(web::home))
         .route("/assets/app.css",get(web::css))
         .route("/assets/app.js",get(web::javascript))
