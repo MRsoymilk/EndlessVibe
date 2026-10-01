@@ -7,7 +7,7 @@ use std::{collections::HashMap,sync::{Arc,Mutex},time::{Duration,Instant}};
 use tokio::{io::{AsyncRead,AsyncReadExt},sync::{mpsc,Semaphore}};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,pub started:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String> }
+#[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,#[serde(default)]pub project:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,pub started:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String> }
 #[derive(Serialize,Deserialize)] struct JobRef{id:String,fingerprint:String}
 pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>> }
 struct Output{bytes:Vec<u8>,offset:u64,total:u64}
@@ -34,7 +34,7 @@ impl Output{
 impl Jobs{
     pub fn new(db:Arc<Store>,config:Arc<Config>)->Result<Arc<Self>>{
         let s=Arc::new(Self{db,slots:Arc::new(Semaphore::new(config.limits.max_jobs)),config,submission:tokio::sync::Mutex::new(()),active:Mutex::new(HashMap::new())});
-        let mut records=s.list_records(None,usize::MAX)?;
+        let mut records=s.list_records(None,None,usize::MAX)?;
         for r in &mut records{if matches!(r.status.as_str(),"queued"|"running"){r.status="interrupted".into();r.finished=Some(util::now());r.error=Some("Service restarted; this command is never automatically replayed".into());s.save(r,None)?;}}
         Ok(s)
     }
@@ -44,11 +44,11 @@ impl Jobs{
         let s:Option<String>=self.db.transaction(|tx|Ok(tx.query_row("SELECT data FROM jobs WHERE id=?1",[id],|r|r.get(0)).optional()?))?;
         Ok(serde_json::from_str(&s.context("Job not found or retention expired")?)?)
     }
-    fn list_records(&self,workspace:Option<&str>,limit:usize)->Result<Vec<JobRecord>>{
-        self.db.transaction(|tx|{let mut q=tx.prepare("SELECT data FROM jobs WHERE (?1 IS NULL OR json_extract(data,'$.workspace')=?1) ORDER BY json_extract(data,'$.created') DESC LIMIT ?2")?;let values=q.query_map(params![workspace,limit.min(10000) as i64],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;values.into_iter().map(|v|Ok(serde_json::from_str(&v)?)).collect()})
+    fn list_records(&self,workspace:Option<&str>,project:Option<&str>,limit:usize)->Result<Vec<JobRecord>>{
+        self.db.transaction(|tx|{let mut q=tx.prepare("SELECT data FROM jobs WHERE (?1 IS NULL OR json_extract(data,'$.workspace')=?1) AND (?2 IS NULL OR json_extract(data,'$.project')=?2) ORDER BY json_extract(data,'$.created') DESC LIMIT ?3")?;let values=q.query_map(params![workspace,project,limit.min(10000) as i64],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;values.into_iter().map(|v|Ok(serde_json::from_str(&v)?)).collect()})
     }
     pub fn get(&self,id:&str)->Result<Value>{Ok(serde_json::to_value(self.load(id)?)?)}
-    pub fn list(&self,a:ListJobsArgs)->Result<Value>{if a.limit==0||a.limit>200{bail!("limit must be 1..200");}Ok(json!({"jobs":self.list_records(a.workspace.as_deref(),a.limit)?}))}
+    pub fn list(&self,a:ListJobsArgs)->Result<Value>{if a.limit==0||a.limit>200{bail!("limit must be 1..200");}Ok(json!({"jobs":self.list_records(a.workspace.as_deref(),a.project.as_deref(),a.limit)?}))}
     pub fn output(&self,a:OutputArgs)->Result<Value>{
         if a.limit==0||a.limit>262144{bail!("limit must be 1..262144");}
         let record=self.load(&a.job_id)?;
@@ -64,21 +64,21 @@ impl Jobs{
         if a.request_id.is_empty()||a.request_id.len()>128||!a.request_id.bytes().all(|b|b.is_ascii_alphanumeric()||b"-_:.".contains(&b)){bail!("Provide a unique simple request_id (1..128 characters); retries with the same ID never rerun the job during retention");}
         let timeout=a.timeout_seconds.unwrap_or(rt.config.limits.command_timeout_seconds);if timeout==0||timeout>rt.config.limits.command_timeout_seconds{bail!("timeout_seconds exceeds the configured limit");}
         let _submission=self.submission.lock().await;
-        let fingerprint=util::digest(serde_json::to_vec(&(&a,shell))?);let key=format!("{}:{}",a.workspace,a.request_id);
+        let fingerprint=util::digest(serde_json::to_vec(&(&a,shell))?);let key=format!("{}:{}:{}",a.workspace,a.project,a.request_id);
         if let Some(existing)=self.db.get::<JobRef>("job_requests",&key)?{
             if existing.fingerprint!=fingerprint{bail!("IDEMPOTENCY_CONFLICT: request_id was used with different command arguments");}
             let mut value=self.get(&existing.id).unwrap_or_else(|_|json!({"id":existing.id.clone(),"status":"expired","message":"Output retention expired; request is not re-executed"}));value["job_id"]=json!(existing.id);value["reused"]=json!(true);return Ok(value);
         }
-        let w=rt.workspace(&a.workspace)?;w.exec_allowed()?;
+        let w=rt.project(&a.workspace,&a.project)?;w.exec_allowed()?;
         let permit=self.slots.clone().try_acquire_owned().context("All command slots are occupied; query existing jobs first")?;
         let lock=w.lock.clone().try_lock_owned().context("PROJECT_BUSY: another operation is using this project")?;
         let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell)?;
-        let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:util::now(),started:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None};
-        self.db.audit(if shell{"run_shell"}else{"run_command"},&record.workspace,"accepted",&record.id)?;
+        let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,project:a.project,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:util::now(),started:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None};
+        let audit_target=format!("{}/{}",record.workspace,record.project);self.db.audit(if shell{"run_shell"}else{"run_command"},&audit_target,"accepted",&record.id)?;
         self.db.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",params![record.id,serde_json::to_string(&record)?])?;store::put(tx,"job_requests",&key,&JobRef{id:record.id.clone(),fingerprint},util::now()+7*86400)?;Ok(())})?;
         let cancel=rt.shutdown.child_token();self.active.lock().map_err(|_|anyhow::anyhow!("Job table poisoned"))?.insert(record.id.clone(),cancel.clone());
         let result=json!({"job_id":record.id,"status":"queued","request_id":record.request_id,"reused":false,"next":"get_job / get_job_output"});
-        let this=self.clone();tokio::spawn(async move{let _permit=permit;let _lock=lock;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout).await;if let Err(e)=result{record.status="failed".into();record.error=Some(util::bounded_text(&e.to_string(),1024));record.finished=Some(util::now());let _=this.save(&record,None);}let _=this.db.audit("job_finished",&record.workspace,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}let _=this.prune();});
+        let this=self.clone();tokio::spawn(async move{let _permit=permit;let _lock=lock;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout).await;if let Err(e)=result{record.status="failed".into();record.error=Some(util::bounded_text(&e.to_string(),1024));record.finished=Some(util::now());let _=this.save(&record,None);}let audit_target=format!("{}/{}",record.workspace,record.project);let _=this.db.audit("job_finished",&audit_target,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}let _=this.prune();});
         Ok(result)
     }
     fn prune(&self)->Result<()>{self.db.transaction(|tx|{tx.execute("DELETE FROM jobs WHERE id IN (SELECT id FROM jobs WHERE json_extract(data,'$.status') NOT IN ('queued','running') ORDER BY json_extract(data,'$.created') DESC LIMIT -1 OFFSET ?1)",[self.config.limits.retained_jobs as i64])?;Ok(())})}
