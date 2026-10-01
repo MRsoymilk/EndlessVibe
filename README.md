@@ -128,13 +128,36 @@ allow_git_commit = true
 ./target/release/endlessvibe
 ```
 
-本地状态页：`http://127.0.0.1:20000/`
+本地 Dashboard：`http://127.0.0.1:20001/`
 
 MCP endpoint：`http://127.0.0.1:20000/mcp`
 
 公网部署应使用 HTTPS，并让 `server.public_url` 与公开 origin 一致。
 
-### 4. 连接 ChatGPT
+### 4. 进程控制
+
+新版本启动后会在私有 state 目录维护 `service.pid`，记录 PID 与 Linux `/proc` start time，避免 PID 被复用后误杀其他进程。
+
+```bash
+# 查看状态
+./target/release/endlessvibe --status
+
+# 优雅退出
+./target/release/endlessvibe --stop
+
+# 优雅停止旧实例，然后由当前二进制直接重新启动
+./target/release/endlessvibe --restart
+```
+
+如果使用非默认配置：
+
+```bash
+./target/release/endlessvibe --config /path/to/config.toml --restart
+```
+
+`--stop` / `--restart` 发送 `SIGTERM` 并最多等待 15 秒，不会自动 `SIGKILL`。如果升级前的旧实例还没有 `service.pid`，需要最后一次使用原有方式停止并启动新版本；从新版本成功启动后即可一直使用上述内置命令。
+
+### 5. 连接 ChatGPT
 
 - Name：`EndlessVibe`
 - MCP URL：`https://mcp.example.com/mcp`
