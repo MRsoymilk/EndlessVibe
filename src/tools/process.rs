@@ -65,8 +65,10 @@ pub async fn probe_bubblewrap(config:&Config)->Result<()>{
     Ok(())
 }
 
+fn git_network_subcommand(args:&[String])->bool{args.iter().any(|arg|matches!(arg.as_str(),"push"|"fetch"|"pull"|"clone"|"ls-remote"|"remote"|"submodule"))}
 pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
     w.exec_allowed()?;
+    if program=="git"&&git_network_subcommand(args){bail!("Network Git subcommands are disabled in run_command; allow_git_mutation only permits local repository mutations");}
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
     if shell&&!config.execution.allow_shell{bail!("run_shell is disabled; set execution.allow_shell=true locally after reviewing the risks");}
     if !shell&&!config.execution.allowed_programs.iter().any(|p|p==program){bail!("Program is not in execution.allowed_programs");}
@@ -84,14 +86,16 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
             let cache=config.security.data_dir.join("exec-cache").join(&w.workspace_id).join(&w.config.id);crate::util::private_dir(&cache)?;
             let mut c=bubblewrap_base_command(config)?;
             c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
-            // Builds may inspect Git state, but must use the reviewed git_commit tool for writes.
-            let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}
+            // Git metadata is read-only by default. Explicit allow_git_mutation keeps the project's
+            // own .git writable while HOME, credentials, service state and network remain isolated.
+            let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}if !w.config.allow_git_mutation{c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}}
             let inside=if cwd=="."{PathBuf::from("/workspace")}else{Path::new("/workspace").join(cwd)};
             c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb"]);
             c.arg("--").arg(if shell{"/bin/bash"}else{program}).args(args);c
         }
         _=>bail!("Unknown execution backend"),
     };
+    if !shell&&program=="git"{command.env("GIT_AUTHOR_NAME",&config.git.author_name).env("GIT_AUTHOR_EMAIL",&config.git.author_email).env("GIT_COMMITTER_NAME",&config.git.author_name).env("GIT_COMMITTER_EMAIL",&config.git.author_email).env("GIT_MERGE_AUTOEDIT","no").env("GIT_EDITOR","true");}
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
     let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=pre_exec_nproc_limit(&config.execution.backend,config.execution.max_processes);let cpu=config.limits.command_timeout_seconds+5;
     // SAFETY: only async-signal-safe Linux syscalls are used in this pre_exec closure.
@@ -107,4 +111,5 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     use super::*;
     #[test]fn bubblewrap_does_not_limit_launcher_nproc(){assert_eq!(pre_exec_nproc_limit("bubblewrap",256),None);}
     #[test]fn host_keeps_configured_nproc_limit(){assert_eq!(pre_exec_nproc_limit("host",256),Some(256));}
+    #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
 }

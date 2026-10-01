@@ -9,7 +9,7 @@ impl Project{
     pub fn write_allowed(&self)->Result<()>{if !self.config.allow_write{bail!("Project is read-only");}self.root.unchanged_root()}
     pub fn exec_allowed(&self)->Result<()>{self.write_allowed()?;if !self.config.allow_exec{bail!("Command execution is disabled for this project");}Ok(())}
     pub fn commit_allowed(&self)->Result<()>{self.write_allowed()?;if !self.config.allow_git_commit{bail!("Git commits are disabled for this project");}Ok(())}
-    pub fn summary(&self)->Value{json!({"workspace":self.workspace_id,"id":self.config.id,"path":self.root.path,"allow_write":self.config.allow_write,"allow_exec":self.config.allow_exec,"allow_git_commit":self.config.allow_git_commit,"allow_git_push":false})}
+    pub fn summary(&self)->Value{json!({"workspace":self.workspace_id,"id":self.config.id,"path":self.root.path,"allow_write":self.config.allow_write,"allow_exec":self.config.allow_exec,"allow_git_commit":self.config.allow_git_commit,"allow_git_mutation":self.config.allow_git_mutation,"allow_git_push":false})}
 }
 pub struct Workspace{pub config:WorkspaceConfig,pub root:Root,pub projects:BTreeMap<String,Arc<Project>>}
 impl Workspace{
@@ -19,7 +19,7 @@ impl Workspace{
 }
 fn same_root(a:&Root,b:&Root)->Result<bool>{use std::os::unix::fs::MetadataExt;let a=a.metadata(".")?;let b=b.metadata(".")?;Ok(a.dev()==b.dev()&&a.ino()==b.ino())}
 fn legacy(w:&WorkspaceConfig)->bool{w.allow_write.is_some()||w.allow_exec.is_some()||w.allow_git_commit.is_some()}
-fn project_config(id:String,path:PathBuf,w:&WorkspaceConfig)->ProjectConfig{ProjectConfig{id,path,allow_write:w.allow_write.unwrap_or(false),allow_exec:w.allow_exec.unwrap_or(false),allow_git_commit:w.allow_git_commit.unwrap_or(false)}}
+fn project_config(id:String,path:PathBuf,w:&WorkspaceConfig)->ProjectConfig{ProjectConfig{id,path,allow_write:w.allow_write.unwrap_or(false),allow_exec:w.allow_exec.unwrap_or(false),allow_git_commit:w.allow_git_commit.unwrap_or(false),allow_git_mutation:false}}
 fn insert_project(map:&mut BTreeMap<String,Arc<Project>>,workspace_id:&str,root_path:&Path,config:ProjectConfig,legacy_overlap:bool)->Result<()>{
     if map.contains_key(&config.id){bail!("Duplicate project ID {}/{}",workspace_id,config.id);}
     let host=if config.path==Path::new("."){root_path.to_owned()}else{root_path.join(&config.path)};
@@ -91,7 +91,7 @@ pub fn inspect(project:&Project)->Result<Value>{
     use super::*;
     fn legacy(id:&str,path:&Path)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects:vec![],allow_write:Some(true),allow_exec:Some(true),allow_git_commit:Some(true)}}
     fn nested(id:&str,path:&Path,projects:Vec<ProjectConfig>)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects,allow_write:None,allow_exec:None,allow_git_commit:None}}
-    fn project(id:&str,path:&str)->ProjectConfig{ProjectConfig{id:id.into(),path:path.into(),allow_write:true,allow_exec:true,allow_git_commit:true}}
+    fn project(id:&str,path:&str)->ProjectConfig{ProjectConfig{id:id.into(),path:path.into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false}}
     #[test]fn legacy_parent_becomes_root_for_child_projects(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");let a=root.join("a");let b=root.join("b");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&a).unwrap();std::fs::create_dir_all(&b).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![legacy("NAME",&root),legacy("a",&a),legacy("b",&b)];let m=load(&c,&cfg_path).unwrap();assert_eq!(m.len(),1);assert!(!m["NAME"].projects.contains_key("NAME"));assert!(m["NAME"].projects.contains_key("a"));assert!(m["NAME"].projects.contains_key("b"));assert!(!Arc::ptr_eq(&m["NAME"].projects["a"].lock,&m["NAME"].projects["b"].lock));}
     #[test]fn standalone_legacy_workspace_remains_compatible_project(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&root).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![legacy("solo",&root)];let m=load(&c,&cfg_path).unwrap();assert!(m["solo"].projects.contains_key("solo"));}
     #[test]fn configured_projects_get_independent_locks(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(root.join("a")).unwrap();std::fs::create_dir_all(root.join("b")).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![nested("root",&root,vec![project("a","a"),project("b","b")])];let m=load(&c,&cfg_path).unwrap();assert!(!Arc::ptr_eq(&m["root"].projects["a"].lock,&m["root"].projects["b"].lock));}
