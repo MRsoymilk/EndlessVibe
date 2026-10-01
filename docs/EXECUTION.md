@@ -4,6 +4,14 @@
 
 `backend="bubblewrap"` 配合 `allow_exec=true` 才能启动任务。首次检查 `command -v bwrap`，由管理员安装发行版维护的 bubblewrap，并确认非特权 user namespace 可用。服务不提权、不执行 sudo，不存在自动不安全回退。
 
+构建新版本后可以在不执行项目代码的情况下单独验证 namespace 与基础 mount：
+
+```bash
+./target/release/endlessvibe --check-sandbox
+```
+
+成功输出 `bubblewrap sandbox probe: ok`。该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载工作区、不运行项目程序。
+
 沙箱中 `/workspace` 是选中项目，`/cache` 是该项目独立的私有构建缓存目录。`HOME=/tmp/home`，`CARGO_HOME=/cache/cargo`，默认 PATH `/usr/local/bin:/usr/bin:/bin`。系统可执行/库目录只读，项目 `.git` 再覆盖为只读。源文件本身可写，所以构建脚本能够改变选中项目；这是执行权限的一部分。
 
 默认不暴露真实 HOME、整个 `/etc`、SSH、DBus、Wayland、云凭据或服务状态。需要 UI、GPU、网络、跨项目依赖或其他宿主机资源的命令可能失败；默认不会开放这些资源。文件读写 MCP API 的敏感名称过滤不是 Shell 的文件访问过滤：有执行权限便可以访问沙箱内该项目的全部文件。
@@ -48,4 +56,6 @@ allow_shell = false
 
 超时/取消对进程组发送 TERM，再 KILL；bubblewrap 带父进程退出终止策略。host 模式中自行 daemonize、setsid 或逃离进程组的恶意程序不在强保证范围，不能宣称等价于 cgroup/VM 管控。服务重启不自动 replay 任何命令。
 
-默认最大两个并发任务、120 秒、8 GiB RLIMIT_AS、256 RLIMIT_NPROC。RLIMIT_AS 是地址空间而非 RSS，NPROC 可能受同 UID 已有进程影响；这些不是精确的每 Job cgroup 配额，也没有磁盘配额。大型 C++/Bevy 编译可能需要在本机调整。输出只保留配置大小的最近内容；缓存和项目生成文件不会自动删除。
+默认最大两个并发任务、120 秒和 8 GiB RLIMIT_AS。`max_processes=256` 目前只在显式 host 后端作为 RLIMIT_NPROC 使用；bubblewrap 启动器不再设置 RLIMIT_NPROC，因为 Linux 按真实 UID 的全部线程/进程计数该限制，在桌面用户已有任务数较多时会让 bwrap 自己的 namespace `clone()` 以 EAGAIN 失败。bubblewrap 下若需要严格的每 Job 进程数上限，应使用外部受委托的 cgroup v2 `pids.max` 等机制，而不是对启动器施加 RLIMIT_NPROC。
+
+RLIMIT_AS 是地址空间而非 RSS；这些限制也不是完整的每 Job cgroup 配额，并且没有磁盘配额。大型 C++/Bevy 编译可能需要在本机调整。输出只保留配置大小的最近内容；缓存和项目生成文件不会自动删除。
