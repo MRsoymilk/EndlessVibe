@@ -5,7 +5,6 @@ use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 
 const NAMESPACE:&str="task_checkpoints";
-const MAX_RECORDS:i64=2000;
 const MAX_JOBS:usize=20;
 
 #[derive(Clone,Debug,Serialize,Deserialize)]
@@ -41,7 +40,7 @@ fn load_stage(db:&Store,workspace:&str,project:&str,task_id:&str,stage:&str)->Re
 fn save(db:&Store,checkpoint:&TaskCheckpoint)->Result<()>{
     db.transaction(|tx|{
         crate::store::put(tx,NAMESPACE,&key(&checkpoint.workspace,&checkpoint.project,&checkpoint.task_id,&checkpoint.stage),checkpoint,0)?;
-        tx.execute("DELETE FROM kv WHERE namespace=?1 AND key IN (SELECT key FROM kv WHERE namespace=?1 ORDER BY CAST(json_extract(value,'$.updated') AS INTEGER) DESC LIMIT -1 OFFSET ?2)",params![NAMESPACE,MAX_RECORDS])?;
+        crate::store::prune_common(tx,util::now())?;
         Ok(())
     })
 }
