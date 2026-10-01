@@ -118,6 +118,7 @@ path = "EndlessVibe"
 allow_write = true
 allow_exec = true
 allow_git_commit = true
+allow_git_mutation = false
 ```
 
 旧版 flat workspace 配置仍可读取用于迁移，但新 CLI 只写入两层格式。
@@ -206,7 +207,7 @@ git_status(workspace, project)
   → git_commit(workspace, project, paths, expected_head, expected_diff_sha256)
 ```
 
-`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md)。
+`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。默认 `.git` 仍只读，且 `run_command` 会继续拒绝 Git 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
 
 ## Cloudflare Tunnel
 
