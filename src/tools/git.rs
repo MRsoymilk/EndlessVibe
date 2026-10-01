@@ -1,6 +1,6 @@
 //! Git operations use literal pathspecs, no hooks/signing/filter execution, a private
 //! preview object store, and a temporary index. Commit preserves unrelated staging.
-use crate::{runtime::Runtime,tools::{process,types::*},util,workspace::Project};
+use crate::{runtime::Runtime,tools::{process,tasks,types::*},util,workspace::Project};
 use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
 use std::{collections::BTreeSet,fs::{File,OpenOptions},io::Write,os::unix::fs::{MetadataExt,OpenOptionsExt},path::PathBuf};
@@ -77,7 +77,7 @@ async fn preview(rt:&Runtime,w:&Project,paths:Vec<String>)->Result<Preview>{
 pub async fn diff(rt:&Runtime,w:&Project,a:DiffArgs)->Result<Value>{preflight(rt,w).await?;let p=preview(rt,w,a.paths).await?;Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"paths":p.paths,"head":p.head,"diff_sha256":p.review,"diff":p.diff,"has_changes":!p.diff.is_empty(),"commit_policy":"Pass these exact paths/head/diff_sha256 to git_commit. Selected pre-staged changes are refused; unrelated staging is preserved. Raw file bytes are used (no clean filters/LFS conversion)."}))}
 
 pub async fn commit(rt:&Runtime,w:&Project,a:CommitArgs)->Result<Value>{
-    w.commit_allowed()?;preflight(rt,w).await?;
+    w.commit_allowed()?;tasks::validate_context(&a.task_id,&a.stage)?;preflight(rt,w).await?;
     if a.paths.is_empty(){bail!("git_commit requires explicit nonempty paths");}
     if a.message.trim().is_empty()||a.message.len()>4096||a.message.contains('\0'){bail!("Invalid commit message");}
     let gitdir=repo(w)?;let lockpath=gitdir.join("index.lock");
@@ -114,6 +114,7 @@ pub async fn commit(rt:&Runtime,w:&Project,a:CommitArgs)->Result<Value>{
     lock.keep=true;
     if let Err(e)=std::fs::rename(&lock.path,&index_path){bail!("COMMIT_PARTIALLY_PUBLISHED: HEAD is now {commit_id}; index.lock and {} were retained for recovery: {e}",journal.display());}
     lock.published=true;let durability_warning=File::open(&gitdir).and_then(|d|d.sync_all()).is_err();let _=std::fs::remove_file(&journal);let operation_diff=p.diff.clone();
-    Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"commit":commit_id,"branch":branch,"paths":p.paths,"pushed":false,"unrelated_staging_preserved":true,"working_tree_not_rewritten":true,"durability_warning":durability_warning,"_operation_diff":operation_diff}))
+    let checkpoint_warning=if let (Some(task),Some(stage))=(a.task_id.as_deref(),a.stage.as_deref()){tasks::record_commit(&rt.db,&w.workspace_id,&w.config.id,task,stage,&commit_id).err().map(|error|{tracing::warn!(error=%error,commit=%commit_id,"Commit succeeded but checkpoint persistence failed");"Commit succeeded but task checkpoint could not be persisted"})}else{None};
+    Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"commit":commit_id,"branch":branch,"paths":p.paths,"task_id":a.task_id,"stage":a.stage,"checkpoint":if checkpoint_warning.is_none()&&a.task_id.is_some(){"committed"}else if a.task_id.is_some(){"warning"}else{"not_requested"},"checkpoint_warning":checkpoint_warning,"pushed":false,"unrelated_staging_preserved":true,"working_tree_not_rewritten":true,"durability_warning":durability_warning,"_operation_diff":operation_diff}))
 }
 #[cfg(test)]mod tests{use super::*;#[test]fn status_handles_renames_and_hides_sensitive_paths(){let v=parse_status(b" M src/main.rs\0R  new.rs\0old.rs\0?? .env\0").unwrap();assert_eq!(v.len(),2);assert_eq!(v[1]["original_path"],"old.rs");}#[test]fn object_ids_are_validated(){assert!(oid(b"bad\n".to_vec()).is_err());assert!(oid(format!("{}\n","a".repeat(40)).into_bytes()).is_ok());}}
