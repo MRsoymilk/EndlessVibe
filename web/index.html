@@ -6,15 +6,15 @@
 <meta name="color-scheme" content="dark">
 <title>EndlessVibe · Dashboard</title>
 <link rel="stylesheet" href="/vendor/uPlot/uPlot.min.css">
-<link rel="stylesheet" href="/assets/app.css?v=home-dedupe-5">
+<link rel="stylesheet" href="/assets/app.css?v=mcp-page-6">
 <script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
-<script src="/assets/app.js?v=home-dedupe-5" defer></script>
+<script src="/assets/app.js?v=mcp-page-6" defer></script>
 </head>
 <body>
 <main class="shell">
 <header class="topbar">
 <div class="brand"><span class="logo" aria-hidden="true">EV</span><div><p class="eyebrow">ENDLESSVIBE</p><h1>Dashboard</h1></div></div>
-<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="config" href="/config">配置</a></nav>
+<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="mcp" href="/mcp">MCP</a><a data-nav="config" href="/config">配置</a></nav>
 <div id="header-status" class="header-status pending"><span class="dot"></span><span id="header-status-text">检查中</span></div>
 </header>
 
@@ -35,30 +35,6 @@
 <article><p class="label">Execution</p><p class="value compact" id="execution-backend">—</p><p class="caption">执行后端</p></article>
 </section>
 
-<section class="section-block">
-<div class="section-heading"><div><p class="eyebrow">ACTIVITY BOARD</p><h2>活动看板</h2></div><a href="/activity">查看全部活动 →</a></div>
-<div class="metrics six compact-cards">
-<article><p class="label">Tool Requests</p><p class="value" id="home-requests">—</p><p class="caption">最近 60 分钟</p></article>
-<article><p class="label">Success</p><p class="value" id="home-success">—</p><p class="caption">成功完成</p></article>
-<article><p class="label">Failed</p><p class="value" id="home-failed">—</p><p class="caption">失败 / 超时 / 取消</p></article>
-<article><p class="label">HTTP Requests</p><p class="value" id="home-http-requests">—</p><p class="caption">公网 listener</p></article>
-<article><p class="label">RX</p><p class="value compact" id="home-rx">—</p><p class="caption">HTTP payload</p></article>
-<article><p class="label">TX</p><p class="value compact" id="home-tx">—</p><p class="caption">HTTP payload</p></article>
-</div>
-<div class="chart-grid home-charts">
-<article class="chart-card"><div class="chart-header"><div><h3>Tool Activity</h3><p>Requests / Success / Failed · 1 min</p></div><span>60 min</span></div><div id="home-tool-chart" class="chart-host"></div></article>
-<article class="chart-card"><div class="chart-header"><div><h3>Network Traffic</h3><p>公网 HTTP payload RX / TX</p></div><span>60 min</span></div><div id="home-traffic-chart" class="chart-host"></div></article>
-</div>
-</section>
-
-<section class="panel">
-<div class="panel-heading"><div><p class="eyebrow">RECENT</p><h2>最近活动</h2></div><span id="home-activity-updated">—</span></div>
-<div id="home-activity-list" class="activity-list empty-state">暂无活动</div>
-</section>
-<section class="panel capability-panel">
-<div class="panel-heading"><div><p class="eyebrow">CAPABILITIES & SECURITY</p><h2>能力与安全</h2></div><a href="/config">查看配置 →</a></div>
-<div class="security-summary"><div><span>认证</span><strong id="home-auth">—</strong></div><div><span>Shell</span><strong id="home-shell">—</strong></div><div><span>Network</span><strong id="home-network">—</strong></div><div><span>MCP Tools</span><strong id="home-tool-count">—</strong></div></div>
-</section>
 </section>
 
 <section class="page" data-page="activity">
@@ -90,6 +66,15 @@
 </div>
 </section>
 
+<section class="page" data-page="mcp">
+<div class="page-title"><div><p class="eyebrow">MODEL CONTEXT PROTOCOL</p><h2>MCP</h2><p>查看当前 MCP 端点、协议状态和服务端暴露的工具分类。</p></div><span id="mcp-tool-count">—</span></div>
+<div class="config-grid mcp-summary-grid">
+<section class="config-card"><div class="config-heading"><h3>Endpoint</h3><span>CONNECTION</span></div><dl id="mcp-connection" class="config-list"></dl></section>
+<section class="config-card"><div class="config-heading"><h3>Protocol</h3><span>RUNTIME</span></div><dl id="mcp-runtime" class="config-list"></dl></section>
+<section class="config-card full"><div class="config-heading"><h3>MCP 工具</h3><span>TOOLS</span></div><p class="config-note">按职责分类显示当前服务实际暴露的工具；类别可折叠。</p><div id="mcp-tools" class="tool-tree"></div></section>
+</div>
+</section>
+
 <section class="page" data-page="config">
 <div class="page-title"><div><p class="eyebrow">CONFIGURATION</p><h2>配置</h2><p>只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。</p></div><span id="config-restart-badge" class="badge-note">检查配置状态</span></div>
 <div class="config-grid">
@@ -100,7 +85,6 @@
 <section class="config-card"><div class="config-heading"><h3>Git</h3><span>IDENTITY</span></div><dl id="config-git" class="config-list"></dl></section>
 <section class="config-card full"><div class="config-heading"><h3>添加 Project</h3><span>WRITE CONFIG</span></div><p class="config-note">写入 config.toml；目标目录必须已存在，并且严格位于所选 Workspace 根目录下。保存后需重启 EndlessVibe 才会加入 MCP 运行时。</p><form id="add-project-form" class="config-form"><label>Workspace<select id="add-project-workspace" required></select></label><label>Project ID<input id="add-project-id" type="text" maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="留空时使用目录名"></label><label class="path-field">Absolute Path<input id="add-project-path" type="text" required placeholder="/home/vv/project/example"></label><div class="permission-editor"><label><input id="add-project-write" type="checkbox" checked> write</label><label><input id="add-project-exec" type="checkbox" checked> exec</label><label><input id="add-project-commit" type="checkbox" checked> commit</label><label><input id="add-project-git-mutation" type="checkbox"> git rw</label><label><input id="add-project-git-push" type="checkbox"> push</label></div><button type="submit" id="add-project-save">保存并添加</button><div id="config-write-status" class="write-status" role="status" aria-live="polite"></div></form></section>
 <section class="config-card full"><div class="config-heading"><h3>Workspace → Project</h3><span>ACCESS</span></div><div id="workspace-config" class="workspace-config"></div></section>
-<section class="config-card full"><div class="config-heading"><h3>MCP 工具</h3><span id="mcp-tool-count">—</span></div><p class="config-note">当前服务向 ChatGPT 暴露的工具如下。</p><div id="mcp-tools" class="tool-tree"></div></section>
 </div>
 </section>
 
