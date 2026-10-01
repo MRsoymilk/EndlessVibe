@@ -25,6 +25,10 @@ export function renderMetrics(data){
   const totals=data.totals||{},points=data.points||[];
   setText("activity-tool-latency",percentileText(data.latency?.tool_ms));
   setText("activity-queue-wait",percentileText(data.latency?.queue_wait_ms));
+  setText("activity-project-busy",data.counters?.project_busy??0);
+  setText("activity-job-stops",`${data.counters?.jobs?.timed_out??0} / ${data.counters?.jobs?.cancelled??0} / ${data.counters?.jobs?.interrupted??0}`);
+  setText("activity-git-commit",`${data.counters?.git?.commit?.succeeded??0} / ${data.counters?.git?.commit?.failed??0}`);
+  setText("activity-git-push",`${data.counters?.git?.push?.succeeded??0} / ${data.counters?.git?.push?.failed??0}`);
   for(const key of ["requests","success","failed","http-requests","rx","tx"]){
     const value=key==="requests"?totals.requests:key==="success"?totals.successes:key==="failed"?totals.failures:key==="http-requests"?totals.http_requests:key==="rx"?formatBytes(totals.rx_bytes):formatBytes(totals.tx_bytes);
     setText(`activity-${key}`,value??0);
