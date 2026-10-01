@@ -171,6 +171,8 @@ MCP endpoint：`http://127.0.0.1:20000/mcp`
 
 ## MCP 工具
 
+`hello` / `get_service_status` 会同时返回服务版本、`tool_schema_revision` 和工具数量。若 Dashboard `/mcp` 已显示新的 revision，但 ChatGPT 仍缺少新工具，说明客户端仍缓存旧 MCP schema，需要重新连接或刷新插件。
+
 | 类别 | 工具 |
 |---|---|
 | 连接 | `hello`, `get_service_status` |

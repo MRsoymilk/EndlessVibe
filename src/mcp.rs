@@ -5,6 +5,8 @@ use serde_json::{json,Value};
 use std::sync::Arc;
 
 pub const SDK_VERSION:&str="3.5.0";
+/// Bump whenever any exposed MCP tool name, argument schema, security metadata or semantics change.
+pub const TOOL_SCHEMA_REVISION:&str="2026-10-02.1";
 pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","get_task_checkpoint","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
 fn answer(result:anyhow::Result<Value>)->CallToolResult{match result{Ok(value)=>{let mut out=CallToolResult::success(vec![ContentBlock::text(value.to_string())]);out.structured_content=Some(value);out},Err(e)=>CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))])}}
@@ -20,7 +22,7 @@ impl EndlessVibeMcp{
     pub fn new(rt:Arc<Runtime>)->Self{Self{rt}}
 
     #[tool(meta=tool_meta("hello"),description="Check the authenticated EndlessVibe connection.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
-    fn hello(&self)->CallToolResult{let op=empty(&self.rt,"hello");answer_logged(&self.rt,op,Ok(json!({"message":"EndlessVibe connection is responding","version":env!("CARGO_PKG_VERSION")})))}
+    fn hello(&self)->CallToolResult{let op=empty(&self.rt,"hello");answer_logged(&self.rt,op,Ok(json!({"message":"EndlessVibe connection is responding","version":env!("CARGO_PKG_VERSION"),"tool_schema_revision":TOOL_SCHEMA_REVISION,"tool_count":TOOL_NAMES.len()})))}
 
     #[tool(meta=tool_meta("get_service_status"),description="Read process status and enabled capabilities. Does not assert public tunnel or ChatGPT registration success.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
     fn get_service_status(&self)->CallToolResult{let op=empty(&self.rt,"get_service_status");answer_logged(&self.rt,op,Ok(self.rt.snapshot()))}

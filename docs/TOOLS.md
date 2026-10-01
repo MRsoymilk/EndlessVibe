@@ -1,6 +1,6 @@
 # MCP 工具参数与工作流
 
-接口由 `src/tools/types.rs` 的 Rust 类型生成 JSON Schema。所有私有工具都需要有效 OAuth Bearer；Project 的写入、执行和 Git 权限还需由本地配置允许。
+接口由 `src/tools/types.rs` 的 Rust 类型生成 JSON Schema。所有私有工具都需要有效 OAuth Bearer；Project 的写入、执行和 Git 权限还需由本地配置允许。服务维护显式 `tool_schema_revision`；任何工具名、参数 schema、安全 metadata 或语义变化都必须递增该 revision。`hello` 与 `get_service_status` 都会返回 revision 和工具数量，用于识别客户端缓存旧 schema。
 
 ## 定位模型
 
