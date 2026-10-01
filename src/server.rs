@@ -1,5 +1,5 @@
 use crate::{mcp::EndlessVibeMcp,runtime::Runtime,security::auth,web};
-use axum::{body::{to_bytes,Body,HttpBody},extract::{DefaultBodyLimit,Request,State},http::{header,HeaderValue,StatusCode},middleware::{self,Next},response::{IntoResponse,Response},routing::{get,post},Router};
+use axum::{body::{to_bytes,Body,HttpBody},extract::{DefaultBodyLimit,Request,State},http::{header,HeaderValue,Method,StatusCode},middleware::{self,Next},response::{IntoResponse,Response},routing::{get,patch,post},Router};
 use rmcp::transport::streamable_http_server::{session::local::LocalSessionManager,StreamableHttpServerConfig,StreamableHttpService};
 use std::{sync::Arc,time::Instant};
 
@@ -26,12 +26,20 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/metrics",get(web::metrics))
         .route("/api/activity",get(web::activity))
         .route("/api/config",get(web::config))
+        .route("/api/events",get(web::events))
+        .route("/api/projects",post(web::add_project))
+        .route("/api/projects/{workspace}/{project}",patch(web::update_project))
         .route("/health",get(web::status))
         .with_state(rt)
+        .layer(DefaultBodyLimit::max(65536))
         .layer(middleware::from_fn(dashboard_headers))
 }
 
 async fn dashboard_headers(request:Request,next:Next)->Response{
+    let authority=request.headers().get(header::HOST).and_then(|v|v.to_str().ok()).or_else(||request.uri().authority().map(|a|a.as_str()));
+    let local_host=authority.and_then(|s|s.parse::<axum::http::uri::Authority>().ok()).is_some_and(|a|matches!(a.host().trim_matches(['[',']']),"127.0.0.1"|"localhost"|"::1"));
+    if !local_host{return (StatusCode::FORBIDDEN,"Dashboard host is not allowed").into_response();}
+    if request.method()!=Method::GET&&request.method()!=Method::HEAD{let origin=request.headers().get(header::ORIGIN).and_then(|v|v.to_str().ok());if !matches!(origin,Some("http://127.0.0.1:20001"|"http://localhost:20001"|"http://[::1]:20001")){return (StatusCode::FORBIDDEN,"Dashboard write origin is not allowed").into_response();}}
     let mut response=next.run(request).await;
     let headers=response.headers_mut();
 
@@ -63,7 +71,7 @@ async fn headers_and_logging(State(rt):State<Arc<Runtime>>,request:Request,next:
     let allowed=authority.and_then(|s|s.parse::<axum::http::uri::Authority>().ok()).is_some_and(|a|rt.config.hosts().iter().any(|h|h.eq_ignore_ascii_case(a.host().trim_matches(['[',']']))));
     if !allowed{return (StatusCode::FORBIDDEN,"Host is not allowed").into_response();}
     if request.uri().to_string().len()>8192{return StatusCode::URI_TOO_LONG.into_response();}
-    let mut response=next.run(request).await;let response_bytes=response.body().size_hint().exact().or_else(||response.headers().get(header::CONTENT_LENGTH).and_then(|v|v.to_str().ok()).and_then(|v|v.parse::<u64>().ok())).unwrap_or(0);if let Err(error)=rt.db.record_traffic(request_bytes,response_bytes){tracing::warn!(error=%error,"Could not record HTTP traffic metrics");}let h=response.headers_mut();
+    let mut response=next.run(request).await;let response_bytes=response.body().size_hint().exact().or_else(||response.headers().get(header::CONTENT_LENGTH).and_then(|v|v.to_str().ok()).and_then(|v|v.parse::<u64>().ok())).unwrap_or(0);rt.record_http_traffic(request_bytes,response_bytes);let h=response.headers_mut();
     h.insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));h.insert(header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff"));h.entry(header::REFERRER_POLICY).or_insert(HeaderValue::from_static("no-referrer"));h.insert(header::X_FRAME_OPTIONS,HeaderValue::from_static("DENY"));let mut form_origins=vec!["https://chatgpt.com".to_owned()];for redirect in &rt.config.security.extra_redirect_uris{if let Ok(u)=url::Url::parse(redirect){if matches!(u.scheme(),"http"|"https"){form_origins.push(u.origin().ascii_serialization());}}}form_origins.sort();form_origins.dedup();
     let csp=format!("default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' {}",form_origins.join(" "));
     if let Ok(value)=HeaderValue::from_str(&csp){h.insert(header::CONTENT_SECURITY_POLICY,value);}
