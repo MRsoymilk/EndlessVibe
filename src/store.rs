@@ -20,6 +20,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS kv(namespace TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(namespace,key));
             CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL, output BLOB NOT NULL DEFAULT X'', output_offset INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, tool TEXT NOT NULL, workspace TEXT NOT NULL, outcome TEXT NOT NULL, note TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS traffic(bucket INTEGER PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0, rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0);
             PRAGMA user_version=1;")?;
         Ok(Self { connection: Mutex::new(c) })
     }
@@ -43,17 +44,25 @@ impl Store {
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
+    pub fn record_traffic(&self,rx_bytes:u64,tx_bytes:u64)->Result<()> {
+        let now=crate::util::now();let bucket=now/60*60;
+        self.transaction(|tx|{
+            tx.execute("INSERT INTO traffic(bucket,requests,rx_bytes,tx_bytes) VALUES(?1,1,?2,?3) ON CONFLICT(bucket) DO UPDATE SET requests=requests+1,rx_bytes=rx_bytes+excluded.rx_bytes,tx_bytes=tx_bytes+excluded.tx_bytes",params![bucket,rx_bytes,tx_bytes])?;
+            tx.execute("DELETE FROM traffic WHERE bucket<?1",[now.saturating_sub(7*86400)])?;Ok(())
+        })
+    }
     pub fn dashboard_metrics(&self, window_seconds:u64, bucket_seconds:u64) -> Result<serde_json::Value> {
         let bucket_seconds=bucket_seconds.clamp(10,3600);let buckets=((window_seconds.max(bucket_seconds)+bucket_seconds-1)/bucket_seconds).clamp(1,1440) as usize;
         let now=crate::util::now();let end=(now/bucket_seconds)*bucket_seconds;let start=end.saturating_sub(bucket_seconds.saturating_mul((buckets.saturating_sub(1)) as u64));
         self.transaction(|tx| {
-            let mut requests=vec![0u64;buckets];let mut successes=vec![0u64;buckets];let mut failures=vec![0u64;buckets];
+            let mut requests=vec![0u64;buckets];let mut successes=vec![0u64;buckets];let mut failures=vec![0u64;buckets];let mut http_requests=vec![0u64;buckets];let mut rx_bytes=vec![0u64;buckets];let mut tx_bytes=vec![0u64;buckets];
             let mut statement=tx.prepare("SELECT time,outcome FROM audit WHERE time>=?1 ORDER BY time")?;
             let rows=statement.query_map([start],|r|Ok((r.get::<_,u64>(0)?,r.get::<_,String>(1)?)))?;
             for row in rows{let(time,outcome)=row?;let index=((time.saturating_sub(start))/bucket_seconds) as usize;if index>=buckets{continue;}match outcome.as_str(){"started"|"accepted"=>requests[index]+=1,"succeeded"=>successes[index]+=1,"failed"|"timed_out"|"cancelled"|"interrupted"=>failures[index]+=1,_=>{}}}
+            let mut traffic=tx.prepare("SELECT bucket,requests,rx_bytes,tx_bytes FROM traffic WHERE bucket>=?1 ORDER BY bucket")?;for row in traffic.query_map([start],|r|Ok((r.get::<_,u64>(0)?,r.get::<_,u64>(1)?,r.get::<_,u64>(2)?,r.get::<_,u64>(3)?)))?{let(time,count,rx,tx)=row?;let index=((time.saturating_sub(start))/bucket_seconds) as usize;if index<buckets{http_requests[index]+=count;rx_bytes[index]+=rx;tx_bytes[index]+=tx;}}
             let mut jobs=Vec::new();let mut q=tx.prepare("SELECT data FROM jobs")?;for row in q.query_map([],|r|r.get::<_,String>(0))?{let value:serde_json::Value=serde_json::from_str(&row?)?;let begin=value.get("started").and_then(|v|v.as_u64()).or_else(||value.get("created").and_then(|v|v.as_u64()));let finish=value.get("finished").and_then(|v|v.as_u64());if let Some(begin)=begin{jobs.push((begin,finish));}}
-            let mut points=Vec::with_capacity(buckets);for i in 0..buckets{let time=start+bucket_seconds*i as u64;let sample_time=(time+bucket_seconds.saturating_sub(1)).min(now);let active_jobs=jobs.iter().filter(|(begin,finish)|*begin<=sample_time&&finish.map_or(true,|done|done>sample_time)).count();points.push(serde_json::json!({"time":time,"requests":requests[i],"successes":successes[i],"failures":failures[i],"active_jobs":active_jobs}));}
-            Ok(serde_json::json!({"window_seconds":bucket_seconds*buckets as u64,"bucket_seconds":bucket_seconds,"generated_at":now,"totals":{"requests":requests.iter().sum::<u64>(),"successes":successes.iter().sum::<u64>(),"failures":failures.iter().sum::<u64>()},"points":points}))
+            let mut points=Vec::with_capacity(buckets);for i in 0..buckets{let time=start+bucket_seconds*i as u64;let sample_time=(time+bucket_seconds.saturating_sub(1)).min(now);let active_jobs=jobs.iter().filter(|(begin,finish)|*begin<=sample_time&&finish.map_or(true,|done|done>sample_time)).count();points.push(serde_json::json!({"time":time,"requests":requests[i],"successes":successes[i],"failures":failures[i],"active_jobs":active_jobs,"http_requests":http_requests[i],"rx_bytes":rx_bytes[i],"tx_bytes":tx_bytes[i]}));}
+            Ok(serde_json::json!({"window_seconds":bucket_seconds*buckets as u64,"bucket_seconds":bucket_seconds,"generated_at":now,"totals":{"requests":requests.iter().sum::<u64>(),"successes":successes.iter().sum::<u64>(),"failures":failures.iter().sum::<u64>(),"http_requests":http_requests.iter().sum::<u64>(),"rx_bytes":rx_bytes.iter().sum::<u64>(),"tx_bytes":tx_bytes.iter().sum::<u64>()},"points":points}))
         })
     }
     pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { tx.execute("DELETE FROM kv WHERE expires>0 AND expires<?1", [crate::util::now()])?; Ok(()) }) }
@@ -71,5 +80,5 @@ pub fn count(tx: &Transaction<'_>, namespace: &str) -> Result<usize> { Ok(tx.que
 #[cfg(test)] mod tests {
     use super::*;
     #[test] fn private_storage_persists_and_rolls_back() { let d = tempfile::tempdir().unwrap(); let s = Store::open(&d.path().join("db")).unwrap(); s.put("x", "key", &42, 0).unwrap(); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); let r: Result<()> = s.transaction(|tx| { put(tx,"x","key",&43,0)?; anyhow::bail!("abort") }); assert!(r.is_err()); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); }
-    #[test] fn dashboard_metrics_aggregate_audit_and_active_jobs(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
+    #[test] fn dashboard_metrics_aggregate_audit_jobs_and_traffic(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();s.record_traffic(120,340).unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["totals"]["http_requests"],1);assert_eq!(value["totals"]["rx_bytes"],120);assert_eq!(value["totals"]["tx_bytes"],340);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
 }
