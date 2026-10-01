@@ -84,6 +84,29 @@ impl Store {
         })
     }
     pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { retention::prune_common(tx,crate::util::now())?; Ok(()) }) }
+    pub fn storage_metadata(&self,retained_jobs:usize)->Result<serde_json::Value>{
+        self.transaction(|tx|{
+            let schema_version:i64=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
+            let page_count:u64=tx.query_row("PRAGMA page_count",[],|r|r.get(0))?;
+            let page_size:u64=tx.query_row("PRAGMA page_size",[],|r|r.get(0))?;
+            let freelist_count:u64=tx.query_row("PRAGMA freelist_count",[],|r|r.get(0))?;
+            let jobs:u64=tx.query_row("SELECT COUNT(*) FROM jobs",[],|r|r.get(0))?;
+            let audit:u64=tx.query_row("SELECT COUNT(*) FROM audit",[],|r|r.get(0))?;
+            let operations:u64=tx.query_row("SELECT COUNT(*) FROM operation_log",[],|r|r.get(0))?;
+            let traffic:u64=tx.query_row("SELECT COUNT(*) FROM traffic",[],|r|r.get(0))?;
+            let task_checkpoints:u64=tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='task_checkpoints'",[],|r|r.get(0))?;
+            Ok(serde_json::json!({
+                "schema_version":schema_version,
+                "schema_current":migrations::CURRENT_SCHEMA_VERSION,
+                "page_count":page_count,
+                "page_size":page_size,
+                "logical_bytes":page_count.saturating_mul(page_size),
+                "free_bytes":freelist_count.saturating_mul(page_size),
+                "rows":{"jobs":jobs,"audit":audit,"operations":operations,"traffic":traffic,"task_checkpoints":task_checkpoints},
+                "retention":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS}
+            }))
+        })
+    }
     pub fn maintain(&self,retained_jobs:usize)->Result<serde_json::Value>{
         let now=crate::util::now();
         self.transaction(|tx|{

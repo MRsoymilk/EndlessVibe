@@ -34,6 +34,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/activity",get(web::activity))
         .route("/api/config",get(web::config))
         .route("/api/config/reload",post(web::reload_config))
+        .route("/api/storage",get(web::storage_health))
         .route("/api/storage/maintenance",post(web::storage_maintenance))
         .route("/api/projects/status",get(web::project_states))
         .route("/api/tasks",get(web::tasks))

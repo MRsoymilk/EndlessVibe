@@ -9,6 +9,7 @@ pub mod runtime;
 pub mod security;
 pub mod server;
 pub mod store;
+pub mod storage;
 pub mod tools;
 pub mod util;
 pub mod web;
