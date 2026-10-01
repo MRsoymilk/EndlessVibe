@@ -42,7 +42,7 @@ pub fn revision(path:&Path)->Result<String>{Ok(util::digest(std::fs::read(path).
 fn read_checked(path:&Path,expected_revision:&str)->Result<(String,Config)>{
     let bytes=std::fs::read(path).with_context(||format!("Read {}",path.display()))?;
     let actual=util::digest(&bytes);
-    if actual!=expected_revision{bail!("CONFIG_CONFLICT: configuration changed since it was loaded; refresh and retry");}
+    if actual!=expected_revision{return Err(crate::error::coded_details("CONFIG_CONFLICT",true,"configuration changed since it was loaded; refresh and retry",json!({"expected_revision":expected_revision,"actual_revision":actual})));}
     let text=String::from_utf8(bytes).context("Config must be UTF-8")?;
     let cfg:Config=toml::from_str(&text).context("Invalid config.toml")?;
     cfg.validate()?;

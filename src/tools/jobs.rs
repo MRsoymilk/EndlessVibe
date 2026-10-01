@@ -67,12 +67,12 @@ impl Jobs{
         let _submission=self.submission.lock().await;
         let fingerprint=util::digest(serde_json::to_vec(&(&a,shell))?);let key=format!("{}:{}:{}",a.workspace,a.project,a.request_id);
         if let Some(existing)=self.db.get::<JobRef>("job_requests",&key)?{
-            if existing.fingerprint!=fingerprint{bail!("IDEMPOTENCY_CONFLICT: request_id was used with different command arguments");}
+            if existing.fingerprint!=fingerprint{return Err(crate::error::coded_details("IDEMPOTENCY_CONFLICT",false,"request_id was used with different command arguments",json!({"request_id":a.request_id})));}
             let mut value=self.get(&existing.id).unwrap_or_else(|_|json!({"id":existing.id.clone(),"status":"expired","message":"Output retention expired; request is not re-executed"}));value["job_id"]=json!(existing.id);value["reused"]=json!(true);return Ok(value);
         }
         let w=rt.project(&a.workspace,&a.project)?;w.exec_allowed()?;
-        let permit=self.slots.clone().try_acquire_owned().context("All command slots are occupied; query existing jobs first")?;
-        let lock=w.lock.clone().try_lock_owned().context("PROJECT_BUSY: another operation is using this project")?;
+        let permit=self.slots.clone().try_acquire_owned().map_err(|_|crate::error::coded("COMMAND_SLOTS_BUSY",true,"All command slots are occupied; query existing jobs first"))?;
+        let lock=w.lock.clone().try_lock_owned().map_err(|_|crate::error::coded_details("PROJECT_BUSY",true,"another operation is using this project",json!({"workspace":a.workspace.clone(),"project":a.project.clone()})))?;
         let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell)?;
         let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,project:a.project,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:util::now(),started:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None,task_id:a.task_id,stage:a.stage};
         let audit_target=format!("{}/{}",record.workspace,record.project);self.db.audit(if shell{"run_shell"}else{"run_command"},&audit_target,"accepted",&record.id)?;

@@ -33,6 +33,16 @@ Project   = Workspace 下的实际操作单元
 
 Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project 根目录。
 
+## 结构化错误
+
+MCP 工具失败时仍保留人类可读的文本错误，同时 `structuredContent` 返回稳定结构：
+
+```json
+{"code":"FILE_CONFLICT","message":"expected_sha256 does not match current content; read again, do not overwrite","retryable":true,"details":{"expected_sha256":"...","actual_sha256":"..."}}
+```
+
+Dashboard 写操作使用相同的 `code / message / retryable / details` JSON。客户端应根据 `code` 做流程判断，不要解析 `message` 文案。已迁移的稳定 code 包括配置/文件/patch/Git 冲突、Project busy/授权/权限、Job idempotency/slots 以及受控 Git push 的失败类型；未分类错误统一为 `OPERATION_FAILED`。
+
 ## 项目与文件
 
 `inspect_project`：

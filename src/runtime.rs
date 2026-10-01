@@ -17,7 +17,7 @@ impl Runtime{
         let workspaces=workspace::load(&config,config_path)?;let active_config_revision=config_edit::revision(config_path).unwrap_or_default();let config_path=config_path.to_owned();let config=Arc::new(config);let db=Arc::new(Store::open(&config.security.data_dir.join("state.sqlite3"))?);let auth=Arc::new(Auth::new(config.clone(),db.clone())?);let jobs=Jobs::new(db.clone(),config.clone())?;let(dashboard_events,_)=broadcast::channel(256);
         Ok(Arc::new(Self{config,db,auth,jobs,workspaces,shutdown:CancellationToken::new(),config_path,active_config_revision,dashboard_events,config_edit_lock:Mutex::new(()),traffic_requests:AtomicU64::new(0),traffic_rx:AtomicU64::new(0),traffic_tx:AtomicU64::new(0),started:Instant::now(),started_unix:util::now(),_instance:instance}))
     }
-    pub fn workspace_root_exact(&self,id:&str)->Result<Arc<Workspace>>{self.workspaces.get(id).cloned().context("WORKSPACE_NOT_AUTHORIZED: call list_workspaces and use an exact configured workspace ID")}
+    pub fn workspace_root_exact(&self,id:&str)->Result<Arc<Workspace>>{self.workspaces.get(id).cloned().ok_or_else(||crate::error::coded_details("WORKSPACE_NOT_AUTHORIZED",false,"call list_workspaces and use an exact configured workspace ID",json!({"workspace":id})))}
     pub fn workspace_root(&self,id:&str)->Result<Arc<Workspace>>{
         if !id.is_empty() {
             return self.workspace_root_exact(id);
@@ -44,19 +44,13 @@ impl Runtime{
         for workspace_id in self.workspaces.keys() {
             if self.project_exact(workspace_id, legacy_project).is_ok() {
                 if resolved.is_some() {
-                    anyhow::bail!(
-                        "PROJECT_AMBIGUOUS: legacy project ID {} exists in more than one workspace; use workspace + project",
-                        legacy_project
-                    );
+                    return Err(crate::error::coded_details("PROJECT_AMBIGUOUS",false,format!("legacy project ID {} exists in more than one workspace; use workspace + project",legacy_project),json!({"project":legacy_project})));
                 }
                 resolved = Some(workspace_id.clone());
             }
         }
 
-        let workspace_id = resolved.ok_or_else(|| anyhow::anyhow!(
-            "PROJECT_NOT_AUTHORIZED: no configured project matches legacy project ID {}",
-            legacy_project
-        ))?;
+        let workspace_id = resolved.ok_or_else(||crate::error::coded_details("PROJECT_NOT_AUTHORIZED",false,format!("no configured project matches legacy project ID {}",legacy_project),json!({"project":legacy_project})))?;
 
         self.project_exact(&workspace_id, legacy_project)
     }
@@ -75,6 +69,6 @@ impl Runtime{
     pub fn workspaces_summary(&self)->Value{json!({"workspaces":self.workspaces.values().map(|w|w.summary()).collect::<Vec<_>>()})}
     pub fn projects_for(&self,workspace:&str)->Result<Value>{Ok(self.workspace_root(workspace)?.projects_summary())}
     fn finish(&self,tool:&str,id:&str,result:Result<Value>)->Result<Value>{let outcome=if result.is_ok(){"succeeded"}else{"failed"};let audit=self.db.audit(tool,id,outcome,"");self.publish_dashboard("activity_changed",json!({"tool":tool,"target":id,"outcome":outcome}));match result{Ok(mut value)=>{if audit.is_err(){value["audit_warning"]=json!("Operation completed but final audit record failed; the started record is retained");}Ok(value)},Err(e)=>Err(e)}}
-    pub async fn sync_project<F>(self:&Arc<Self>,tool:&'static str,workspace:&str,project:&str,f:F)->Result<Value> where F:FnOnce(Arc<Runtime>,Arc<Project>)->Result<Value>+Send+'static{let p=self.project(workspace,project)?;let key=format!("{workspace}/{project}");let lock=p.lock.clone().try_lock_owned().context("PROJECT_BUSY: another file/Git/command operation is active")?;self.db.audit(tool,&key,"started","")?;self.publish_dashboard("activity_changed",json!({"tool":tool,"target":key,"outcome":"started"}));let rt=self.clone();let result=tokio::task::spawn_blocking(move||{let _lock=lock;f(rt,p)}).await.context("File worker panicked")?;self.finish(tool,&key,result)}
-    pub async fn asynchronous_project<F,Fut>(self:&Arc<Self>,tool:&'static str,workspace:&str,project:&str,f:F)->Result<Value> where F:FnOnce(Arc<Runtime>,Arc<Project>)->Fut+Send+'static,Fut:Future<Output=Result<Value>>+Send+'static{let p=self.project(workspace,project)?;let lock=p.lock.clone().try_lock_owned().context("PROJECT_BUSY: another file/Git/command operation is active")?;let key=format!("{workspace}/{project}");self.db.audit(tool,&key,"started","")?;self.publish_dashboard("activity_changed",json!({"tool":tool,"target":key,"outcome":"started"}));let this=self.clone();tokio::spawn(async move{let _lock=lock;let result=f(this.clone(),p).await;this.finish(tool,&key,result)}).await.context("Git worker panicked")?}
+    pub async fn sync_project<F>(self:&Arc<Self>,tool:&'static str,workspace:&str,project:&str,f:F)->Result<Value> where F:FnOnce(Arc<Runtime>,Arc<Project>)->Result<Value>+Send+'static{let p=self.project(workspace,project)?;let key=format!("{workspace}/{project}");let lock=p.lock.clone().try_lock_owned().map_err(|_|crate::error::coded_details("PROJECT_BUSY",true,"another file/Git/command operation is active",json!({"workspace":workspace,"project":project})))?;self.db.audit(tool,&key,"started","")?;self.publish_dashboard("activity_changed",json!({"tool":tool,"target":key,"outcome":"started"}));let rt=self.clone();let result=tokio::task::spawn_blocking(move||{let _lock=lock;f(rt,p)}).await.context("File worker panicked")?;self.finish(tool,&key,result)}
+    pub async fn asynchronous_project<F,Fut>(self:&Arc<Self>,tool:&'static str,workspace:&str,project:&str,f:F)->Result<Value> where F:FnOnce(Arc<Runtime>,Arc<Project>)->Fut+Send+'static,Fut:Future<Output=Result<Value>>+Send+'static{let p=self.project(workspace,project)?;let lock=p.lock.clone().try_lock_owned().map_err(|_|crate::error::coded_details("PROJECT_BUSY",true,"another file/Git/command operation is active",json!({"workspace":workspace,"project":project})))?;let key=format!("{workspace}/{project}");self.db.audit(tool,&key,"started","")?;self.publish_dashboard("activity_changed",json!({"tool":tool,"target":key,"outcome":"started"}));let this=self.clone();tokio::spawn(async move{let _lock=lock;let result=f(this.clone(),p).await;this.finish(tool,&key,result)}).await.context("Git worker panicked")?}
 }
