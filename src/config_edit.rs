@@ -32,6 +32,7 @@ pub struct ConfigMutation{
     pub revision:String,
     pub requires_restart:bool,
     pub project:Value,
+    #[serde(skip_serializing_if="Option::is_none")]pub reload_warning:Option<String>,
     #[serde(rename="_operation_diff")]
     pub operation_diff:String,
 }
@@ -132,7 +133,7 @@ pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>
     insert_project_text(&mut text,workspace_index,&project)?;
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
-    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(&request.workspace,&project,&root),operation_diff:config_diff(&original,&text)})
+    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(&request.workspace,&project,&root),reload_warning:None,operation_diff:config_diff(&original,&text)})
 }
 pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:UpdateProjectRequest)->Result<ConfigMutation>{
     validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit,request.allow_git_mutation)?;
@@ -164,7 +165,7 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
     cfg.validate()?;drop(workspace::load(&cfg,path)?);
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
-    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,&project,&root),operation_diff:config_diff(&original,&text)})
+    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,&project,&root),reload_warning:None,operation_diff:config_diff(&original,&text)})
 }
 
 #[cfg(test)]

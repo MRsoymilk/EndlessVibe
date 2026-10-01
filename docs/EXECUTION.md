@@ -71,6 +71,16 @@ allow_shell = false
 
 初次初始化的 `--unsafe-host-exec` 是等价的显式危险选项，默认不启用。服务禁止 root；不要为排错自行删除这个检查。需要面对不可信代码时使用独立用户/VM/经审计的容器执行器，而非本模式。
 
+## 配置热重载
+
+Dashboard 的 Project 新增与权限修改在写入并完整验证 `config.toml` 后，会立即重建 Workspace/Project 授权表并原子替换 Runtime 中的新操作视图，无需重启服务。手工编辑配置后也可以在 Config 页面执行 `Reload project config`，对应本地 `POST /api/config/reload`。
+
+热重载只覆盖 Workspace/Project 授权模型。`server`、`security`、`limits`、`execution`、`git` 等服务级配置在进程启动时固定；如果这些字段与启动时持久配置不同，reload 返回 `RELOAD_RESTART_REQUIRED`，旧授权表继续生效，必须重启 EndlessVibe。
+
+对于同一 Workspace/Project 且路径未变化的 Project，新授权对象复用旧 Project lock。因此 reload 前已经运行的文件、Git 或命令操作继续持有原来的 `Arc<Project>` 并完成，新操作使用新权限但仍与旧操作共享同一把锁，不会在同一目录并发。reload 时已被删除或改路径、但仍有操作在运行的旧 Project 会暂时保留在 retired 集合中供 shutdown 等待，不重新接受新操作。
+
+如果 Project 配置已成功写入但由于同时存在服务级配置变化而无法热重载，Dashboard 返回成功写入结果并设置 `requires_restart=true` 与 `reload_warning`；客户端不应重复提交同一配置写操作。
+
 ## 生命周期、持久化与资源
 
 提交动作不等待编译结束，而是保存 Job 后返回 job_id。同一 Project 运行任务期间，文件/Git 操作返回 `PROJECT_BUSY`；同一 Workspace 下其他 Project 使用独立锁，可以并行。任务查询本身不争抢 Project 锁；命令总并发仍受 `limits.max_jobs` 限制。

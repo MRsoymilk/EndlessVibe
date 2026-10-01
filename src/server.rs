@@ -30,6 +30,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/metrics",get(web::metrics))
         .route("/api/activity",get(web::activity))
         .route("/api/config",get(web::config))
+        .route("/api/config/reload",post(web::reload_config))
         .route("/api/projects/status",get(web::project_states))
         .route("/api/tasks",get(web::tasks))
         .route("/api/operations",get(web::operations))
