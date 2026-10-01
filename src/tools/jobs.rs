@@ -7,7 +7,7 @@ use std::{collections::HashMap,sync::{Arc,Mutex},time::{Duration,Instant}};
 use tokio::{io::{AsyncRead,AsyncReadExt},sync::{mpsc,Semaphore}};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,#[serde(default)]pub project:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,pub started:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String> }
+#[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,#[serde(default)]pub project:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,#[serde(default)]pub created_ms:u64,pub started:Option<u64>,#[serde(default)]pub started_ms:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String> }
 #[derive(Serialize,Deserialize)] struct JobRef{id:String,fingerprint:String}
 pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>> }
 struct Output{bytes:Vec<u8>,offset:u64,total:u64}
@@ -74,7 +74,7 @@ impl Jobs{
         let permit=self.slots.clone().try_acquire_owned().map_err(|_|crate::error::coded("COMMAND_SLOTS_BUSY",true,"All command slots are occupied; query existing jobs first"))?;
         let lock=w.lock.clone().try_lock_owned().map_err(|_|crate::error::coded_details("PROJECT_BUSY",true,"another operation is using this project",json!({"workspace":a.workspace.clone(),"project":a.project.clone()})))?;
         let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell)?;
-        let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,project:a.project,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:util::now(),started:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None,task_id:a.task_id,stage:a.stage};
+        let now=util::now();let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,project:a.project,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:now,created_ms:util::now_millis(),started:None,started_ms:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None,task_id:a.task_id,stage:a.stage};
         let audit_target=format!("{}/{}",record.workspace,record.project);self.db.audit(if shell{"run_shell"}else{"run_command"},&audit_target,"accepted",&record.id)?;
         self.db.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",params![record.id,serde_json::to_string(&record)?])?;store::put(tx,"job_requests",&key,&JobRef{id:record.id.clone(),fingerprint},util::now()+7*86400)?;Ok(())})?;
         if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&record.workspace,&record.project,task,stage,&record.id,"queued"){tracing::warn!(error=%error,job_id=%record.id,"Job accepted but task checkpoint persistence failed");}}
@@ -88,7 +88,7 @@ impl Jobs{
     async fn worker(&self,r:&mut JobRecord,mut cmd:tokio::process::Command,cancel:CancellationToken,timeout:u64)->Result<()>{
         if cancel.is_cancelled(){r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
         let mut child=cmd.spawn().context("Could not start job (inspect executable, namespace support and sandbox mounts)")?;let pid=child.id().context("Missing child ID")?;let mut group=process::GroupGuard::new(pid);
-        r.status="running".into();r.started=Some(util::now());self.save(r,None)?;if let (Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){tracing::warn!(error=%error,job_id=%r.id,"Job is running but task checkpoint update failed");}}
+        r.status="running".into();r.started=Some(util::now());r.started_ms=Some(util::now_millis());self.save(r,None)?;if let (Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){tracing::warn!(error=%error,job_id=%r.id,"Job is running but task checkpoint update failed");}}
         let (tx,mut rx)=mpsc::channel::<(&'static str,Vec<u8>)>(16);
         let out=tokio::spawn(pipe(child.stdout.take().context("stdout missing")?,"stdout",tx.clone()));let err=tokio::spawn(pipe(child.stderr.take().context("stderr missing")?,"stderr",tx.clone()));drop(tx);
         let mut output=Output{bytes:vec![],offset:0,total:0};let mut last_save=Instant::now();let deadline=tokio::time::sleep(Duration::from_secs(timeout));tokio::pin!(deadline);
