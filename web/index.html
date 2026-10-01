@@ -14,7 +14,7 @@
 <main class="shell">
 <header class="topbar">
 <div class="brand"><span class="logo" aria-hidden="true">EV</span><div><p class="eyebrow">ENDLESSVIBE</p><h1>Dashboard</h1></div></div>
-<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="activity" href="/activity">活动</a><a data-nav="config" href="/config">配置</a></nav>
+<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="config" href="/config">配置</a></nav>
 <div id="header-status" class="header-status pending"><span class="dot"></span><span id="header-status-text">检查中</span></div>
 </header>
 
@@ -77,10 +77,17 @@
 <article class="chart-card"><div class="chart-header"><div><h3>Active Jobs</h3><p>运行中任务数量</p></div><span>60 min</span></div><div id="activity-jobs-chart" class="chart-host"></div></article>
 <article class="chart-card wide"><div class="chart-header"><div><h3>Network Traffic</h3><p>公网 listener RX / TX</p></div><span>60 min</span></div><div id="activity-traffic-chart" class="chart-host"></div></article>
 </div>
-<section class="panel operation-panel"><div class="panel-heading"><div><p class="eyebrow">OPERATION LOG</p><h2>操作日志</h2></div><span id="operation-updated">等待数据</span></div><p class="operation-help">点击任意操作展开参数、结果、diff、错误和关联 Job Output。敏感字段会自动脱敏。</p><div id="operation-list" class="operation-list empty-state">暂无操作日志</div></section>
 <div class="two-column">
 <section class="panel"><div class="panel-heading"><div><p class="eyebrow">AUDIT</p><h2>最近审计事件</h2></div></div><div id="audit-list" class="activity-list empty-state">暂无审计事件</div></section>
 <section class="panel"><div class="panel-heading"><div><p class="eyebrow">JOBS</p><h2>最近任务</h2></div></div><div id="job-list" class="activity-list empty-state">暂无任务</div></section>
+</div>
+</section>
+
+<section class="page" data-page="operations">
+<div class="operations-page-head"><div><p class="eyebrow">OPERATION TIMELINE</p><h2>操作日志</h2><p>按时间顺序展示每次操作。主列固定为 Timeline / Operation / Input / Diff，Output 与 Error 仅在展开详情中显示。</p></div><div class="operations-actions"><span id="operation-updated">等待数据</span><button type="button" id="expand-all-operations">全部展开</button><button type="button" id="collapse-all-operations">全部折叠</button></div></div>
+<div class="operations-log-shell">
+<div class="operation-grid-head"><span>Timeline</span><span>Operation</span><span>Input</span><span>Diff</span></div>
+<div id="operation-list" class="operation-stream empty-state">暂无操作日志</div>
 </div>
 </section>
 
