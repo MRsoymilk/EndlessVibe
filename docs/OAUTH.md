@@ -81,7 +81,7 @@ Cloudflare 官方说明：1010 是基于浏览器签名的拒绝，Browser Integ
 2. 将该规则的 **Browser Integrity Check（浏览器完整性检查）设为关闭**。也可使用自定义规则的 Skip 动作，仅跳过 Browser Integrity Check。保留 EndlessVibe 自身 OAuth 验证。
 3. 再用非浏览器客户端请求发现文档，确认返回 JSON `200`，不再返回 `403 / 1010`。匿名 `GET /mcp` 应返回应用自身的 `401` 和 `WWW-Authenticate`；静态工具发现和工具级认证错误按上文处理。
 4. 在 ChatGPT 应用/连接管理页刷新元数据并重新连接。如果仍没有浏览器入口，移除失败的连接后重新创建，URL 使用完整 `https://endlessvibe.soymilk.xin/mcp`，认证选择 OAuth 和自动注册/DCR，Client ID/Secret 留空。
-5. 完成自有域名上的管理员密钥授权后，新建对话测试 `hello` 和 `list_projects`。
+5. 完成自有域名上的管理员密钥授权后，新建对话依次测试 `hello`、`list_workspaces` 和 `list_projects(workspace)`。
 
 若仍失败，记录创建/重连时的服务端 HTTP 路径与状态码，并在 Cloudflare 安全事件中检查对应请求。被 Cloudflare 拦截的请求不会到达 Rust 服务。不要发送 URL 查询参数、Cookie、授权码或令牌。
 
