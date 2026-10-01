@@ -6,9 +6,9 @@
 <meta name="color-scheme" content="dark">
 <title>EndlessVibe · Dashboard</title>
 <link rel="stylesheet" href="/vendor/uPlot/uPlot.min.css">
-<link rel="stylesheet" href="/assets/app.css?v=git-push-3">
+<link rel="stylesheet" href="/assets/app.css?v=tool-tree-4">
 <script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
-<script src="/assets/app.js?v=git-push-3" defer></script>
+<script src="/assets/app.js?v=tool-tree-4" defer></script>
 </head>
 <body>
 <main class="shell">
@@ -101,7 +101,7 @@
 <section class="config-card"><div class="config-heading"><h3>Git</h3><span>IDENTITY</span></div><dl id="config-git" class="config-list"></dl></section>
 <section class="config-card full"><div class="config-heading"><h3>添加 Project</h3><span>WRITE CONFIG</span></div><p class="config-note">写入 config.toml；目标目录必须已存在，并且严格位于所选 Workspace 根目录下。保存后需重启 EndlessVibe 才会加入 MCP 运行时。</p><form id="add-project-form" class="config-form"><label>Workspace<select id="add-project-workspace" required></select></label><label>Project ID<input id="add-project-id" type="text" maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="留空时使用目录名"></label><label class="path-field">Absolute Path<input id="add-project-path" type="text" required placeholder="/home/vv/project/example"></label><div class="permission-editor"><label><input id="add-project-write" type="checkbox" checked> write</label><label><input id="add-project-exec" type="checkbox" checked> exec</label><label><input id="add-project-commit" type="checkbox" checked> commit</label><label><input id="add-project-git-mutation" type="checkbox"> git rw</label><label><input id="add-project-git-push" type="checkbox"> push</label></div><button type="submit" id="add-project-save">保存并添加</button><div id="config-write-status" class="write-status" role="status" aria-live="polite"></div></form></section>
 <section class="config-card full"><div class="config-heading"><h3>Workspace → Project</h3><span>ACCESS</span></div><div id="workspace-config" class="workspace-config"></div></section>
-<section class="config-card full"><div class="config-heading"><h3>MCP 工具</h3><span id="mcp-tool-count">—</span></div><p class="config-note">当前服务向 ChatGPT 暴露的工具如下。</p><div id="mcp-tools" class="tool-list"></div></section>
+<section class="config-card full"><div class="config-heading"><h3>MCP 工具</h3><span id="mcp-tool-count">—</span></div><p class="config-note">当前服务向 ChatGPT 暴露的工具如下。</p><div id="mcp-tools" class="tool-tree"></div></section>
 </div>
 </section>
 
