@@ -10,7 +10,16 @@
 ./target/release/endlessvibe --check-sandbox
 ```
 
-成功输出 `bubblewrap sandbox probe: ok`。该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目程序。
+该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目代码。它还会在 sandbox 内使用实际的 `execution.path` 逐项解析 `execution.allowed_programs`。成功时会打印每个程序的 sandbox 路径，例如：
+
+```text
+sandbox program: cargo -> /opt/rust/bin/cargo
+sandbox program: rustc -> /opt/rust/bin/rustc
+sandbox program: git -> /usr/bin/git
+bubblewrap sandbox probe: ok (9 configured programs visible)
+```
+
+只要配置在 `allowed_programs` 中的任意程序不可见，`--check-sandbox` 就失败并明确列出缺失项。这样可在服务承担真实 Job 前发现“宿主机能运行 cargo，但 bubblewrap PATH 看不到 cargo”这类配置错误。
 
 沙箱中 `/workspace` 是选中项目，`/cache` 是该项目独立的私有构建缓存目录。`HOME=/tmp/home`，`CARGO_HOME=/cache/cargo`，默认 PATH `/usr/local/bin:/usr/bin:/bin`。系统可执行/库目录只读。项目源文件可写；`.git` 默认再覆盖为只读。只有 Project 显式设置 `allow_git_mutation=true` 时，项目自身 `.git` 才保持可写，从而允许 `git switch`、`git merge`、`git branch`、`git add`、`git commit` 等本地仓库变更。
 
@@ -39,13 +48,13 @@ path = "/opt/rust/bin:/usr/local/bin:/usr/bin:/bin"
 readonly_mounts = [{ source = "/home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu", target = "/opt/rust" }]
 ```
 
-这样 sandbox 使用 `/opt/rust/bin/cargo` 和 `/opt/rust/bin/rustc`，无需暴露 `~/.cargo` 或整个 HOME。修改配置后重启 EndlessVibe，再先执行 `--check-sandbox`，随后用 `run_command` 执行 `cargo --version` 验证工具链可见性。
+这样 sandbox 使用 `/opt/rust/bin/cargo` 和 `/opt/rust/bin/rustc`，无需暴露 `~/.cargo` 或整个 HOME。修改配置后重启 EndlessVibe，先执行 `--check-sandbox`；它现在会直接验证 cargo/rustc 是否可见。通过后再运行项目级 `cargo fmt --check`、`cargo check`、`cargo test --all-targets` 和 `cargo clippy --all-targets` 建立完整验证闭环。
 
 将这些字段合并到已有 `[execution]`，不要重复声明整个表；示例路径必须替换为真实目录。允许的目标路径限制在 `/opt/...` 或 `/cache-readonly/...`，不得通过 mount 暴露服务 config/state。额外 SDK 只读挂载扩大可见范围，需要自行检查其中是否有密钥。程序查找与共享库依赖仍需在目标环境验证。
 
 ## Shell 与白名单
 
-`run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
+`run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
 
 白名单并非安全边界：Python、Cargo build script、Makefile、编译器插件等都能执行其他程序。安全限制主要来自隔离环境与管理员授予的 Project 权限。工具描述/确认提示不是 OS 权限控制。
 
