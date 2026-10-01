@@ -122,7 +122,7 @@ async fn main()->Result<()>{
         }
     });
 
-    let project_count=rt.workspaces.values().map(|w|w.projects.len()).sum::<usize>();tracing::info!(version=env!("CARGO_PKG_VERSION"),listen=%rt.config.server.bind,workspaces=rt.workspaces.len(),projects=project_count,backend=%rt.config.execution.backend,"EndlessVibe started; private MCP endpoints require OAuth");
+    let(workspace_count,project_count)=rt.workspace_project_counts();tracing::info!(version=env!("CARGO_PKG_VERSION"),listen=%rt.config.server.bind,workspaces=workspace_count,projects=project_count,backend=%rt.config.execution.backend,"EndlessVibe started; private MCP endpoints require OAuth");
     if rt.config.execution.backend=="host"{tracing::warn!("UNSANDBOXED host execution was explicitly enabled; tools have the service user's permissions");}
     if rt.config.execution.backend=="bubblewrap"&&!rt.config.execution.bubblewrap.exists(){tracing::warn!("bubblewrap is not installed; file/Git tools work, command jobs fail closed until it is installed");}
     eprintln!("Dashboard: http://127.0.0.1:20001/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.public_url);
