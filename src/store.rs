@@ -3,6 +3,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{path::Path, sync::Mutex, time::Duration};
 
+mod migrations;
+
 pub struct Store { connection: Mutex<Connection> }
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -13,16 +15,10 @@ impl Store {
             let m=f.metadata()?;
             if !m.is_file() || m.nlink()!=1 || m.uid()!=unsafe{libc::geteuid()} || m.mode()&0o077!=0 { anyhow::bail!("Database must be an owner-only regular file"); }
         }
-        let c = Connection::open(path)?;
+        let mut c = Connection::open(path)?;
         c.busy_timeout(Duration::from_secs(5))?;
-        let version:i64=c.query_row("PRAGMA user_version",[],|r|r.get(0))?; if version>1 { anyhow::bail!("Database belongs to a newer schema; refusing to downgrade"); }
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
-            CREATE TABLE IF NOT EXISTS kv(namespace TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(namespace,key));
-            CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL, output BLOB NOT NULL DEFAULT X'', output_offset INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, tool TEXT NOT NULL, workspace TEXT NOT NULL, outcome TEXT NOT NULL, note TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS traffic(bucket INTEGER PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0, rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS operation_log(seq INTEGER PRIMARY KEY AUTOINCREMENT, started INTEGER NOT NULL, finished INTEGER, tool TEXT NOT NULL, workspace TEXT NOT NULL, project TEXT NOT NULL, status TEXT NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0, input_json TEXT NOT NULL, output_json TEXT NOT NULL DEFAULT '{}', diff TEXT NOT NULL DEFAULT '', added_lines INTEGER NOT NULL DEFAULT 0, removed_lines INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');
-            PRAGMA user_version=1;")?;
+        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+        migrations::migrate(&mut c)?;
         c.execute("UPDATE operation_log SET status='interrupted',finished=?1,error=CASE WHEN error='' THEN 'Service restarted before operation completed' ELSE error END WHERE status='running'",[crate::util::now()])?;
         Ok(Self { connection: Mutex::new(c) })
     }
@@ -102,6 +98,7 @@ pub fn count(tx: &Transaction<'_>, namespace: &str) -> Result<usize> { Ok(tx.que
 #[cfg(test)] mod tests {
     use super::*;
     #[test] fn private_storage_persists_and_rolls_back() { let d = tempfile::tempdir().unwrap(); let s = Store::open(&d.path().join("db")).unwrap(); s.put("x", "key", &42, 0).unwrap(); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); let r: Result<()> = s.transaction(|tx| { put(tx,"x","key",&43,0)?; anyhow::bail!("abort") }); assert!(r.is_err()); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); }
+    #[test] fn schema_v1_upgrades_to_v2_without_losing_data(){let d=tempfile::tempdir().unwrap();let path=d.path().join("db");{let s=Store::open(&path).unwrap();s.put("x","keep",&42,0).unwrap();s.transaction(|tx|{tx.execute_batch("DROP INDEX IF EXISTS idx_operation_status_started; PRAGMA user_version=1;")?;Ok(())}).unwrap();}let s=Store::open(&path).unwrap();assert_eq!(s.get::<i32>("x","keep").unwrap(),Some(42));let(version,index):(i64,i64)=s.transaction(|tx|Ok((tx.query_row("PRAGMA user_version",[],|r|r.get(0))?,tx.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_operation_status_started'",[],|r|r.get(0))?))).unwrap();assert_eq!(version,2);assert_eq!(index,1);}
     #[test] fn dashboard_metrics_aggregate_audit_jobs_and_traffic(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();s.record_traffic(1,120,340).unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["totals"]["http_requests"],1);assert_eq!(value["totals"]["rx_bytes"],120);assert_eq!(value["totals"]["tx_bytes"],340);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
     #[test] fn operation_log_redacts_and_tracks_diff(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();let id=s.operation_start("apply_patch","root","demo",&serde_json::json!({"authorization":"Bearer abc","path":"src/main.rs"})).unwrap();s.operation_finish(id,"succeeded",12,Some(&serde_json::json!({"changed":true})),"--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n","").unwrap();let detail=s.operation(id).unwrap();assert_eq!(detail["added_lines"],1);assert_eq!(detail["removed_lines"],1);assert_eq!(detail["input"]["authorization"],"[REDACTED]");}
 }
