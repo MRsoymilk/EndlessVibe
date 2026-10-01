@@ -42,6 +42,29 @@ fn pre_exec_nproc_limit(backend:&str,max_processes:u64)->Option<u64>{
     (backend=="host").then_some(max_processes)
 }
 
+fn bubblewrap_base_command(config:&Config)->Result<Command>{
+    if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
+    let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
+    c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
+    if config.execution.allow_network{c.arg("--share-net");}
+    for p in ["/usr","/bin","/sbin","/lib","/lib64"]{let p=Path::new(p);if p.exists(){c.arg("--ro-bind").arg(p).arg(p);}}
+    c.args(["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/etc"]);
+    for p in ["/etc/ld.so.cache","/etc/ld.so.conf","/etc/ld.so.conf.d","/etc/localtime"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}
+    if config.execution.allow_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
+    for mount in &config.execution.readonly_mounts{c.arg("--ro-bind").arg(&mount.source).arg(&mount.target);}
+    Ok(c)
+}
+
+pub async fn probe_bubblewrap(config:&Config)->Result<()>{
+    if config.execution.backend!="bubblewrap"{bail!("Configured execution backend is not bubblewrap");}
+    let executable=[Path::new("/usr/bin/true"),Path::new("/bin/true")].into_iter().find(|p|p.is_file()).context("Cannot find /usr/bin/true or /bin/true for sandbox probe")?;
+    let mut c=bubblewrap_base_command(config)?;
+    c.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--"]).arg(executable);
+    let result=capture(c,None,16384,5).await?;
+    if result.code!=Some(0){bail!("bubblewrap sandbox probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}
+    Ok(())
+}
+
 pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
     w.exec_allowed()?;
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
@@ -58,16 +81,8 @@ pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String]
             if let Some(home)=std::env::var_os("HOME"){c.env("HOME",home);}c.args(args);c
         }
         "bubblewrap"=>{
-            if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
             let cache=config.security.data_dir.join("exec-cache").join(&w.config.id);crate::util::private_dir(&cache)?;
-            let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
-            c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
-            if config.execution.allow_network{c.arg("--share-net");}
-            for p in ["/usr","/bin","/sbin","/lib","/lib64"]{let p=Path::new(p);if p.exists(){c.arg("--ro-bind").arg(p).arg(p);}}
-            c.args(["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/etc"]);
-            for p in ["/etc/ld.so.cache","/etc/ld.so.conf","/etc/ld.so.conf.d","/etc/localtime"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}
-            if config.execution.allow_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
-            for mount in &config.execution.readonly_mounts{c.arg("--ro-bind").arg(&mount.source).arg(&mount.target);}
+            let mut c=bubblewrap_base_command(config)?;
             c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
             // Builds may inspect Git state, but must use the reviewed git_commit tool for writes.
             let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}
