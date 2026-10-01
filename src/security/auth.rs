@@ -10,10 +10,15 @@ use rmcp::model::{ClientJsonRpcMessage,ClientNotification,ClientRequest,JsonRpcR
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::{BTreeSet, HashMap}, sync::{Arc, Mutex}, time::{Duration, Instant}};
+use std::{collections::HashMap, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use url::Url;
 
-pub const SCOPES: &[&str] = &["projects:read", "files:read", "files:write", "commands:execute", "git:write"];
+mod policy;
+mod scopes;
+pub use policy::valid_redirect;
+pub use scopes::required_scopes;
+use policy::pkce_verifier;
+use scopes::{parse as scopes,SCOPES};
 pub struct Auth { pub db: Arc<Store>, pub config: Arc<Config>, owner_hash: String, rate: Mutex<HashMap<&'static str, (Instant, u32)>> }
 #[derive(Clone, Debug)] pub struct Principal { pub client_id: String, pub scopes: Vec<String> }
 #[derive(Clone, Serialize, Deserialize)] struct Client { id: String, name: String, redirects: Vec<String>, method: String, secret_hash: Option<String> }
@@ -62,21 +67,6 @@ impl Auth {
     pub fn revoke_all(&self) -> Result<()> { self.db.transaction(|tx| { tx.execute("DELETE FROM kv WHERE namespace IN ('tokens','codes','grants')",[])?; Ok(()) }) }
 }
 
-pub fn valid_redirect(config: &Config, value: &str) -> bool {
-    let Ok(url) = Url::parse(value) else { return false; };
-    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() { return false; }
-    if config.security.extra_redirect_uris.iter().any(|u|u == value) {
-        return url.scheme() == "https" || (config.security.allow_http_loopback && url.scheme() == "http" && matches!(url.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"|"::1")));
-    }
-    if url.scheme() != "https" || url.host_str() != Some("chatgpt.com") || url.port_or_known_default() != Some(443) || url.query().is_some() { return false; }
-    if url.path() == "/connector_platform_oauth_redirect" { return true; }
-    url.path().strip_prefix("/connector/oauth/").is_some_and(|id| !id.is_empty() && id.len() <= 160 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-}
-fn scopes(value: Option<&str>) -> AResult<Vec<String>> {
-    let values: BTreeSet<String> = match value { Some(s) => s.split_ascii_whitespace().map(str::to_owned).collect(), None => SCOPES.iter().map(|s|(*s).into()).collect() };
-    if values.is_empty() || values.iter().any(|v| !SCOPES.contains(&v.as_str())) { return Err(AuthError::bad("invalid_scope","Unknown or empty scope")); } Ok(values.into_iter().collect())
-}
-fn pkce_verifier(value: &str) -> bool { (43..=128).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)) }
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> { headers.get(header::COOKIE)?.to_str().ok()?.split(';').find_map(|p|p.trim().split_once('=').filter(|(k,_)|*k == name).map(|(_,v)|v.to_owned())) }
 fn check_browser_origin(headers: &HeaderMap, public_url: &str) -> AResult<()> {
     let origin=Url::parse(public_url).map_err(|_|AuthError::bad("server_error","Invalid configured public origin"))?.origin().ascii_serialization();
@@ -208,16 +198,6 @@ pub async fn revoke(State(rt): State<Arc<Runtime>>, headers: HeaderMap, Form(p):
     Ok(StatusCode::OK)
 }
 
-pub fn required_scopes(tool: &str) -> &'static [&'static str] {
-    match tool {
-        "list_workspaces" | "list_projects" | "inspect_project" | "get_task_checkpoint" | "list_task_checkpoints" => &["projects:read"],
-        "list_directory" | "read_file" | "search_code" | "git_status" | "git_diff" | "git_log" => &["files:read"],
-        "write_file" | "apply_patch" | "create_directory" => &["files:write"],
-        "run_command" | "run_shell" => &["commands:execute","files:write"],
-        "get_job" | "get_job_output" | "cancel_job" | "list_jobs" => &["commands:execute"],
-        "git_commit" => &["git:write","files:write"], "git_push" => &["git:write"], "hello" | "get_service_status" => &[], _ => SCOPES,
-    }
-}
 fn unauthorized(auth:&Auth,has_credentials:bool)->Response{
     let mut response=(StatusCode::UNAUTHORIZED,Json(json!({"error":"unauthorized","message":"OAuth authorization is required"}))).into_response();
     response.headers_mut().insert(header::WWW_AUTHENTICATE,auth.challenge(has_credentials.then_some("invalid_token"),SCOPES));response
@@ -266,12 +246,4 @@ pub async fn protect(State(rt): State<Arc<Runtime>>, mut request: Request, next:
     if let Some(principal)=principal{request.extensions_mut().insert(principal);}
     let response=next.run(request).await;
     if method=="tools/list"{crate::server::tool_descriptors(response,rt.body_limit()).await}else{response}
-}
-
-#[cfg(test)] mod tests {
-    use super::*;
-    #[test] fn callbacks_are_not_open_redirects() { let c=Config::default(); assert!(valid_redirect(&c,"https://chatgpt.com/connector_platform_oauth_redirect")); assert!(valid_redirect(&c,"https://chatgpt.com/connector/oauth/plugin_123")); for u in ["https://evil.test/connector_platform_oauth_redirect","https://chatgpt.com.evil.test/connector/oauth/x","https://chatgpt.com@evil.test/x","https://chatgpt.com/connector/oauth/../../evil","http://chatgpt.com/connector_platform_oauth_redirect","https://chatgpt.com/connector/oauth/x?next=https://evil.test"] { assert!(!valid_redirect(&c,u),"{u}"); } }
-    #[test] fn scope_escalation_is_not_possible_in_parser() { assert!(scopes(Some("files:read root")).is_err()); assert_eq!(scopes(Some("files:read files:read")).unwrap(),vec!["files:read"]); }
-    #[test] fn pkce_requires_strong_verifier() { assert!(pkce_verifier(&"x".repeat(43))); assert!(!pkce_verifier("short")); assert!(!pkce_verifier(&" ".repeat(43))); }
-    #[test] fn command_scopes_include_writes() { assert!(required_scopes("run_command").contains(&"files:write")); assert!(required_scopes("git_commit").contains(&"git:write")); assert_eq!(required_scopes("git_push"),&["git:write"]); }
 }
