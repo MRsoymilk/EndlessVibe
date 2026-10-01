@@ -43,6 +43,19 @@ impl Store {
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
+    pub fn dashboard_metrics(&self, window_seconds:u64, bucket_seconds:u64) -> Result<serde_json::Value> {
+        let bucket_seconds=bucket_seconds.clamp(10,3600);let buckets=((window_seconds.max(bucket_seconds)+bucket_seconds-1)/bucket_seconds).clamp(1,1440) as usize;
+        let now=crate::util::now();let end=(now/bucket_seconds)*bucket_seconds;let start=end.saturating_sub(bucket_seconds.saturating_mul((buckets.saturating_sub(1)) as u64));
+        self.transaction(|tx| {
+            let mut requests=vec![0u64;buckets];let mut successes=vec![0u64;buckets];let mut failures=vec![0u64;buckets];
+            let mut statement=tx.prepare("SELECT time,outcome FROM audit WHERE time>=?1 ORDER BY time")?;
+            let rows=statement.query_map([start],|r|Ok((r.get::<_,u64>(0)?,r.get::<_,String>(1)?)))?;
+            for row in rows{let(time,outcome)=row?;let index=((time.saturating_sub(start))/bucket_seconds) as usize;if index>=buckets{continue;}match outcome.as_str(){"started"|"accepted"=>requests[index]+=1,"succeeded"=>successes[index]+=1,"failed"|"timed_out"|"cancelled"|"interrupted"=>failures[index]+=1,_=>{}}}
+            let mut jobs=Vec::new();let mut q=tx.prepare("SELECT data FROM jobs")?;for row in q.query_map([],|r|r.get::<_,String>(0))?{let value:serde_json::Value=serde_json::from_str(&row?)?;let begin=value.get("started").and_then(|v|v.as_u64()).or_else(||value.get("created").and_then(|v|v.as_u64()));let finish=value.get("finished").and_then(|v|v.as_u64());if let Some(begin)=begin{jobs.push((begin,finish));}}
+            let mut points=Vec::with_capacity(buckets);for i in 0..buckets{let time=start+bucket_seconds*i as u64;let sample_time=(time+bucket_seconds.saturating_sub(1)).min(now);let active_jobs=jobs.iter().filter(|(begin,finish)|*begin<=sample_time&&finish.map_or(true,|done|done>sample_time)).count();points.push(serde_json::json!({"time":time,"requests":requests[i],"successes":successes[i],"failures":failures[i],"active_jobs":active_jobs}));}
+            Ok(serde_json::json!({"window_seconds":bucket_seconds*buckets as u64,"bucket_seconds":bucket_seconds,"generated_at":now,"totals":{"requests":requests.iter().sum::<u64>(),"successes":successes.iter().sum::<u64>(),"failures":failures.iter().sum::<u64>()},"points":points}))
+        })
+    }
     pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { tx.execute("DELETE FROM kv WHERE expires>0 AND expires<?1", [crate::util::now()])?; Ok(()) }) }
 }
 pub fn get<T: DeserializeOwned>(tx: &Transaction<'_>, namespace: &str, key: &str) -> Result<Option<T>> {
@@ -58,4 +71,5 @@ pub fn count(tx: &Transaction<'_>, namespace: &str) -> Result<usize> { Ok(tx.que
 #[cfg(test)] mod tests {
     use super::*;
     #[test] fn private_storage_persists_and_rolls_back() { let d = tempfile::tempdir().unwrap(); let s = Store::open(&d.path().join("db")).unwrap(); s.put("x", "key", &42, 0).unwrap(); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); let r: Result<()> = s.transaction(|tx| { put(tx,"x","key",&43,0)?; anyhow::bail!("abort") }); assert!(r.is_err()); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); }
+    #[test] fn dashboard_metrics_aggregate_audit_and_active_jobs(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
 }
