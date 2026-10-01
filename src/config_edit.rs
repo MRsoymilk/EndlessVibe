@@ -14,6 +14,7 @@ pub struct AddProjectRequest{
     #[serde(default="yes")]pub allow_write:bool,
     #[serde(default="yes")]pub allow_exec:bool,
     #[serde(default="yes")]pub allow_git_commit:bool,
+    #[serde(default)]pub allow_git_mutation:bool,
 }
 #[derive(Clone,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +23,7 @@ pub struct UpdateProjectRequest{
     pub allow_write:bool,
     pub allow_exec:bool,
     pub allow_git_commit:bool,
+    #[serde(default)]pub allow_git_mutation:bool,
 }
 #[derive(Clone,Debug,Serialize)]
 pub struct ConfigMutation{
@@ -97,15 +99,16 @@ fn replace_bool(block:&mut String,key:&str,value:bool)->Result<()>{
     block.replace_range(replacement.0..replacement.1,&replacement.2);
     Ok(())
 }
-fn validate_project_permissions(write:bool,exec:bool,commit:bool)->Result<()>{
+fn validate_project_permissions(write:bool,exec:bool,commit:bool,mutation:bool)->Result<()>{
     if (exec||commit)&&!write{bail!("Project execution/commit require allow_write=true");}
+    if mutation&&(!write||!exec){bail!("allow_git_mutation requires allow_write=true and allow_exec=true");}
     Ok(())
 }
 fn project_value(workspace:&str,project:&ProjectConfig,root:&Path)->Value{
-    json!({"workspace":workspace,"id":project.id,"path":root.join(&project.path),"allow_write":project.allow_write,"allow_exec":project.allow_exec,"allow_git_commit":project.allow_git_commit,"allow_git_push":false})
+    json!({"workspace":workspace,"id":project.id,"path":root.join(&project.path),"allow_write":project.allow_write,"allow_exec":project.allow_exec,"allow_git_commit":project.allow_git_commit,"allow_git_mutation":project.allow_git_mutation,"allow_git_push":false})
 }
 pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>{
-    validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit)?;
+    validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit,request.allow_git_mutation)?;
     let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
     if !config::valid_id(&request.workspace){bail!("Invalid workspace ID");}
     let workspace_index=cfg.workspaces.iter().position(|w|w.id==request.workspace).with_context(||format!("Workspace {} is not configured",request.workspace))?;
@@ -121,7 +124,7 @@ pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>
         let other=root.join(&existing.path).canonicalize().with_context(||format!("Cannot resolve configured project {}/{}",request.workspace,existing.id))?;
         if absolute==other||absolute.starts_with(&other)||other.starts_with(&absolute){bail!("Project paths inside one workspace must not overlap");}
     }
-    let project=ProjectConfig{id:id.into(),path:absolute.strip_prefix(&root)?.to_owned(),allow_write:request.allow_write,allow_exec:request.allow_exec,allow_git_commit:request.allow_git_commit};
+    let project=ProjectConfig{id:id.into(),path:absolute.strip_prefix(&root)?.to_owned(),allow_write:request.allow_write,allow_exec:request.allow_exec,allow_git_commit:request.allow_git_commit,allow_git_mutation:request.allow_git_mutation};
     cfg.workspaces[workspace_index].projects.push(project.clone());cfg.validate()?;drop(workspace::load(&cfg,path)?);
     insert_project_text(&mut text,workspace_index,&project)?;
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
@@ -129,14 +132,14 @@ pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>
     Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(&request.workspace,&project,&root),operation_diff:config_diff(&original,&text)})
 }
 pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:UpdateProjectRequest)->Result<ConfigMutation>{
-    validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit)?;
+    validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit,request.allow_git_mutation)?;
     let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
     let workspace_index=cfg.workspaces.iter().position(|w|w.id==workspace_id).with_context(||format!("Workspace {workspace_id} is not configured"))?;
     let project_index=cfg.workspaces[workspace_index].projects.iter().position(|p|p.id==project_id).with_context(||format!("Project {workspace_id}/{project_id} is not configured"))?;
     let root=cfg.workspaces[workspace_index].path.canonicalize()?;
     {
         let project=&mut cfg.workspaces[workspace_index].projects[project_index];
-        project.allow_write=request.allow_write;project.allow_exec=request.allow_exec;project.allow_git_commit=request.allow_git_commit;
+        project.allow_write=request.allow_write;project.allow_exec=request.allow_exec;project.allow_git_commit=request.allow_git_commit;project.allow_git_mutation=request.allow_git_mutation;
     }
     cfg.validate()?;drop(workspace::load(&cfg,path)?);
     let (start,end)=project_block_range(&text,workspace_index,project_index)?;
@@ -144,6 +147,7 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
     replace_bool(&mut block,"allow_write",request.allow_write)?;
     replace_bool(&mut block,"allow_exec",request.allow_exec)?;
     replace_bool(&mut block,"allow_git_commit",request.allow_git_commit)?;
+    replace_bool(&mut block,"allow_git_mutation",request.allow_git_mutation)?;
     text.replace_range(start..end,&block);
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
@@ -155,5 +159,5 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
 mod tests{
     use super::*;
     fn config(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![crate::config::WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None}];c}
-    #[test]fn add_and_update_preserve_comments(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let child=root.join("demo");let state=t.path().join("state");std::fs::create_dir_all(&child).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let mut text=toml::to_string_pretty(&config(&root,&state)).unwrap();text.push_str("\n# keep-comment\n");std::fs::write(&path,&text).unwrap();let rev=revision(&path).unwrap();let added=add_project(&path,AddProjectRequest{expected_revision:rev,workspace:"root".into(),project:None,path:child.display().to_string(),allow_write:true,allow_exec:true,allow_git_commit:true}).unwrap();let updated=update_project(&path,"root","demo",UpdateProjectRequest{expected_revision:added.revision,allow_write:true,allow_exec:false,allow_git_commit:false}).unwrap();assert!(updated.requires_restart);let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-comment"));let loaded=Config::load_file(&path).unwrap();assert!(!loaded.workspaces[0].projects[0].allow_exec);}
+    #[test]fn add_and_update_preserve_comments(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let child=root.join("demo");let state=t.path().join("state");std::fs::create_dir_all(&child).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let mut text=toml::to_string_pretty(&config(&root,&state)).unwrap();text.push_str("\n# keep-comment\n");std::fs::write(&path,&text).unwrap();let rev=revision(&path).unwrap();let added=add_project(&path,AddProjectRequest{expected_revision:rev,workspace:"root".into(),project:None,path:child.display().to_string(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false}).unwrap();let updated=update_project(&path,"root","demo",UpdateProjectRequest{expected_revision:added.revision,allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:false}).unwrap();assert!(updated.requires_restart);let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-comment"));let loaded=Config::load_file(&path).unwrap();assert!(!loaded.workspaces[0].projects[0].allow_exec);}
 }

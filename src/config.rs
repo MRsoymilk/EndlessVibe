@@ -34,7 +34,7 @@ impl Default for Git { fn default() -> Self { Self { executable: "/usr/bin/git".
 pub struct WorkspaceConfig { pub id: String, pub path: PathBuf, #[serde(default, skip_serializing_if = "Vec::is_empty")] pub projects: Vec<ProjectConfig>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_write: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_exec: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_git_commit: Option<bool> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProjectConfig { pub id: String, pub path: PathBuf, #[serde(default)] pub allow_write: bool, #[serde(default)] pub allow_exec: bool, #[serde(default)] pub allow_git_commit: bool }
+pub struct ProjectConfig { pub id: String, pub path: PathBuf, #[serde(default)] pub allow_write: bool, #[serde(default)] pub allow_exec: bool, #[serde(default)] pub allow_git_commit: bool, #[serde(default)] pub allow_git_mutation: bool }
 
 pub fn default_config_path() -> PathBuf { env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config")).join("endlessvibe/config.toml") }
 pub fn default_state_dir() -> PathBuf { env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("endlessvibe") }
@@ -79,6 +79,7 @@ impl Config {
             for p in &w.projects {
                 if !valid_id(&p.id)||!projects.insert(p.id.clone())||p.path.is_absolute()||p.path.components().any(|c|matches!(c,std::path::Component::ParentDir|std::path::Component::RootDir|std::path::Component::Prefix(_))){bail!("Workspace {} projects need unique simple IDs and relative paths without '..'",w.id);}
                 if (p.allow_exec||p.allow_git_commit)&&!p.allow_write{bail!("Project {}/{}: execution/commit also require allow_write",w.id,p.id);}
+                if p.allow_git_mutation&&(!p.allow_write||!p.allow_exec){bail!("Project {}/{}: allow_git_mutation requires allow_write=true and allow_exec=true",w.id,p.id);}
             }
         }
         Ok(())
@@ -91,5 +92,6 @@ impl Config {
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }
     #[test] fn ids_are_bounded() { assert!(valid_id("BAfter")); assert!(!valid_id("../BAfter")); assert!(!valid_id("")); }
-    #[test] fn projects_are_relative_to_workspace_roots(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true}],allow_write:None,allow_exec:None,allow_git_commit:None}];assert!(c.validate().is_ok());c.workspaces[0].projects[0].path="/tmp/root/app".into();assert!(c.validate().is_err());}
+    #[test] fn projects_are_relative_to_workspace_roots(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false}],allow_write:None,allow_exec:None,allow_git_commit:None}];assert!(c.validate().is_ok());c.workspaces[0].projects[0].path="/tmp/root/app".into();assert!(c.validate().is_err());}
+    #[test] fn git_mutation_requires_write_and_exec(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:true}],allow_write:None,allow_exec:None,allow_git_commit:None}];assert!(c.validate().is_err());c.workspaces[0].projects[0].allow_exec=true;assert!(c.validate().is_ok());}
 }
