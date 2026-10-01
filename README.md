@@ -37,7 +37,7 @@ Workspace: projects -> /home/user/projects
 
 ## 安全模型
 
-EndlessVibe 面向单用户、自托管开发环境，不是多租户托管平台。默认情况下，未授权客户端不能执行私有 MCP 工具；Workspace 必须显式登记；Project 必须位于对应 Workspace 根内；文件工具不能越过 Project 根目录，也不会跟随符号链接；`run_shell` 和沙箱网络默认关闭；Bubblewrap 不挂载整个 HOME、SSH 凭据、Docker socket 或服务状态目录；Git 工具不提供 push、reset、clean 或自动回滚。
+EndlessVibe 面向单用户、自托管开发环境，不是多租户托管平台。默认情况下，未授权客户端不能执行私有 MCP 工具；Workspace 必须显式登记；Project 必须位于对应 Workspace 根内；文件工具不能越过 Project 根目录，也不会跟随符号链接；`run_shell` 和沙箱网络默认关闭；Bubblewrap 不挂载整个 HOME、SSH 凭据、Docker socket 或服务状态目录；Git 工具默认不允许 push，并且不提供 reset、clean 或自动回滚；只有 Project 显式启用 `allow_git_push` 后，专用 `git_push` 才可执行受限的非 force 推送。
 
 如果显式启用 host execution，命令将拥有当前宿主机用户权限：
 
@@ -120,6 +120,7 @@ allow_write = true
 allow_exec = true
 allow_git_commit = true
 allow_git_mutation = false
+allow_git_push = false
 ```
 
 旧版 flat workspace 配置仍可读取用于迁移，但新 CLI 只写入两层格式。
@@ -177,7 +178,7 @@ MCP endpoint：`http://127.0.0.1:20000/mcp`
 | 文件 | `list_directory`, `read_file`, `write_file`, `apply_patch`, `create_directory`, `search_code` |
 | 命令 | `run_command`, `run_shell` |
 | 任务 | `get_job`, `get_job_output`, `cancel_job`, `list_jobs`, `get_task_checkpoint`, `list_task_checkpoints` |
-| Git | `git_status`, `git_diff`, `git_log`, `git_commit` |
+| Git | `git_status`, `git_diff`, `git_log`, `git_commit`, `git_push` |
 
 除连接和 Job 查询类工具外，Project 操作统一使用：
 
@@ -222,7 +223,7 @@ git_status(workspace, project)
   → git_commit(workspace, project, paths, expected_head, expected_diff_sha256)
 ```
 
-`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。长任务可以额外传 `task_id + stage`；commit 成功后会自动记录 checkpoint。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。默认 `.git` 仍只读，且 `run_command` 会继续拒绝 Git 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
+`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。长任务可以额外传 `task_id + stage`；commit 成功后会自动记录 checkpoint。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。远端推送使用独立的 `allow_git_push=true` 与 `git_push(remote, branch)`；它只允许把已存在的本地 branch 非 force 地推送到预配置 remote 的同名 branch。`run_command` 仍继续拒绝 `git push/fetch/pull/...` 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
 
 ## Cloudflare Tunnel
 

@@ -37,7 +37,7 @@ fn workspace_arg(value:&str)->Result<WorkspaceConfig>{
     let (id,raw)=value.split_once('=').context("Workspace format is ID=/absolute/root/path")?;
     if !config::valid_id(id){bail!("Workspace ID must contain only ASCII letters, digits, '_' or '-' and be at most 64 characters");}
     let p=PathBuf::from(raw);if !p.is_absolute(){bail!("Workspace paths must be absolute");}let p=p.canonicalize().with_context(||format!("Cannot resolve workspace root {}",p.display()))?;
-    Ok(WorkspaceConfig{id:id.into(),path:p,projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None})
+    Ok(WorkspaceConfig{id:id.into(),path:p,projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None})
 }
 fn project_arg(cfg:&Config,value:&str,read_only:bool,no_exec:bool)->Result<(usize,ProjectConfig)>{
     let (selector,raw)=value.split_once('=').context("Project format is WORKSPACE[:PROJECT]=/absolute/project/path")?;
@@ -53,7 +53,7 @@ fn project_arg(cfg:&Config,value:&str,read_only:bool,no_exec:bool)->Result<(usiz
     if !config::valid_id(id){bail!("Project ID must contain only ASCII letters, digits, '_' or '-' and be at most 64 characters");}
     if cfg.workspaces[index].projects.iter().any(|p|p.id==id){bail!("Project ID {workspace_id}/{id} already exists");}
     for existing in &cfg.workspaces[index].projects{let other=root.join(&existing.path).canonicalize().with_context(||format!("Cannot resolve configured project {workspace_id}/{}",existing.id))?;if absolute==other||absolute.starts_with(&other)||other.starts_with(&absolute){bail!("Project paths inside one workspace must not overlap");}}
-    Ok((index,ProjectConfig{id:id.into(),path:relative,allow_write:!read_only,allow_exec:!read_only&&!no_exec,allow_git_commit:!read_only,allow_git_mutation:false}))
+    Ok((index,ProjectConfig{id:id.into(),path:relative,allow_write:!read_only,allow_exec:!read_only&&!no_exec,allow_git_commit:!read_only,allow_git_mutation:false,allow_git_push:false}))
 }
 fn workspace_table_offsets(text:&str)->Vec<usize>{let mut out=Vec::new();let mut offset=0;for line in text.split_inclusive('\n'){if line.trim()=="[[workspaces]]"{out.push(offset);}offset+=line.len();}out}
 fn insert_project_text(text:&mut String,workspace_index:usize,project:&ProjectConfig)->Result<()>{let offsets=workspace_table_offsets(text);let insert=if workspace_index+1<offsets.len(){offsets[workspace_index+1]}else{text.len()};let mut block=String::new();if insert>0&&!text[..insert].ends_with('\n'){block.push('\n');}block.push_str("\n[[workspaces.projects]]\n");block.push_str(&toml::to_string(project)?);text.insert_str(insert,&block);Ok(())}
@@ -138,9 +138,9 @@ async fn shutdown_signal(){
 
 #[cfg(test)]mod tests{
     use super::*;
-    fn cfg(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None}];c}
+    fn cfg(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None}];c}
     #[test]fn workspace_parser_creates_root_only(){let t=tempfile::tempdir().unwrap();let w=workspace_arg(&format!("root={}",t.path().display())).unwrap();assert_eq!(w.id,"root");assert!(w.projects.is_empty());assert!(w.allow_write.is_none()&&w.allow_exec.is_none()&&w.allow_git_commit.is_none()&&w.allow_git_mutation.is_none());}
-    #[test]fn project_parser_infers_id_and_permissions(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let child=root.join("demo");std::fs::create_dir_all(&child).unwrap();let c=cfg(&root,&t.path().join("state"));let (_,p)=project_arg(&c,&format!("root={}",child.display()),false,false).unwrap();assert_eq!(p.id,"demo");assert_eq!(p.path,PathBuf::from("demo"));assert!(p.allow_write&&p.allow_exec&&p.allow_git_commit&&!p.allow_git_mutation);}
+    #[test]fn project_parser_infers_id_and_permissions(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let child=root.join("demo");std::fs::create_dir_all(&child).unwrap();let c=cfg(&root,&t.path().join("state"));let (_,p)=project_arg(&c,&format!("root={}",child.display()),false,false).unwrap();assert_eq!(p.id,"demo");assert_eq!(p.path,PathBuf::from("demo"));assert!(p.allow_write&&p.allow_exec&&p.allow_git_commit&&!p.allow_git_mutation&&!p.allow_git_push);}
     #[test]fn project_parser_rejects_outside_root(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let outside=t.path().join("outside");std::fs::create_dir_all(&root).unwrap();std::fs::create_dir_all(&outside).unwrap();let c=cfg(&root,&t.path().join("state"));assert!(project_arg(&c,&format!("root={}",outside.display()),false,false).is_err());}
     #[test]fn add_project_preserves_config_comments(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("projects");let child=root.join("demo");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&child).unwrap();let c=cfg(&root,&state);let path=t.path().join("config.toml");let mut text=toml::to_string_pretty(&c).unwrap();text.push_str("\n# keep-this-comment\n");std::fs::write(&path,text).unwrap();let mut cli=Cli::default();cli.add_projects.push(format!("root={}",child.display()));add_projects(&cli,&path).unwrap();let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-this-comment"));let loaded=Config::load_file(&path).unwrap();assert_eq!(loaded.workspaces.len(),1);assert_eq!(loaded.workspaces[0].projects[0].id,"demo");assert_eq!(loaded.workspaces[0].projects[0].path,PathBuf::from("demo"));}
 }

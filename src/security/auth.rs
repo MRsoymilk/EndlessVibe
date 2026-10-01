@@ -215,7 +215,7 @@ pub fn required_scopes(tool: &str) -> &'static [&'static str] {
         "write_file" | "apply_patch" | "create_directory" => &["files:write"],
         "run_command" | "run_shell" => &["commands:execute","files:write"],
         "get_job" | "get_job_output" | "cancel_job" | "list_jobs" => &["commands:execute"],
-        "git_commit" => &["git:write","files:write"], "hello" | "get_service_status" => &[], _ => SCOPES,
+        "git_commit" => &["git:write","files:write"], "git_push" => &["git:write"], "hello" | "get_service_status" => &[], _ => SCOPES,
     }
 }
 fn unauthorized(auth:&Auth,has_credentials:bool)->Response{
@@ -273,5 +273,5 @@ pub async fn protect(State(rt): State<Arc<Runtime>>, mut request: Request, next:
     #[test] fn callbacks_are_not_open_redirects() { let c=Config::default(); assert!(valid_redirect(&c,"https://chatgpt.com/connector_platform_oauth_redirect")); assert!(valid_redirect(&c,"https://chatgpt.com/connector/oauth/plugin_123")); for u in ["https://evil.test/connector_platform_oauth_redirect","https://chatgpt.com.evil.test/connector/oauth/x","https://chatgpt.com@evil.test/x","https://chatgpt.com/connector/oauth/../../evil","http://chatgpt.com/connector_platform_oauth_redirect","https://chatgpt.com/connector/oauth/x?next=https://evil.test"] { assert!(!valid_redirect(&c,u),"{u}"); } }
     #[test] fn scope_escalation_is_not_possible_in_parser() { assert!(scopes(Some("files:read root")).is_err()); assert_eq!(scopes(Some("files:read files:read")).unwrap(),vec!["files:read"]); }
     #[test] fn pkce_requires_strong_verifier() { assert!(pkce_verifier(&"x".repeat(43))); assert!(!pkce_verifier("short")); assert!(!pkce_verifier(&" ".repeat(43))); }
-    #[test] fn command_scopes_include_writes() { assert!(required_scopes("run_command").contains(&"files:write")); assert!(required_scopes("git_commit").contains(&"git:write")); }
+    #[test] fn command_scopes_include_writes() { assert!(required_scopes("run_command").contains(&"files:write")); assert!(required_scopes("git_commit").contains(&"git:write")); assert_eq!(required_scopes("git_push"),&["git:write"]); }
 }

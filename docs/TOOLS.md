@@ -183,6 +183,14 @@ stream 中断或新会话恢复时：
 
 `git_commit` 只提交已审查文件；选中文件已有用户 staged 修改时拒绝，其他 staged 内容保留。不运行 hooks/filters/签名，不 push，不改写工作树。首次提交的 HEAD 使用 `UNBORN`。
 
+`git_push`：
+
+```json
+{"workspace":"projects","project":"BAfter","remote":"origin","branch":"main"}
+```
+
+必须为 Project 显式启用 `allow_git_push=true`。工具只允许把已存在的本地 branch 推送到预配置 remote 的同名 branch；不接收 URL、任意 refspec、`--force` 或其他 Git 参数。`remote.<name>.pushurl`、repo-local `url.*` rewrite、`file://`、`git://`、明文 `http://` 和本地路径 remote 会被拒绝。HTTPS 使用服务账户已有 Git credential helper；SSH 使用服务账户 HOME/SSH agent，但这些凭据不会暴露给普通 `run_command`。`run_command git push` 仍然被禁止。
+
 错误恢复见 [GIT_RECOVERY.md](GIT_RECOVERY.md)。
 
 ## OAuth scopes
@@ -195,5 +203,6 @@ stream 中断或新会话恢复时：
 | 命令/Shell | `commands:execute` + `files:write` |
 | Job 查询/取消 | `commands:execute` |
 | Git commit | `git:write` + `files:write` |
+| Git push | `git:write` |
 
 这些 scope 属于同一个 owner；当前不提供多用户或每 OAuth 客户端独立 Project 列表。
