@@ -8,6 +8,9 @@ use tokio_stream::{wrappers::BroadcastStream,StreamExt};
 pub async fn home()->impl IntoResponse{Html(include_str!("../web/index.html"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
 pub async fn javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/app.js"))}
+pub async fn javascript_common()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/common.js"))}
+pub async fn javascript_mcp()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/mcp.js"))}
+pub async fn javascript_charts()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/charts.js"))}
 pub async fn uplot_javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.iife.min.js"))}
 pub async fn uplot_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.min.css"))}
 pub async fn favicon()->impl IntoResponse{StatusCode::NO_CONTENT}
