@@ -53,6 +53,7 @@ allow_write = true
 allow_exec = true
 allow_git_commit = true
 allow_git_mutation = false
+allow_git_push = false
 
 [[workspaces.projects]]
 id = "another-project"
@@ -61,6 +62,7 @@ allow_write = true
 allow_exec = false
 allow_git_commit = true
 allow_git_mutation = false
+allow_git_push = false
 
 # Workspace roots are management boundaries. Project paths are relative to their
 # workspace root and are the units used by file, command and Git tools.

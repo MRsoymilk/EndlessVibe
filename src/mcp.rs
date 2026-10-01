@@ -5,7 +5,7 @@ use serde_json::{json,Value};
 use std::sync::Arc;
 
 pub const SDK_VERSION:&str="3.5.0";
-pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","get_task_checkpoint","list_task_checkpoints","git_status","git_diff","git_log","git_commit"];
+pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","get_task_checkpoint","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
 fn answer(result:anyhow::Result<Value>)->CallToolResult{match result{Ok(value)=>{let mut out=CallToolResult::success(vec![ContentBlock::text(value.to_string())]);out.structured_content=Some(value);out},Err(e)=>CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))])}}
 fn logged_input<T:Serialize>(tool:&str,value:&T)->Value{let mut out=serde_json::to_value(value).unwrap_or_else(|_|json!({}));if tool=="write_file"{if let Some(object)=out.as_object_mut(){let summary=object.get("content").and_then(Value::as_str).map(|content|json!({"omitted":true,"bytes":content.len(),"sha256":crate::util::digest(content)}));if let Some(summary)=summary{object.insert("content".into(),summary);}}}out}
@@ -87,6 +87,9 @@ impl EndlessVibeMcp{
 
     #[tool(meta=tool_meta("git_commit"),description="Commit only explicitly reviewed project file snapshots. For long work, provide task_id + stage; a successful commit becomes the durable checkpoint for that stage. No hooks, signing, push, reset or clean.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]
     async fn git_commit(&self,Parameters(a):Parameters<CommitArgs>)->CallToolResult{let w=a.workspace.clone();let p=a.project.clone();let op=begin(&self.rt,"git_commit",&w,&p,&a);let result=self.rt.asynchronous_project("git_commit",&w,&p,move|rt,project|async move{git::commit(&rt,&project,a).await}).await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("git_push"),description="Push one existing local branch to the same branch on one preconfigured remote. Requires allow_git_push=true. Force push, arbitrary URLs/refspecs, hooks, local/file/git/http remotes and remote pushurl overrides are refused.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=true))]
+    async fn git_push(&self,Parameters(a):Parameters<PushArgs>)->CallToolResult{let w=a.workspace.clone();let p=a.project.clone();let op=begin(&self.rt,"git_push",&w,&p,&a);let result=self.rt.asynchronous_project("git_push",&w,&p,move|rt,project|async move{git::push(&rt,&project,a).await}).await;answer_logged(&self.rt,op,result)}
 }
 
 #[tool_handler(name="EndlessVibe",instructions="Single-owner development tools with a two-level Workspace -> Project model. First call list_workspaces, then list_projects for the chosen workspace. Every project operation must use explicit workspace and project IDs plus project-relative paths. Different projects have independent locks and may run concurrently subject to max_jobs. Read files before editing, supply returned SHA-256 values, review git_diff before git_commit, and never overwrite, revert, discard, push or delete unrelated user work.")]

@@ -18,11 +18,11 @@ Scope、MCP readOnlyHint 等标注辅助客户端做确认，不是 OS 沙箱。
 
 ## 命令与 Git
 
-默认 bubblewrap 不挂载服务私有状态、整个 HOME 或 Docker socket，网络关闭，`.git` 只读；缺少支持时失败，不降级。Project 可显式设置 `allow_git_mutation=true`，此时仅该 Project 自身 `.git` 在 sandbox 中可写，用于本地 branch/switch/merge/commit 等操作；该权限要求 write+exec。`run_command git` 仍拒绝网络 Git 子命令，且真实 HOME/SSH 凭据不会因此暴露。构建脚本、解释器和Shell都是任意代码执行，需要显式授权。能执行代码的客户端可读写所选项目的全部内容；应把项目里的 `.env` 等真实凭据移出执行环境。
+默认 bubblewrap 不挂载服务私有状态、整个 HOME 或 Docker socket，网络关闭，`.git` 只读；缺少支持时失败，不降级。Project 可显式设置 `allow_git_mutation=true`，此时仅该 Project 自身 `.git` 在 sandbox 中可写，用于本地 branch/switch/merge/commit 等操作；该权限要求 write+exec。`run_command git` 仍拒绝网络 Git 子命令，且 `allow_git_mutation` 本身不会暴露真实 HOME/SSH 凭据。远端写入需要独立的 `allow_git_push=true` 与专用 `git_push`；该工具在宿主机侧仅为 Git credential helper / SSH 子进程提供必要凭据，不把它们挂载进项目 sandbox。构建脚本、解释器和Shell都是任意代码执行，需要显式授权。能执行代码的客户端可读写所选项目的全部内容；应把项目里的 `.env` 等真实凭据移出执行环境。
 
 host 模式显式确认后拥有服务用户权限，可能读到其他 Project、Workspace 外文件和本机凭据，不受 Workspace/Project 路径语义的实际 OS 限制。不允许 root 服务；不要通过 Docker `--privileged` 等措施来掩盖隔离故障。bwrap共享宿主机内核，不是 VM，也未配置完整 seccomp/cgroup 磁盘配额；需持续维护 OS、SDK、Git、bwrap 与依赖。
 
-专门 Git 工具禁用或拒绝外部 helpers/includes/filter 等配置，不推送、不重置、不丢弃不相关修改；日志和 index.lock 恢复必须人工确认。Git 元数据访问仍属于可信仓库假设，详情见 `GIT_RECOVERY.md`。
+专门 Git 工具禁用或拒绝不受控的 helpers/includes/filter 等配置；默认不推送，只有 `allow_git_push=true` 时允许受限、非 force 的同名分支 push。仍不提供 reset/clean，也不丢弃不相关修改；日志和 index.lock 恢复必须人工确认。Git 元数据访问仍属于可信仓库假设，详情见 `GIT_RECOVERY.md`。
 
 ## 本机状态
 
