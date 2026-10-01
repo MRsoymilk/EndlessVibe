@@ -1,7 +1,7 @@
 use crate::{config::{Config,ProjectConfig,WorkspaceConfig},security::paths::Root};
 use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
-use std::{collections::{BTreeMap,HashSet},path::{Path,PathBuf},sync::Arc};
+use std::{collections::BTreeMap,path::{Path,PathBuf},sync::Arc};
 use tokio::sync::Mutex;
 
 pub struct Project{pub workspace_id:String,pub config:ProjectConfig,pub root:Root,pub lock:Arc<Mutex<()>>}
