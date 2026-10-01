@@ -39,7 +39,8 @@ pub struct CommitArgs{pub workspace:String,#[serde(default)] pub project: String
     pub expected_head:String,/// Exact SHA-256 review token returned by git_diff for these paths.
     pub expected_diff_sha256:String,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String>}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
-pub struct PushArgs{pub workspace:String,#[serde(default)]pub project:String,pub remote:String,pub branch:String}
+pub struct PushArgs{pub workspace:String,#[serde(default)]pub project:String,pub remote:String,pub branch:String,/// Exact local branch commit expected by the caller; push is refused if it changed.
+    pub expected_head:String}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct TaskArgs{pub workspace:String,#[serde(default)]pub project:String,pub task_id:String}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]

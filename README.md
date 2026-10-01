@@ -223,7 +223,7 @@ git_status(workspace, project)
   → git_commit(workspace, project, paths, expected_head, expected_diff_sha256)
 ```
 
-`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。长任务可以额外传 `task_id + stage`；commit 成功后会自动记录 checkpoint。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。远端推送使用独立的 `allow_git_push=true` 与 `git_push(remote, branch)`；它只允许把已存在的本地 branch 非 force 地推送到预配置 remote 的同名 branch。`run_command` 仍继续拒绝 `git push/fetch/pull/...` 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
+`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。长任务可以额外传 `task_id + stage`；commit 成功后会自动记录 checkpoint。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。远端推送使用独立的 `allow_git_push=true` 与 `git_push(remote, branch, expected_head)`；它先校验本地 branch HEAD、查询远端 HEAD 并执行 dry-run，只允许把已存在的本地 branch 非 force 地推送到预配置 remote 的同名 branch。`run_command` 仍继续拒绝 `git push/fetch/pull/...` 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
 
 ## Cloudflare Tunnel
 

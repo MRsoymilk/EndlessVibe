@@ -186,10 +186,10 @@ stream 中断或新会话恢复时：
 `git_push`：
 
 ```json
-{"workspace":"projects","project":"BAfter","remote":"origin","branch":"main"}
+{"workspace":"projects","project":"BAfter","remote":"origin","branch":"main","expected_head":"完整本地 branch commit SHA"}
 ```
 
-必须为 Project 显式启用 `allow_git_push=true`。工具只允许把已存在的本地 branch 推送到预配置 remote 的同名 branch；不接收 URL、任意 refspec、`--force` 或其他 Git 参数。`remote.<name>.pushurl`、repo-local `url.*` rewrite、`file://`、`git://`、明文 `http://` 和本地路径 remote 会被拒绝。HTTPS 使用服务账户已有 Git credential helper；SSH 使用服务账户 HOME/SSH agent，但这些凭据不会暴露给普通 `run_command`。`run_command git push` 仍然被禁止。
+必须为 Project 显式启用 `allow_git_push=true`。`expected_head` 必须是完整 40/64 位 Git OID；本地 branch 在调用前或 dry-run 后发生变化都会以 `GIT_CONFLICT` 拒绝，且不会执行真实 push。工具先查询远端同名 branch HEAD，再执行 `git push --dry-run`，通过后才做真实非 force push。成功结果返回 `remote_head_before`、`remote_head_after`、`commit` 和 `preflight=dry_run_passed`。失败会区分 `GIT_PUSH_AUTH_FAILED`、`GIT_PUSH_NETWORK_FAILED`、`GIT_PUSH_NON_FAST_FORWARD`、`GIT_PUSH_REMOTE_REJECTED` 与通用 `GIT_PUSH_FAILED`。工具只允许把已存在的本地 branch 推送到预配置 remote 的同名 branch；不接收 URL、任意 refspec、`--force` 或其他 Git 参数。`remote.<name>.pushurl`、repo-local `url.*` rewrite、`file://`、`git://`、明文 `http://` 和本地路径 remote 会被拒绝。HTTPS 使用服务账户已有 Git credential helper；SSH 使用服务账户 HOME/SSH agent，但这些凭据不会暴露给普通 `run_command`。`run_command git push` 仍然被禁止。
 
 错误恢复见 [GIT_RECOVERY.md](GIT_RECOVERY.md)。
 
