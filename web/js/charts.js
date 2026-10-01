@@ -19,8 +19,12 @@ function upsertPlot(key,hostId,data,series,height=270,yFormatter=null){
   plots.set(key,new window.uPlot(chartOptions(host,series,height,yFormatter),data,host));
 }
 
+function percentileText(value){if(!value||value.samples===0)return"—";return `${value.p50??0} / ${value.p95??0} / ${value.p99??0} ms`;}
+
 export function renderMetrics(data){
   const totals=data.totals||{},points=data.points||[];
+  setText("activity-tool-latency",percentileText(data.latency?.tool_ms));
+  setText("activity-queue-wait",percentileText(data.latency?.queue_wait_ms));
   for(const key of ["requests","success","failed","http-requests","rx","tx"]){
     const value=key==="requests"?totals.requests:key==="success"?totals.successes:key==="failed"?totals.failures:key==="http-requests"?totals.http_requests:key==="rx"?formatBytes(totals.rx_bytes):formatBytes(totals.tx_bytes);
     setText(`activity-${key}`,value??0);
