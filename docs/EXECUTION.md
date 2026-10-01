@@ -20,14 +20,24 @@
 
 ## Rustup / 自定义 SDK
 
-当 cargo/rustc 在 `/usr/bin` 时可以直接调用。使用 Rustup 时，默认不会挂载整个 `~/.cargo` 或 `~/.rustup`。在本机获取真实工具链目录，然后精确配置只读挂载，例如：
+当 cargo/rustc 在 `/usr/bin` 时可以直接调用。使用 Rustup 时，默认不会挂载整个 `~/.cargo` 或 `~/.rustup`，因为 `~/.cargo` 可能包含 registry 凭据。应只挂载实际 toolchain 目录。
+
+先在宿主机查询实际 Rust 工具链：
+
+```bash
+rustup which rustc
+```
+
+例如返回 `/home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc`，则将该 toolchain 根目录只读映射到 sandbox：
 
 ```toml
 [execution]
 backend = "bubblewrap"
 path = "/opt/rust/bin:/usr/local/bin:/usr/bin:/bin"
-readonly_mounts = [{ source = "/home/vv/.rustup/toolchains/你的真实工具链目录", target = "/opt/rust" }]
+readonly_mounts = [{ source = "/home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu", target = "/opt/rust" }]
 ```
+
+这样 sandbox 使用 `/opt/rust/bin/cargo` 和 `/opt/rust/bin/rustc`，无需暴露 `~/.cargo` 或整个 HOME。修改配置后重启 EndlessVibe，再先执行 `--check-sandbox`，随后用 `run_command` 执行 `cargo --version` 验证工具链可见性。
 
 将这些字段合并到已有 `[execution]`，不要重复声明整个表；示例路径必须替换为真实目录。允许的目标路径限制在 `/opt/...` 或 `/cache-readonly/...`，不得通过 mount 暴露服务 config/state。额外 SDK 只读挂载扩大可见范围，需要自行检查其中是否有密钥。程序查找与共享库依赖仍需在目标环境验证。
 
