@@ -15,6 +15,7 @@ pub fn create_router(rt:Arc<Runtime>)->Router{
 pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
     Router::new()
         .route("/",get(web::home))
+        .route("/projects",get(web::home))
         .route("/activity",get(web::home))
         .route("/operations",get(web::home))
         .route("/mcp",get(web::home))
@@ -28,6 +29,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/metrics",get(web::metrics))
         .route("/api/activity",get(web::activity))
         .route("/api/config",get(web::config))
+        .route("/api/projects/status",get(web::project_states))
         .route("/api/operations",get(web::operations))
         .route("/api/operations/{seq}",get(web::operation))
         .route("/api/jobs/{job_id}",get(web::job_detail))
