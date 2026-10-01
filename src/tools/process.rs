@@ -33,6 +33,15 @@ fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
     bail!("Executable {program} not found in configured PATH")
 }
 
+fn pre_exec_nproc_limit(backend:&str,max_processes:u64)->Option<u64>{
+    // RLIMIT_NPROC is counted against every thread/process owned by the real UID.
+    // Applying it to bwrap before namespace creation can make bwrap's clone() fail
+    // with EAGAIN when the desktop user already owns >= max_processes tasks.
+    // Host execution can still opt into this coarse per-UID limit; bubblewrap must
+    // finish creating its namespaces before any process-count isolation is applied.
+    (backend=="host").then_some(max_processes)
+}
+
 pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
     w.exec_allowed()?;
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
@@ -69,11 +78,18 @@ pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String]
         _=>bail!("Unknown execution backend"),
     };
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
-    let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=config.execution.max_processes;let cpu=config.limits.command_timeout_seconds+5;
+    let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=pre_exec_nproc_limit(&config.execution.backend,config.execution.max_processes);let cpu=config.limits.command_timeout_seconds+5;
     // SAFETY: only async-signal-safe Linux syscalls are used in this pre_exec closure.
     unsafe{command.pre_exec(move||{
-        for (resource,value) in [(libc::RLIMIT_AS,address_space),(libc::RLIMIT_NPROC,processes),(libc::RLIMIT_CPU,cpu)]{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(resource,&lim)!=0{return Err(std::io::Error::last_os_error());}}
+        for (resource,value) in [(libc::RLIMIT_AS,address_space),(libc::RLIMIT_CPU,cpu)]{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(resource,&lim)!=0{return Err(std::io::Error::last_os_error());}}
+        if let Some(value)=processes{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(libc::RLIMIT_NPROC,&lim)!=0{return Err(std::io::Error::last_os_error());}}
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong)!=0{return Err(std::io::Error::last_os_error());}Ok(())
     });}
     Ok(command)
+}
+
+#[cfg(test)]mod tests{
+    use super::*;
+    #[test]fn bubblewrap_does_not_limit_launcher_nproc(){assert_eq!(pre_exec_nproc_limit("bubblewrap",256),None);}
+    #[test]fn host_keeps_configured_nproc_limit(){assert_eq!(pre_exec_nproc_limit("host",256),Some(256));}
 }
