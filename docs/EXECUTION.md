@@ -10,7 +10,7 @@
 ./target/release/endlessvibe --check-sandbox
 ```
 
-成功输出 `bubblewrap sandbox probe: ok`。该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载工作区、不运行项目程序。
+成功输出 `bubblewrap sandbox probe: ok`。该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目程序。
 
 沙箱中 `/workspace` 是选中项目，`/cache` 是该项目独立的私有构建缓存目录。`HOME=/tmp/home`，`CARGO_HOME=/cache/cargo`，默认 PATH `/usr/local/bin:/usr/bin:/bin`。系统可执行/库目录只读，项目 `.git` 再覆盖为只读。源文件本身可写，所以构建脚本能够改变选中项目；这是执行权限的一部分。
 
@@ -45,7 +45,7 @@ readonly_mounts = [{ source = "/home/user/.rustup/toolchains/stable-x86_64-unkno
 
 `run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
 
-白名单并非安全边界：Python、Cargo build script、Makefile、编译器插件等都能执行其他程序。安全限制主要来自隔离环境与管理员授予的工作区权限。工具描述/确认提示不是 OS 权限控制。
+白名单并非安全边界：Python、Cargo build script、Makefile、编译器插件等都能执行其他程序。安全限制主要来自隔离环境与管理员授予的 Project 权限。工具描述/确认提示不是 OS 权限控制。
 
 ## 显式 host 模式
 
@@ -62,7 +62,7 @@ allow_shell = false
 
 ## 生命周期、持久化与资源
 
-提交动作不等待编译结束，而是保存 Job 后返回 job_id。运行期间同一项目的文件/Git操作返回 WORKSPACE_BUSY，避免在构建运行时同时改写。任务查询本身不会争抢该项目锁。
+提交动作不等待编译结束，而是保存 Job 后返回 job_id。同一 Project 运行任务期间，文件/Git 操作返回 `PROJECT_BUSY`；同一 Workspace 下其他 Project 使用独立锁，可以并行。任务查询本身不争抢 Project 锁；命令总并发仍受 `limits.max_jobs` 限制。
 
 超时/取消对进程组发送 TERM，再 KILL；bubblewrap 带父进程退出终止策略。host 模式中自行 daemonize、setsid 或逃离进程组的恶意程序不在强保证范围，不能宣称等价于 cgroup/VM 管控。服务重启不自动 replay 任何命令。
 
