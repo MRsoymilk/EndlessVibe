@@ -52,7 +52,6 @@ acknowledge_unsafe_host_execution = true
 - Rust / Cargo 1.88+
 - Git
 - C 编译器（`rusqlite` 使用 bundled SQLite）
-- Python 3.11+
 - bubblewrap（使用默认命令沙箱时）
 - 可用的非特权用户命名空间
 
@@ -238,8 +237,7 @@ src/
 web/                  内嵌状态页面
 config/               配置示例
 deploy/               Cloudflare Tunnel 示例
-scripts/              验证与 MCP 诊断脚本
-tests/integration.rs   集成测试
+tests/integration.rs   Rust 集成测试
 docs/                  安全、OAuth、工具、沙箱与恢复文档
 ```
 
