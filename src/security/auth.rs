@@ -210,7 +210,7 @@ pub async fn revoke(State(rt): State<Arc<Runtime>>, headers: HeaderMap, Form(p):
 
 pub fn required_scopes(tool: &str) -> &'static [&'static str] {
     match tool {
-        "list_projects" | "inspect_project" => &["projects:read"],
+        "list_workspaces" | "list_projects" | "inspect_project" | "get_task_checkpoint" | "list_task_checkpoints" => &["projects:read"],
         "list_directory" | "read_file" | "search_code" | "git_status" | "git_diff" | "git_log" => &["files:read"],
         "write_file" | "apply_patch" | "create_directory" => &["files:write"],
         "run_command" | "run_shell" => &["commands:execute","files:write"],

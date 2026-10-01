@@ -1,4 +1,4 @@
-use crate::{config::Config, runtime::Runtime, store::{self,Store}, tools::{process,types::*}, util};
+use crate::{config::Config, runtime::Runtime, store::{self,Store}, tools::{process,tasks,types::*}, util};
 use anyhow::{bail,Context,Result};
 use rusqlite::{params,OptionalExtension};
 use serde::{Deserialize,Serialize};
@@ -7,18 +7,35 @@ use std::{collections::HashMap,sync::{Arc,Mutex},time::{Duration,Instant}};
 use tokio::{io::{AsyncRead,AsyncReadExt},sync::{mpsc,Semaphore}};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,pub started:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String> }
+#[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,#[serde(default)]pub project:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,pub started:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String> }
 #[derive(Serialize,Deserialize)] struct JobRef{id:String,fingerprint:String}
 pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>> }
 struct Output{bytes:Vec<u8>,offset:u64,total:u64}
+fn bubblewrap_failure_hint(backend:&str,status:&str,bytes:&[u8])->Option<String>{
+    if backend!="bubblewrap"||status!="failed"{return None;}
+    let text=String::from_utf8_lossy(bytes);
+    if text.contains("Creating new namespace failed: Resource temporarily unavailable"){
+        return Some("bubblewrap namespace creation failed with EAGAIN; check inherited RLIMIT_NPROC/cgroup pids limits and user-namespace availability, then rebuild/restart EndlessVibe after changing execution settings".into());
+    }
+    if text.contains("No permissions to create a new namespace"){
+        return Some("bubblewrap cannot create an unprivileged user namespace; enable the kernel/distribution user-namespace setting or use another explicitly configured execution backend".into());
+    }
+    if text.contains("max_*_namespaces exceeded"){
+        return Some("bubblewrap namespace quota is exhausted; inspect /proc/sys/user/max_*_namespaces and current namespace usage".into());
+    }
+    if text.contains("bwrap: execvp ")&&text.contains("No such file or directory"){
+        return Some("configured program is not visible inside the bubblewrap sandbox; add its sandbox path to execution.path and expose only the required toolchain directory with execution.readonly_mounts (do not mount the whole HOME or credential directories)".into());
+    }
+    None
+}
 impl Output{
     fn append(&mut self,stream:&str,chunk:&[u8],max:usize){let prefix=format!("[{stream}] ");self.bytes.extend_from_slice(prefix.as_bytes());self.bytes.extend_from_slice(chunk);self.total+=(prefix.len()+chunk.len()) as u64;let excess=self.bytes.len().saturating_sub(max);if excess>0{self.bytes.drain(..excess);self.offset+=excess as u64;}}
 }
 impl Jobs{
     pub fn new(db:Arc<Store>,config:Arc<Config>)->Result<Arc<Self>>{
         let s=Arc::new(Self{db,slots:Arc::new(Semaphore::new(config.limits.max_jobs)),config,submission:tokio::sync::Mutex::new(()),active:Mutex::new(HashMap::new())});
-        let mut records=s.list_records(None,usize::MAX)?;
-        for r in &mut records{if matches!(r.status.as_str(),"queued"|"running"){r.status="interrupted".into();r.finished=Some(util::now());r.error=Some("Service restarted; this command is never automatically replayed".into());s.save(r,None)?;}}
+        let mut records=s.list_records(None,None,None,usize::MAX)?;
+        for r in &mut records{if matches!(r.status.as_str(),"queued"|"running"){r.status="interrupted".into();r.finished=Some(util::now());r.error=Some("Service restarted; this command is never automatically replayed".into());s.save(r,None)?;if let (Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&s.db,&r.workspace,&r.project,task,stage,&r.id,"interrupted"){tracing::warn!(error=%error,job_id=%r.id,"Could not update task checkpoint after restart");}}}}
         Ok(s)
     }
     fn save(&self,r:&JobRecord,output:Option<&Output>)->Result<()>{self.db.transaction(|tx|{if let Some(out)=output{tx.execute("INSERT INTO jobs(id,data,output,output_offset) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET data=excluded.data,output=excluded.output,output_offset=excluded.output_offset",params![r.id,serde_json::to_string(r)?,out.bytes,out.offset])?;}else{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![r.id,serde_json::to_string(r)?])?;}Ok(())})}
@@ -27,11 +44,11 @@ impl Jobs{
         let s:Option<String>=self.db.transaction(|tx|Ok(tx.query_row("SELECT data FROM jobs WHERE id=?1",[id],|r|r.get(0)).optional()?))?;
         Ok(serde_json::from_str(&s.context("Job not found or retention expired")?)?)
     }
-    fn list_records(&self,workspace:Option<&str>,limit:usize)->Result<Vec<JobRecord>>{
-        self.db.transaction(|tx|{let mut q=tx.prepare("SELECT data FROM jobs WHERE (?1 IS NULL OR json_extract(data,'$.workspace')=?1) ORDER BY json_extract(data,'$.created') DESC LIMIT ?2")?;let values=q.query_map(params![workspace,limit.min(10000) as i64],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;values.into_iter().map(|v|Ok(serde_json::from_str(&v)?)).collect()})
+    fn list_records(&self,workspace:Option<&str>,project:Option<&str>,task_id:Option<&str>,limit:usize)->Result<Vec<JobRecord>>{
+        self.db.transaction(|tx|{let mut q=tx.prepare("SELECT data FROM jobs WHERE (?1 IS NULL OR json_extract(data,'$.workspace')=?1) AND (?2 IS NULL OR json_extract(data,'$.project')=?2) AND (?3 IS NULL OR json_extract(data,'$.task_id')=?3) ORDER BY json_extract(data,'$.created') DESC LIMIT ?4")?;let values=q.query_map(params![workspace,project,task_id,limit.min(10000) as i64],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;values.into_iter().map(|v|Ok(serde_json::from_str(&v)?)).collect()})
     }
     pub fn get(&self,id:&str)->Result<Value>{Ok(serde_json::to_value(self.load(id)?)?)}
-    pub fn list(&self,a:ListJobsArgs)->Result<Value>{if a.limit==0||a.limit>200{bail!("limit must be 1..200");}Ok(json!({"jobs":self.list_records(a.workspace.as_deref(),a.limit)?}))}
+    pub fn list(&self,a:ListJobsArgs)->Result<Value>{if a.limit==0||a.limit>200{bail!("limit must be 1..200");}if let Some(task)=&a.task_id{tasks::validate_task_id(task)?;}Ok(json!({"jobs":self.list_records(a.workspace.as_deref(),a.project.as_deref(),a.task_id.as_deref(),a.limit)?}))}
     pub fn output(&self,a:OutputArgs)->Result<Value>{
         if a.limit==0||a.limit>262144{bail!("limit must be 1..262144");}
         let record=self.load(&a.job_id)?;
@@ -45,30 +62,33 @@ impl Jobs{
     pub async fn shutdown(&self){self.cancel_all();let until=Instant::now()+Duration::from_secs(5);while self.active_count()>0&&Instant::now()<until{tokio::time::sleep(Duration::from_millis(50)).await;}}
     pub async fn submit(self:&Arc<Self>,rt:Arc<Runtime>,a:CommandArgs,shell:bool)->Result<Value>{
         if a.request_id.is_empty()||a.request_id.len()>128||!a.request_id.bytes().all(|b|b.is_ascii_alphanumeric()||b"-_:.".contains(&b)){bail!("Provide a unique simple request_id (1..128 characters); retries with the same ID never rerun the job during retention");}
+        tasks::validate_context(&a.task_id,&a.stage)?;
         let timeout=a.timeout_seconds.unwrap_or(rt.config.limits.command_timeout_seconds);if timeout==0||timeout>rt.config.limits.command_timeout_seconds{bail!("timeout_seconds exceeds the configured limit");}
         let _submission=self.submission.lock().await;
-        let fingerprint=util::digest(serde_json::to_vec(&(&a,shell))?);let key=format!("{}:{}",a.workspace,a.request_id);
+        let fingerprint=util::digest(serde_json::to_vec(&(&a,shell))?);let key=format!("{}:{}:{}",a.workspace,a.project,a.request_id);
         if let Some(existing)=self.db.get::<JobRef>("job_requests",&key)?{
             if existing.fingerprint!=fingerprint{bail!("IDEMPOTENCY_CONFLICT: request_id was used with different command arguments");}
             let mut value=self.get(&existing.id).unwrap_or_else(|_|json!({"id":existing.id.clone(),"status":"expired","message":"Output retention expired; request is not re-executed"}));value["job_id"]=json!(existing.id);value["reused"]=json!(true);return Ok(value);
         }
-        let w=rt.workspace(&a.workspace)?;w.exec_allowed()?;
+        let w=rt.project(&a.workspace,&a.project)?;w.exec_allowed()?;
         let permit=self.slots.clone().try_acquire_owned().context("All command slots are occupied; query existing jobs first")?;
-        let lock=w.lock.clone().try_lock_owned().context("WORKSPACE_BUSY: another operation is using this workspace")?;
+        let lock=w.lock.clone().try_lock_owned().context("PROJECT_BUSY: another operation is using this project")?;
         let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell)?;
-        let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:util::now(),started:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None};
-        self.db.audit(if shell{"run_shell"}else{"run_command"},&record.workspace,"accepted",&record.id)?;
+        let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,project:a.project,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:util::now(),started:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None,task_id:a.task_id,stage:a.stage};
+        let audit_target=format!("{}/{}",record.workspace,record.project);self.db.audit(if shell{"run_shell"}else{"run_command"},&audit_target,"accepted",&record.id)?;
         self.db.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",params![record.id,serde_json::to_string(&record)?])?;store::put(tx,"job_requests",&key,&JobRef{id:record.id.clone(),fingerprint},util::now()+7*86400)?;Ok(())})?;
+        if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&record.workspace,&record.project,task,stage,&record.id,"queued"){tracing::warn!(error=%error,job_id=%record.id,"Job accepted but task checkpoint persistence failed");}}
         let cancel=rt.shutdown.child_token();self.active.lock().map_err(|_|anyhow::anyhow!("Job table poisoned"))?.insert(record.id.clone(),cancel.clone());
-        let result=json!({"job_id":record.id,"status":"queued","request_id":record.request_id,"reused":false,"next":"get_job / get_job_output"});
-        let this=self.clone();tokio::spawn(async move{let _permit=permit;let _lock=lock;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout).await;if let Err(e)=result{record.status="failed".into();record.error=Some(util::bounded_text(&e.to_string(),1024));record.finished=Some(util::now());let _=this.save(&record,None);}let _=this.db.audit("job_finished",&record.workspace,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}let _=this.prune();});
+        rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":"queued"}));
+        let result=json!({"job_id":record.id,"status":"queued","request_id":record.request_id,"task_id":record.task_id,"stage":record.stage,"reused":false,"next":"get_job / get_job_output"});
+        let this=self.clone();let event_rt=rt.clone();tokio::spawn(async move{let _permit=permit;let _lock=lock;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout).await;if let Err(e)=result{record.status="failed".into();record.error=Some(util::bounded_text(&e.to_string(),1024));record.finished=Some(util::now());let _=this.save(&record,None);}if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){let _=tasks::record_job(&this.db,&record.workspace,&record.project,task,stage,&record.id,&record.status);}let audit_target=format!("{}/{}",record.workspace,record.project);let _=this.db.audit("job_finished",&audit_target,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}event_rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":record.status,"exit_code":record.exit_code,"task_id":record.task_id,"stage":record.stage}));let _=this.prune();});
         Ok(result)
     }
     fn prune(&self)->Result<()>{self.db.transaction(|tx|{tx.execute("DELETE FROM jobs WHERE id IN (SELECT id FROM jobs WHERE json_extract(data,'$.status') NOT IN ('queued','running') ORDER BY json_extract(data,'$.created') DESC LIMIT -1 OFFSET ?1)",[self.config.limits.retained_jobs as i64])?;Ok(())})}
     async fn worker(&self,r:&mut JobRecord,mut cmd:tokio::process::Command,cancel:CancellationToken,timeout:u64)->Result<()>{
         if cancel.is_cancelled(){r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
         let mut child=cmd.spawn().context("Could not start job (inspect executable, namespace support and sandbox mounts)")?;let pid=child.id().context("Missing child ID")?;let mut group=process::GroupGuard::new(pid);
-        r.status="running".into();r.started=Some(util::now());self.save(r,None)?;
+        r.status="running".into();r.started=Some(util::now());self.save(r,None)?;if let (Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){tracing::warn!(error=%error,job_id=%r.id,"Job is running but task checkpoint update failed");}}
         let (tx,mut rx)=mpsc::channel::<(&'static str,Vec<u8>)>(16);
         let out=tokio::spawn(pipe(child.stdout.take().context("stdout missing")?,"stdout",tx.clone()));let err=tokio::spawn(pipe(child.stderr.take().context("stderr missing")?,"stderr",tx.clone()));drop(tx);
         let mut output=Output{bytes:vec![],offset:0,total:0};let mut last_save=Instant::now();let deadline=tokio::time::sleep(Duration::from_secs(timeout));tokio::pin!(deadline);
@@ -82,8 +102,8 @@ impl Jobs{
         group.kill();
         let _=tokio::time::timeout(Duration::from_secs(2),async{while let Some((stream,bytes))=rx.recv().await{output.append(stream,&bytes,self.config.limits.max_output_bytes);}}).await;
         out.abort();err.abort();r.exit_code=status.code();r.status=forced.unwrap_or(if status.success(){"succeeded"}else{"failed"}).into();r.finished=Some(util::now());r.output_bytes_total=output.total;r.output_truncated=output.offset>0;
-        if r.status=="timed_out"{r.error=Some(format!("Execution exceeded {timeout} seconds; process group was terminated"));}self.save(r,Some(&output))
+        if r.status=="timed_out"{r.error=Some(format!("Execution exceeded {timeout} seconds; process group was terminated"));}else if let Some(hint)=bubblewrap_failure_hint(&r.backend,&r.status,&output.bytes){r.error=Some(hint);}self.save(r,Some(&output))
     }
 }
 async fn pipe<R:AsyncRead+Unpin>(mut r:R,label:&'static str,tx:mpsc::Sender<(&'static str,Vec<u8>)>){let mut b=[0u8;8192];loop{match r.read(&mut b).await{Ok(0)|Err(_)=>break,Ok(n)=>if tx.send((label,b[..n].to_vec())).await.is_err(){break;}}}}
-#[cfg(test)]mod tests{use super::*;#[test]fn ring_output_is_bounded(){let mut out=Output{bytes:vec![],offset:0,total:0};out.append("stdout",b"abcdefghijklmnopqrstuvwxyz",12);assert_eq!(out.bytes.len(),12);assert!(out.offset>0);assert_eq!(out.total,out.offset+out.bytes.len() as u64);}}
+#[cfg(test)]mod tests{use super::*;#[test]fn ring_output_is_bounded(){let mut out=Output{bytes:vec![],offset:0,total:0};out.append("stdout",b"abcdefghijklmnopqrstuvwxyz",12);assert_eq!(out.bytes.len(),12);assert!(out.offset>0);assert_eq!(out.total,out.offset+out.bytes.len() as u64);}#[test]fn namespace_eagain_has_actionable_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"bwrap: Creating new namespace failed: Resource temporarily unavailable\n").unwrap();assert!(h.contains("RLIMIT_NPROC"));}#[test]fn missing_sandbox_program_has_mount_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"bwrap: execvp cargo: No such file or directory\n").unwrap();assert!(h.contains("readonly_mounts"));}#[test]fn unrelated_failure_has_no_bwrap_hint(){assert!(bubblewrap_failure_hint("bubblewrap","failed",b"cargo: error").is_none());assert!(bubblewrap_failure_hint("host","failed",b"Creating new namespace failed: Resource temporarily unavailable").is_none());}}

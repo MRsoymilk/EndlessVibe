@@ -31,7 +31,10 @@ pub struct Git { pub executable: PathBuf, pub author_name: String, pub author_em
 impl Default for Git { fn default() -> Self { Self { executable: "/usr/bin/git".into(), author_name: "EndlessVibe".into(), author_email: "endlessvibe@localhost".into() } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceConfig { pub id: String, pub path: PathBuf, #[serde(default)] pub allow_write: bool, #[serde(default)] pub allow_exec: bool, #[serde(default)] pub allow_git_commit: bool }
+pub struct WorkspaceConfig { pub id: String, pub path: PathBuf, #[serde(default, skip_serializing_if = "Vec::is_empty")] pub projects: Vec<ProjectConfig>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_write: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_exec: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_git_commit: Option<bool>, #[serde(default,skip_serializing_if="Option::is_none")] pub allow_git_mutation: Option<bool> }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectConfig { pub id: String, pub path: PathBuf, #[serde(default)] pub allow_write: bool, #[serde(default)] pub allow_exec: bool, #[serde(default)] pub allow_git_commit: bool, #[serde(default)] pub allow_git_mutation: bool }
 
 pub fn default_config_path() -> PathBuf { env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config")).join("endlessvibe/config.toml") }
 pub fn default_state_dir() -> PathBuf { env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("endlessvibe") }
@@ -40,7 +43,7 @@ pub fn valid_id(s: &str) -> bool { !s.is_empty() && s.len() <= 64 && s.bytes().a
 
 impl Config {
     pub fn load_file(path: &Path) -> Result<Self> {
-        let mut c: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("Read {}; initialize first with --init --workspace NAME=/absolute/project/path", path.display()))?).context("Invalid config.toml")?;
+        let mut c: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("Read {}; initialize first with --init --workspace NAME=/absolute/root/path", path.display()))?).context("Invalid config.toml")?;
         c.server.public_url = c.server.public_url.trim_end_matches('/').to_owned();c.validate()?;Ok(c)
     }
     pub fn load(path: &Path) -> Result<Self> {
@@ -69,7 +72,17 @@ impl Config {
         for m in &self.execution.readonly_mounts { if !m.source.is_absolute() || !m.source.exists() || !(m.target.starts_with("/opt/") || m.target.starts_with("/cache-readonly/")) || m.target.components().any(|p| matches!(p, std::path::Component::ParentDir)) { bail!("Read-only mounts require an existing absolute source and a /opt/... or /cache-readonly/... destination"); } }
         if !self.git.executable.is_absolute() || self.git.author_name.trim().is_empty() || self.git.author_email.trim().is_empty() || self.git.author_name.contains(['\n', '\r', '\0']) || self.git.author_email.contains(['\n', '\r', '\0']) { bail!("Invalid Git executable or author identity"); }
         let mut ids = HashSet::new();
-        for w in &self.workspaces { if !valid_id(&w.id) || !ids.insert(w.id.clone()) || !w.path.is_absolute() { bail!("Workspaces need unique simple IDs and absolute paths"); } if (w.allow_exec || w.allow_git_commit) && !w.allow_write { bail!("Workspace {}: execution/commit also require allow_write", w.id); } }
+        for w in &self.workspaces {
+            if !valid_id(&w.id) || !ids.insert(w.id.clone()) || !w.path.is_absolute() { bail!("Workspaces need unique simple IDs and absolute root paths"); }
+            if w.projects.is_empty() && (w.allow_exec==Some(true) || w.allow_git_commit==Some(true) || w.allow_git_mutation==Some(true)) && w.allow_write!=Some(true) { bail!("Legacy workspace {}: execution/commit/git mutation also require allow_write", w.id); }
+            if w.projects.is_empty() && w.allow_git_mutation==Some(true) && w.allow_exec!=Some(true) { bail!("Legacy workspace {}: allow_git_mutation requires allow_exec=true", w.id); }
+            let mut projects=HashSet::new();
+            for p in &w.projects {
+                if !valid_id(&p.id)||!projects.insert(p.id.clone())||p.path.is_absolute()||p.path.components().any(|c|matches!(c,std::path::Component::ParentDir|std::path::Component::RootDir|std::path::Component::Prefix(_))){bail!("Workspace {} projects need unique simple IDs and relative paths without '..'",w.id);}
+                if (p.allow_exec||p.allow_git_commit)&&!p.allow_write{bail!("Project {}/{}: execution/commit also require allow_write",w.id,p.id);}
+                if p.allow_git_mutation&&(!p.allow_write||!p.allow_exec){bail!("Project {}/{}: allow_git_mutation requires allow_write=true and allow_exec=true",w.id,p.id);}
+            }
+        }
         Ok(())
     }
 }
@@ -80,4 +93,6 @@ impl Config {
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }
     #[test] fn ids_are_bounded() { assert!(valid_id("BAfter")); assert!(!valid_id("../BAfter")); assert!(!valid_id("")); }
+    #[test] fn projects_are_relative_to_workspace_roots(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None}];assert!(c.validate().is_ok());c.workspaces[0].projects[0].path="/tmp/root/app".into();assert!(c.validate().is_err());}
+    #[test] fn git_mutation_requires_write_and_exec(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:true}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None}];assert!(c.validate().is_err());c.workspaces[0].projects[0].allow_exec=true;assert!(c.validate().is_ok());}
 }
