@@ -1,7 +1,7 @@
 use anyhow::{bail,Result};
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION:i64=2;
+pub const CURRENT_SCHEMA_VERSION:i64=3;
 
 const CREATE_SCHEMA_V1:&str=r#"
 CREATE TABLE IF NOT EXISTS kv(
@@ -99,6 +99,12 @@ CREATE INDEX IF NOT EXISTS idx_operation_target_started
 ON operation_log(workspace,project,started);
 "#;
 
+const ADD_ERROR_CODE_V3:&str=r#"
+ALTER TABLE operation_log ADD COLUMN error_code TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_operation_error_code_started
+ON operation_log(error_code,started);
+"#;
+
 pub fn migrate(connection:&mut Connection)->Result<()>{
     let version:i64=connection.query_row("PRAGMA user_version",[],|r|r.get(0))?;
     if version>CURRENT_SCHEMA_VERSION{
@@ -112,6 +118,9 @@ pub fn migrate(connection:&mut Connection)->Result<()>{
     }
     if version<2{
         tx.execute_batch(CREATE_INDEXES_V2)?;
+    }
+    if version<3{
+        tx.execute_batch(ADD_ERROR_CODE_V3)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version={CURRENT_SCHEMA_VERSION};"))?;
     tx.commit()?;
@@ -131,5 +140,20 @@ mod tests{
         assert_eq!(version,CURRENT_SCHEMA_VERSION);
         let count:i64=c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_operation_status_started'",[],|r|r.get(0)).unwrap();
         assert_eq!(count,1);
+        let error_index:i64=c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_operation_error_code_started'",[],|r|r.get(0)).unwrap();
+        assert_eq!(error_index,1);
+    }
+    #[test]
+    fn schema_v2_upgrades_to_v3_without_losing_data(){
+        let mut c=Connection::open_in_memory().unwrap();
+        c.execute_batch(CREATE_SCHEMA_V1).unwrap();
+        c.execute_batch(CREATE_INDEXES_V2).unwrap();
+        c.execute("INSERT INTO kv(namespace,key,value,expires) VALUES('x','keep','42',0)",[]).unwrap();
+        c.execute_batch("PRAGMA user_version=2;").unwrap();
+        migrate(&mut c).unwrap();
+        assert_eq!(c.query_row("PRAGMA user_version",[],|r|r.get::<_,i64>(0)).unwrap(),3);
+        assert_eq!(c.query_row("SELECT value FROM kv WHERE namespace='x' AND key='keep'",[],|r|r.get::<_,String>(0)).unwrap(),"42");
+        let columns:i64=c.query_row("SELECT COUNT(*) FROM pragma_table_info('operation_log') WHERE name='error_code'",[],|r|r.get(0)).unwrap();
+        assert_eq!(columns,1);
     }
 }
