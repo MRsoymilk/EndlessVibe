@@ -12,7 +12,9 @@
 
 成功输出 `bubblewrap sandbox probe: ok`。该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目程序。
 
-沙箱中 `/workspace` 是选中项目，`/cache` 是该项目独立的私有构建缓存目录。`HOME=/tmp/home`，`CARGO_HOME=/cache/cargo`，默认 PATH `/usr/local/bin:/usr/bin:/bin`。系统可执行/库目录只读，项目 `.git` 再覆盖为只读。源文件本身可写，所以构建脚本能够改变选中项目；这是执行权限的一部分。
+沙箱中 `/workspace` 是选中项目，`/cache` 是该项目独立的私有构建缓存目录。`HOME=/tmp/home`，`CARGO_HOME=/cache/cargo`，默认 PATH `/usr/local/bin:/usr/bin:/bin`。系统可执行/库目录只读。项目源文件可写；`.git` 默认再覆盖为只读。只有 Project 显式设置 `allow_git_mutation=true` 时，项目自身 `.git` 才保持可写，从而允许 `git switch`、`git merge`、`git branch`、`git add`、`git commit` 等本地仓库变更。
+
+`allow_git_mutation` 需要同时启用 `allow_write=true` 与 `allow_exec=true`，默认关闭。即使开启，`run_command` 仍拒绝 `git push/fetch/pull/clone/ls-remote/remote/submodule` 等网络 Git 子命令；真实 HOME、SSH 凭据和服务状态仍不挂载，sandbox 网络仍由 `execution.allow_network` 独立控制。`run_shell` 是显式的广泛执行权限，启用后不能依赖这层 argv 子命令过滤作为安全边界。
 
 默认不暴露真实 HOME、整个 `/etc`、SSH、DBus、Wayland、云凭据或服务状态。需要 UI、GPU、网络、跨项目依赖或其他宿主机资源的命令可能失败；默认不会开放这些资源。文件读写 MCP API 的敏感名称过滤不是 Shell 的文件访问过滤：有执行权限便可以访问沙箱内该项目的全部文件。
 

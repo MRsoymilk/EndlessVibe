@@ -18,7 +18,7 @@ Scope、MCP readOnlyHint 等标注辅助客户端做确认，不是 OS 沙箱。
 
 ## 命令与 Git
 
-默认 bubblewrap 不挂载服务私有状态、整个 HOME 或 Docker socket，网络关闭，.git 只读；缺少支持时失败，不降级。构建脚本、解释器和Shell都是任意代码执行，需要显式授权。能执行代码的客户端可读写所选项目的全部内容；应把项目里的 `.env` 等真实凭据移出执行环境。
+默认 bubblewrap 不挂载服务私有状态、整个 HOME 或 Docker socket，网络关闭，`.git` 只读；缺少支持时失败，不降级。Project 可显式设置 `allow_git_mutation=true`，此时仅该 Project 自身 `.git` 在 sandbox 中可写，用于本地 branch/switch/merge/commit 等操作；该权限要求 write+exec。`run_command git` 仍拒绝网络 Git 子命令，且真实 HOME/SSH 凭据不会因此暴露。构建脚本、解释器和Shell都是任意代码执行，需要显式授权。能执行代码的客户端可读写所选项目的全部内容；应把项目里的 `.env` 等真实凭据移出执行环境。
 
 host 模式显式确认后拥有服务用户权限，可能读到其他 Project、Workspace 外文件和本机凭据，不受 Workspace/Project 路径语义的实际 OS 限制。不允许 root 服务；不要通过 Docker `--privileged` 等措施来掩盖隔离故障。bwrap共享宿主机内核，不是 VM，也未配置完整 seccomp/cgroup 磁盘配额；需持续维护 OS、SDK、Git、bwrap 与依赖。
 
