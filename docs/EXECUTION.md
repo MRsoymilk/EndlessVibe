@@ -52,6 +52,25 @@ readonly_mounts = [{ source = "/home/user/.rustup/toolchains/stable-x86_64-unkno
 
 将这些字段合并到已有 `[execution]`，不要重复声明整个表；示例路径必须替换为真实目录。允许的目标路径限制在 `/opt/...` 或 `/cache-readonly/...`，不得通过 mount 暴露服务 config/state。额外 SDK 只读挂载扩大可见范围，需要自行检查其中是否有密钥。程序查找与共享库依赖仍需在目标环境验证。
 
+## Sandbox 内临时 PostgreSQL
+
+`allow_network=false` 不妨碍**同一个 Job** 内的父进程和子进程使用该 Job 自己的 loopback namespace。因此集成测试不必挂宿主 Docker socket，也不必连接开发数据库：测试脚本可以在 sandbox 内自行启动一次性 PostgreSQL，并只监听 `127.0.0.1`。
+
+若 PostgreSQL 已安装在 `/usr/bin` 和系统库目录，通常无需额外 mount；若使用自定义 PostgreSQL 安装，应只读挂载包含 `bin/`、所需 `lib/`/`share/` 的最小安装前缀，例如：
+
+```toml
+[execution]
+path = "/opt/rust/bin:/opt/postgres/bin:/usr/local/bin:/usr/bin:/bin"
+readonly_mounts = [
+  { source = "/home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu", target = "/opt/rust" },
+  { source = "/opt/postgresql-16", target = "/opt/postgres" },
+]
+```
+
+挂载后，sandbox 内至少应能解析 `initdb`、`postgres`、`pg_isready`、`createdb`。这些程序不必为了测试脚本的子进程调用而额外加入顶层 `allowed_programs`；但它们必须能从 `execution.path` 找到。修改 service-level execution 配置后需重启 EndlessVibe。
+
+不要只读/读写挂载宿主 PostgreSQL 的数据目录、认证文件、Unix socket 或开发数据库，也不要为了测试挂 `/var/run/docker.sock`。测试应在 `/cache` 或其他 Job 私有可写目录初始化新数据目录，使用随机 loopback 端口，并在 Job 结束时终止数据库进程、删除临时数据。这样即使 `execution.allow_network=false`，Server、Godot/Native 与临时 PostgreSQL 仍可在同一个隔离 Job 内完成真实数据库联测，同时不暴露宿主内网或开发库。
+
 ## Shell 与白名单
 
 `run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
