@@ -1,5 +1,6 @@
 use crate::{config_edit::{AddProjectRequest,UpdateProjectRequest},runtime::Runtime};
-use axum::{extract::{Path as AxumPath,State},http::{header,StatusCode},response::{sse::{Event,KeepAlive,Sse},Html,IntoResponse,Response},Json};
+use axum::{extract::{Path as AxumPath,Query,State},http::{header,StatusCode},response::{sse::{Event,KeepAlive,Sse},Html,IntoResponse,Response},Json};
+use serde::Deserialize;
 use serde_json::{json,Value};
 use std::{convert::Infallible,sync::Arc,time::Duration};
 use tokio_stream::{wrappers::BroadcastStream,StreamExt};
@@ -14,6 +15,10 @@ pub async fn status(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.sn
 pub async fn metrics(State(rt):State<Arc<Runtime>>)->impl IntoResponse{match rt.db.dashboard_metrics(3600,60){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn activity(State(rt):State<Arc<Runtime>>)->impl IntoResponse{let audits=rt.db.audits(50);let jobs=rt.jobs.list(crate::tools::types::ListJobsArgs{workspace:None,project:None,limit:30});match(audits,jobs){(Ok(audits),Ok(jobs))=>Json(json!({"generated_at":crate::util::now(),"audits":audits,"jobs":jobs["jobs"]})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn config(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_config(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
+#[derive(Deserialize)]pub struct OperationsQuery{pub limit:Option<usize>}
+pub async fn operations(State(rt):State<Arc<Runtime>>,Query(query):Query<OperationsQuery>)->Response{match rt.db.operations(query.limit.unwrap_or(100)){Ok(items)=>Json(json!({"generated_at":crate::util::now(),"operations":items})).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
+pub async fn operation(State(rt):State<Arc<Runtime>>,AxumPath(seq):AxumPath<i64>)->Response{match rt.db.operation(seq){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::NOT_FOUND,Json(json!({"error":format!("{error:#}")}))).into_response()}}
+pub async fn job_detail(State(rt):State<Arc<Runtime>>,AxumPath(job_id):AxumPath<String>)->Response{let job=rt.jobs.get(&job_id);let output=rt.jobs.output(crate::tools::types::OutputArgs{job_id:job_id.clone(),offset:0,limit:262144});match(job,output){(Ok(job),Ok(output))=>Json(json!({"job":job,"output":output})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::NOT_FOUND,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn events(State(rt):State<Arc<Runtime>>)->Sse<impl tokio_stream::Stream<Item=Result<Event,Infallible>>>{
     let stream=BroadcastStream::new(rt.subscribe_dashboard()).filter_map(|message|match message{Ok(data)=>Some(Ok::<Event,Infallible>(Event::default().data(data))),Err(_)=>None});
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
