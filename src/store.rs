@@ -4,6 +4,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::{path::Path, sync::Mutex, time::Duration};
 
 mod migrations;
+mod retention;
+pub(crate) use retention::{prune_common,prune_jobs};
 
 pub struct Store { connection: Mutex<Connection> }
 impl Store {
@@ -30,8 +32,9 @@ impl Store {
     pub fn put<T: Serialize>(&self, namespace: &str, key: &str, value: &T, expires: u64) -> Result<()> { self.transaction(|tx| put(tx, namespace, key, value, expires)) }
     pub fn audit(&self, tool: &str, workspace: &str, outcome: &str, note: &str) -> Result<()> {
         self.transaction(|tx| {
-            tx.execute("INSERT INTO audit(time,tool,workspace,outcome,note) VALUES(?1,?2,?3,?4,?5)", params![crate::util::now(), tool, workspace, outcome, crate::util::bounded_text(note, 512)])?;
-            tx.execute("DELETE FROM audit WHERE seq < (SELECT COALESCE(MAX(seq),0)-10000 FROM audit)", [])?;
+            let now=crate::util::now();
+            tx.execute("INSERT INTO audit(time,tool,workspace,outcome,note) VALUES(?1,?2,?3,?4,?5)", params![now, tool, workspace, outcome, crate::util::bounded_text(note, 512)])?;
+            retention::prune_common(tx,now)?;
             Ok(())
         })
     }
@@ -48,7 +51,7 @@ impl Store {
     }
     pub fn operation_finish(&self,seq:i64,status:&str,duration_ms:u64,output:Option<&serde_json::Value>,diff:&str,error:&str)->Result<()>{
         let output_json=output.map(|v|bounded_operation_json(v.clone())).unwrap_or_else(||"{}".into());let diff=bounded_operation_text(diff,262144);let(added_lines,removed_lines)=diff_stats(&diff);let error=bounded_operation_text(error,8192);
-        self.transaction(|tx|{tx.execute("UPDATE operation_log SET finished=?2,status=?3,duration_ms=?4,output_json=?5,diff=?6,added_lines=?7,removed_lines=?8,error=?9 WHERE seq=?1",params![seq,crate::util::now(),status,duration_ms,output_json,diff,added_lines,removed_lines,error])?;tx.execute("DELETE FROM operation_log WHERE seq < (SELECT COALESCE(MAX(seq),0)-5000 FROM operation_log)",[])?;Ok(())})
+        self.transaction(|tx|{let now=crate::util::now();tx.execute("UPDATE operation_log SET finished=?2,status=?3,duration_ms=?4,output_json=?5,diff=?6,added_lines=?7,removed_lines=?8,error=?9 WHERE seq=?1",params![seq,now,status,duration_ms,output_json,diff,added_lines,removed_lines,error])?;retention::prune_common(tx,now)?;Ok(())})
     }
     pub fn operations(&self,limit:usize)->Result<Vec<serde_json::Value>>{
         self.transaction(|tx|{let mut q=tx.prepare("SELECT seq,started,finished,tool,workspace,project,status,duration_ms,added_lines,removed_lines,error,substr(input_json,1,1200),substr(diff,1,1600) FROM operation_log ORDER BY seq DESC LIMIT ?1")?;let rows=q.query_map([limit.clamp(1,200) as i64],|r|{let input_preview=r.get::<_,String>(11)?;let input=serde_json::from_str::<serde_json::Value>(&input_preview).unwrap_or_else(|_|serde_json::json!({"preview":input_preview}));Ok(serde_json::json!({"seq":r.get::<_,i64>(0)?,"started":r.get::<_,u64>(1)?,"finished":r.get::<_,Option<u64>>(2)?,"tool":r.get::<_,String>(3)?,"workspace":r.get::<_,String>(4)?,"project":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?,"duration_ms":r.get::<_,u64>(7)?,"added_lines":r.get::<_,u64>(8)?,"removed_lines":r.get::<_,u64>(9)?,"error":r.get::<_,String>(10)?,"input_preview":input,"diff_preview":r.get::<_,String>(12)?} ))})?;Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)})
@@ -60,7 +63,7 @@ impl Store {
         if requests==0&&rx_bytes==0&&tx_bytes==0{return Ok(());}let now=crate::util::now();let bucket=now/60*60;
         self.transaction(|tx|{
             tx.execute("INSERT INTO traffic(bucket,requests,rx_bytes,tx_bytes) VALUES(?1,?2,?3,?4) ON CONFLICT(bucket) DO UPDATE SET requests=requests+excluded.requests,rx_bytes=rx_bytes+excluded.rx_bytes,tx_bytes=tx_bytes+excluded.tx_bytes",params![bucket,requests,rx_bytes,tx_bytes])?;
-            tx.execute("DELETE FROM traffic WHERE bucket<?1",[now.saturating_sub(7*86400)])?;Ok(())
+            retention::prune_common(tx,now)?;Ok(())
         })
     }
     pub fn dashboard_metrics(&self, window_seconds:u64, bucket_seconds:u64) -> Result<serde_json::Value> {
@@ -77,7 +80,7 @@ impl Store {
             Ok(serde_json::json!({"window_seconds":bucket_seconds*buckets as u64,"bucket_seconds":bucket_seconds,"generated_at":now,"totals":{"requests":requests.iter().sum::<u64>(),"successes":successes.iter().sum::<u64>(),"failures":failures.iter().sum::<u64>(),"http_requests":http_requests.iter().sum::<u64>(),"rx_bytes":rx_bytes.iter().sum::<u64>(),"tx_bytes":tx_bytes.iter().sum::<u64>()},"points":points}))
         })
     }
-    pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { tx.execute("DELETE FROM kv WHERE expires>0 AND expires<?1", [crate::util::now()])?; Ok(()) }) }
+    pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { retention::prune_common(tx,crate::util::now())?; Ok(()) }) }
 }
 fn sensitive_operation_key(key:&str)->bool{let key=key.to_ascii_lowercase();["authorization","access_token","refresh_token","password","passwd","secret","api_key","apikey","owner_key","private_key","credential"].iter().any(|part|key.contains(part))}
 fn sanitize_operation_value(value:&mut serde_json::Value){match value{serde_json::Value::Object(map)=>{for(key,value)in map.iter_mut(){if sensitive_operation_key(key){*value=serde_json::Value::String("[REDACTED]".into());}else if key.eq_ignore_ascii_case("script"){if let Some(text)=value.as_str(){*value=serde_json::json!({"omitted":true,"bytes":text.len(),"sha256":crate::util::digest(text)});}else{sanitize_operation_value(value);}}else{sanitize_operation_value(value);}}},serde_json::Value::Array(values)=>for value in values{sanitize_operation_value(value)},serde_json::Value::String(text)=>{for marker in ["Bearer ","token=","password=","secret=","api_key="]{if let Some(pos)=text.to_ascii_lowercase().find(&marker.to_ascii_lowercase()){let end=text[pos..].find(char::is_whitespace).map(|v|pos+v).unwrap_or(text.len());text.replace_range(pos..end,"[REDACTED]");break;}}},_=>{}}}
