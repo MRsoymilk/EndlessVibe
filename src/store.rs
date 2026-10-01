@@ -44,10 +44,10 @@ impl Store {
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
-    pub fn record_traffic(&self,rx_bytes:u64,tx_bytes:u64)->Result<()> {
-        let now=crate::util::now();let bucket=now/60*60;
+    pub fn record_traffic(&self,requests:u64,rx_bytes:u64,tx_bytes:u64)->Result<()> {
+        if requests==0&&rx_bytes==0&&tx_bytes==0{return Ok(());}let now=crate::util::now();let bucket=now/60*60;
         self.transaction(|tx|{
-            tx.execute("INSERT INTO traffic(bucket,requests,rx_bytes,tx_bytes) VALUES(?1,1,?2,?3) ON CONFLICT(bucket) DO UPDATE SET requests=requests+1,rx_bytes=rx_bytes+excluded.rx_bytes,tx_bytes=tx_bytes+excluded.tx_bytes",params![bucket,rx_bytes,tx_bytes])?;
+            tx.execute("INSERT INTO traffic(bucket,requests,rx_bytes,tx_bytes) VALUES(?1,?2,?3,?4) ON CONFLICT(bucket) DO UPDATE SET requests=requests+excluded.requests,rx_bytes=rx_bytes+excluded.rx_bytes,tx_bytes=tx_bytes+excluded.tx_bytes",params![bucket,requests,rx_bytes,tx_bytes])?;
             tx.execute("DELETE FROM traffic WHERE bucket<?1",[now.saturating_sub(7*86400)])?;Ok(())
         })
     }
@@ -80,5 +80,5 @@ pub fn count(tx: &Transaction<'_>, namespace: &str) -> Result<usize> { Ok(tx.que
 #[cfg(test)] mod tests {
     use super::*;
     #[test] fn private_storage_persists_and_rolls_back() { let d = tempfile::tempdir().unwrap(); let s = Store::open(&d.path().join("db")).unwrap(); s.put("x", "key", &42, 0).unwrap(); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); let r: Result<()> = s.transaction(|tx| { put(tx,"x","key",&43,0)?; anyhow::bail!("abort") }); assert!(r.is_err()); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); }
-    #[test] fn dashboard_metrics_aggregate_audit_jobs_and_traffic(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();s.record_traffic(120,340).unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["totals"]["http_requests"],1);assert_eq!(value["totals"]["rx_bytes"],120);assert_eq!(value["totals"]["tx_bytes"],340);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
+    #[test] fn dashboard_metrics_aggregate_audit_jobs_and_traffic(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();s.record_traffic(1,120,340).unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["totals"]["http_requests"],1);assert_eq!(value["totals"]["rx_bytes"],120);assert_eq!(value["totals"]["tx_bytes"],340);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
 }

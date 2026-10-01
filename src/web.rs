@@ -1,6 +1,9 @@
-use crate::runtime::Runtime;
-use axum::{extract::State,http::{header,StatusCode},response::{Html,IntoResponse},Json};
-use std::sync::Arc;
+use crate::{config_edit::{AddProjectRequest,UpdateProjectRequest},runtime::Runtime};
+use axum::{extract::{Path as AxumPath,State},http::{header,StatusCode},response::{sse::{Event,KeepAlive,Sse},Html,IntoResponse,Response},Json};
+use serde_json::{json,Value};
+use std::{convert::Infallible,sync::Arc,time::Duration};
+use tokio_stream::{wrappers::BroadcastStream,StreamExt};
+
 pub async fn home()->impl IntoResponse{Html(include_str!("../web/index.html"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
 pub async fn javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/app.js"))}
@@ -8,6 +11,22 @@ pub async fn uplot_javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text
 pub async fn uplot_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.min.css"))}
 pub async fn favicon()->impl IntoResponse{StatusCode::NO_CONTENT}
 pub async fn status(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.snapshot())}
-pub async fn metrics(State(rt):State<Arc<Runtime>>)->impl IntoResponse{match rt.db.dashboard_metrics(3600,60){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,format!("Dashboard metrics unavailable: {error}")).into_response()}}
-pub async fn activity(State(rt):State<Arc<Runtime>>)->impl IntoResponse{let audits=rt.db.audits(50);let jobs=rt.jobs.list(crate::tools::types::ListJobsArgs{workspace:None,project:None,limit:30});match(audits,jobs){(Ok(audits),Ok(jobs))=>Json(serde_json::json!({"generated_at":crate::util::now(),"audits":audits,"jobs":jobs["jobs"]})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::INTERNAL_SERVER_ERROR,format!("Dashboard activity unavailable: {error}")).into_response()}}
-pub async fn config(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.dashboard_config())}
+pub async fn metrics(State(rt):State<Arc<Runtime>>)->impl IntoResponse{match rt.db.dashboard_metrics(3600,60){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
+pub async fn activity(State(rt):State<Arc<Runtime>>)->impl IntoResponse{let audits=rt.db.audits(50);let jobs=rt.jobs.list(crate::tools::types::ListJobsArgs{workspace:None,project:None,limit:30});match(audits,jobs){(Ok(audits),Ok(jobs))=>Json(json!({"generated_at":crate::util::now(),"audits":audits,"jobs":jobs["jobs"]})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
+pub async fn config(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_config(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
+pub async fn events(State(rt):State<Arc<Runtime>>)->Sse<impl tokio_stream::Stream<Item=Result<Event,Infallible>>>{
+    let stream=BroadcastStream::new(rt.subscribe_dashboard()).filter_map(|message|match message{Ok(data)=>Some(Ok::<Event,Infallible>(Event::default().data(data))),Err(_)=>None});
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+}
+fn mutation_response(result:anyhow::Result<Value>)->Response{
+    match result{
+        Ok(value)=>Json(value).into_response(),
+        Err(error)=>{
+            let message=format!("{error:#}");
+            let status=if message.starts_with("CONFIG_CONFLICT:"){StatusCode::CONFLICT}else{StatusCode::BAD_REQUEST};
+            (status,Json(json!({"error":message}))).into_response()
+        }
+    }
+}
+pub async fn add_project(State(rt):State<Arc<Runtime>>,Json(request):Json<AddProjectRequest>)->Response{mutation_response(rt.dashboard_add_project(request))}
+pub async fn update_project(State(rt):State<Arc<Runtime>>,AxumPath((workspace,project)):AxumPath<(String,String)>,Json(request):Json<UpdateProjectRequest>)->Response{mutation_response(rt.dashboard_update_project(&workspace,&project,request))}
