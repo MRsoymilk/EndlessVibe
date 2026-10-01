@@ -84,13 +84,14 @@
 </section>
 
 <section class="page" data-page="config">
-<div class="page-title"><div><p class="eyebrow">CONFIGURATION</p><h2>配置</h2><p>只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。</p></div><span class="badge-note">修改 config.toml 后需重启</span></div>
+<div class="page-title"><div><p class="eyebrow">CONFIGURATION</p><h2>配置</h2><p>只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。</p></div><span id="config-restart-badge" class="badge-note">检查配置状态</span></div>
 <div class="config-grid">
 <section class="config-card"><div class="config-heading"><h3>Server / Dashboard</h3><span>NETWORK</span></div><dl id="config-server" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Security</h3><span>AUTH</span></div><dl id="config-security" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Execution</h3><span>SANDBOX</span></div><dl id="config-execution" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Limits</h3><span>LIMITS</span></div><dl id="config-limits" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Git</h3><span>IDENTITY</span></div><dl id="config-git" class="config-list"></dl></section>
+<section class="config-card full"><div class="config-heading"><h3>添加 Project</h3><span>WRITE CONFIG</span></div><p class="config-note">写入 config.toml；Project 在 EndlessVibe 重启后加入 MCP 运行时。</p><form id="add-project-form" class="config-form"><label>Workspace<select id="add-project-workspace" required></select></label><label>Project ID<input id="add-project-id" type="text" maxlength="64" placeholder="留空时使用目录名"></label><label class="path-field">Absolute Path<input id="add-project-path" type="text" required placeholder="/home/vv/project/example"></label><div class="permission-editor"><label><input id="add-project-write" type="checkbox" checked> write</label><label><input id="add-project-exec" type="checkbox" checked> exec</label><label><input id="add-project-commit" type="checkbox" checked> commit</label></div><button type="submit">添加 Project</button><span id="config-write-status" class="write-status"></span></form></section>
 <section class="config-card full"><div class="config-heading"><h3>Workspace → Project</h3><span>ACCESS</span></div><div id="workspace-config" class="workspace-config"></div></section>
 <section class="config-card full"><div class="config-heading"><h3>MCP 工具</h3><span id="mcp-tool-count">—</span></div><p class="config-note">当前服务向 ChatGPT 暴露的工具如下。</p><div id="mcp-tools" class="tool-list"></div></section>
 </div>
