@@ -62,12 +62,15 @@ pub fn load(config:&Config,config_path:&Path)->Result<BTreeMap<String,Arc<Worksp
         }
         let root=Root::open(&root_path)?;
         let mut projects=BTreeMap::new();
-        if legacy(&item)&&item.projects.is_empty(){insert_project(&mut projects,&item.id,&root_path,project_config(item.id.clone(),PathBuf::from("."),&item),true)?;}
-        for p in &item.projects{insert_project(&mut projects,&item.id,&root_path,p.clone(),false)?;}
+        let mut legacy_children=Vec::new();
         for k in 0..opened.len(){
             let mut parent=legacy_parent[k];let mut belongs=false;
             while let Some(p)=parent{if p==i{belongs=true;break;}parent=legacy_parent[p];}
-            if !belongs{continue;}
+            if belongs{legacy_children.push(k);}
+        }
+        if legacy(&item)&&item.projects.is_empty()&&legacy_children.is_empty(){insert_project(&mut projects,&item.id,&root_path,project_config(item.id.clone(),PathBuf::from("."),&item),true)?;}
+        for p in &item.projects{insert_project(&mut projects,&item.id,&root_path,p.clone(),false)?;}
+        for k in legacy_children{
             let child=&opened[k];let rel=child.1.path.strip_prefix(&root_path).context("Legacy project is outside workspace root")?.to_owned();
             insert_project(&mut projects,&item.id,&root_path,project_config(child.0.id.clone(),rel,&child.0),true)?;
         }
@@ -89,7 +92,8 @@ pub fn inspect(project:&Project)->Result<Value>{
     fn legacy(id:&str,path:&Path)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects:vec![],allow_write:Some(true),allow_exec:Some(true),allow_git_commit:Some(true)}}
     fn nested(id:&str,path:&Path,projects:Vec<ProjectConfig>)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects,allow_write:None,allow_exec:None,allow_git_commit:None}}
     fn project(id:&str,path:&str)->ProjectConfig{ProjectConfig{id:id.into(),path:path.into(),allow_write:true,allow_exec:true,allow_git_commit:true}}
-    #[test]fn legacy_parent_child_become_one_workspace_with_projects(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");let child=root.join("child");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&child).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![legacy("NAME",&root),legacy("child",&child)];let m=load(&c,&cfg_path).unwrap();assert_eq!(m.len(),1);assert!(m["NAME"].projects.contains_key("NAME"));assert!(m["NAME"].projects.contains_key("child"));assert!(Arc::ptr_eq(&m["NAME"].projects["NAME"].lock,&m["NAME"].projects["child"].lock));}
+    #[test]fn legacy_parent_becomes_root_for_child_projects(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");let a=root.join("a");let b=root.join("b");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&a).unwrap();std::fs::create_dir_all(&b).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![legacy("NAME",&root),legacy("a",&a),legacy("b",&b)];let m=load(&c,&cfg_path).unwrap();assert_eq!(m.len(),1);assert!(!m["NAME"].projects.contains_key("NAME"));assert!(m["NAME"].projects.contains_key("a"));assert!(m["NAME"].projects.contains_key("b"));assert!(!Arc::ptr_eq(&m["NAME"].projects["a"].lock,&m["NAME"].projects["b"].lock));}
+    #[test]fn standalone_legacy_workspace_remains_compatible_project(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&root).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![legacy("solo",&root)];let m=load(&c,&cfg_path).unwrap();assert!(m["solo"].projects.contains_key("solo"));}
     #[test]fn configured_projects_get_independent_locks(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(root.join("a")).unwrap();std::fs::create_dir_all(root.join("b")).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![nested("root",&root,vec![project("a","a"),project("b","b")])];let m=load(&c,&cfg_path).unwrap();assert!(!Arc::ptr_eq(&m["root"].projects["a"].lock,&m["root"].projects["b"].lock));}
     #[test]fn configured_project_cannot_escape_or_overlap(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(root.join("a/sub")).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![nested("root",&root,vec![project("a","a"),project("sub","a/sub")])];assert!(load(&c,&cfg_path).is_err());}
 }
