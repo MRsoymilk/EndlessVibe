@@ -94,11 +94,22 @@ async fn main()->Result<()>{
     }
     let listener=tokio::net::TcpListener::bind(settings.server.bind).await.with_context(||format!("Cannot listen on {}; stop the previous EndlessVibe process",settings.server.bind))?;settings.server.bind=listener.local_addr()?;
     let rt=Runtime::new(settings,&path)?;let app=server::create_router(rt.clone());
+    let dashboard_listener=tokio::net::TcpListener::bind("127.0.0.1:20001")
+        .await
+        .context("Cannot listen on Dashboard 127.0.0.1:20001")?;
+    let dashboard_app=server::create_dashboard_router(rt.clone());
+    let dashboard_task=tokio::spawn(async move{
+        if let Err(error)=axum::serve(dashboard_listener,dashboard_app).await{
+            tracing::error!(error=%error,"Dashboard server failed");
+        }
+    });
+
     let project_count=rt.workspaces.values().map(|w|w.projects.len()).sum::<usize>();tracing::info!(version=env!("CARGO_PKG_VERSION"),listen=%rt.config.server.bind,workspaces=rt.workspaces.len(),projects=project_count,backend=%rt.config.execution.backend,"EndlessVibe started; private MCP endpoints require OAuth");
     if rt.config.execution.backend=="host"{tracing::warn!("UNSANDBOXED host execution was explicitly enabled; tools have the service user's permissions");}
     if rt.config.execution.backend=="bubblewrap"&&!rt.config.execution.bubblewrap.exists(){tracing::warn!("bubblewrap is not installed; file/Git tools work, command jobs fail closed until it is installed");}
-    eprintln!("Homepage: http://127.0.0.1:{}/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.bind.port(),rt.config.server.public_url);
+    eprintln!("Dashboard: http://127.0.0.1:20001/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.public_url);
     let shutdown_rt=rt.clone();let result=axum::serve(listener,app).with_graceful_shutdown(async move{shutdown_signal().await;shutdown_rt.jobs.cancel_all();shutdown_rt.shutdown.cancel();}).await;
+    dashboard_task.abort();let _=dashboard_task.await;
     rt.jobs.shutdown().await;rt.wait_for_operations().await;result.context("HTTP server failed")
 }
 async fn shutdown_signal(){

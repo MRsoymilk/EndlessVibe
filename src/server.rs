@@ -9,8 +9,39 @@ pub fn create_router(rt:Arc<Runtime>)->Router{
     let mcp=StreamableHttpService::new(move||Ok(EndlessVibeMcp::new(tool_state.clone())),LocalSessionManager::default().into(),transport);
     let protected:Router<Arc<Runtime>>=Router::new().route_service("/mcp",mcp.clone()).route_service("/mcp/",mcp).route_layer(middleware::from_fn_with_state(rt.clone(),auth::protect));
     let oauth=Router::new().route("/.well-known/oauth-authorization-server",get(auth::oauth_metadata)).route("/.well-known/oauth-protected-resource",get(auth::protected_metadata)).route("/.well-known/oauth-protected-resource/mcp",get(auth::protected_metadata)).route("/oauth/register",post(auth::register)).route("/oauth/authorize",get(auth::authorize).post(auth::consent)).route("/oauth/token",post(auth::token)).route("/oauth/revoke",post(auth::revoke)).layer(DefaultBodyLimit::max(16384));
-    Router::new().route("/",get(web::home)).route("/assets/app.css",get(web::css)).route("/assets/app.js",get(web::javascript)).route("/favicon.ico",get(web::favicon)).route("/api/status",get(web::status)).route("/health",get(web::status)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
+    Router::new().route("/health",get(web::status)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
 }
+
+pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
+    Router::new()
+        .route("/",get(web::home))
+        .route("/assets/app.css",get(web::css))
+        .route("/assets/app.js",get(web::javascript))
+        .route("/favicon.ico",get(web::favicon))
+        .route("/api/status",get(web::status))
+        .route("/health",get(web::status))
+        .with_state(rt)
+        .layer(middleware::from_fn(dashboard_headers))
+}
+
+async fn dashboard_headers(request:Request,next:Next)->Response{
+    let mut response=next.run(request).await;
+    let headers=response.headers_mut();
+
+    headers.insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff"));
+    headers.insert(header::REFERRER_POLICY,HeaderValue::from_static("no-referrer"));
+    headers.insert(header::X_FRAME_OPTIONS,HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+        )
+    );
+
+    response
+}
+
 pub(crate) async fn tool_descriptors(response:Response,limit:usize)->Response{
     if response.status()!=StatusCode::OK{return response;}
     let (mut parts,body)=response.into_parts();
