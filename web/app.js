@@ -16,7 +16,7 @@ async function refresh(){
         const data=await response.json();
         if(data.status!=="running"||data.name!=="EndlessVibe"||typeof data.version!=="string"||typeof data.listen_address!=="string"||!Number.isSafeInteger(data.uptime_seconds)||data.uptime_seconds<0||!Number.isSafeInteger(data.started_at_unix_seconds)||!Number.isSafeInteger(data.checked_at_unix_seconds))throw new Error("状态接口返回了无法识别的数据");
         $("version").textContent=`v${data.version}`;$("uptime").textContent=formatUptime(data.uptime_seconds);$("listen").textContent=data.listen_address;$("started").textContent=formatTime(data.started_at_unix_seconds);$("mcp-endpoint").textContent=`${window.location.origin}/mcp`;
-        $("tool-count").textContent=Array.isArray(data.mcp?.tools)?data.mcp.tools.length:"—";$("workspace-count").textContent=data.workspace_count??"—";$("execution-backend").textContent=data.security?.execution_backend??"—";$("active-jobs").textContent=data.active_jobs??"—";
+        $("tool-count").textContent=Array.isArray(data.mcp?.tools)?data.mcp.tools.length:"—";$("workspace-count").textContent=data.workspace_count??"—";$("project-count").textContent=data.project_count??"—";$("execution-backend").textContent=data.security?.execution_backend??"—";$("active-jobs").textContent=data.active_jobs??"—";
         $("last-success").textContent=`最近成功检查：${formatTime(data.checked_at_unix_seconds)}`;
         setConnection(true,"当前浏览器已成功访问服务状态接口。运行信息每 5 秒更新一次。");
     }catch(error){
