@@ -23,6 +23,9 @@ fn bubblewrap_failure_hint(backend:&str,status:&str,bytes:&[u8])->Option<String>
     if text.contains("max_*_namespaces exceeded"){
         return Some("bubblewrap namespace quota is exhausted; inspect /proc/sys/user/max_*_namespaces and current namespace usage".into());
     }
+    if text.contains("bwrap: execvp ")&&text.contains("No such file or directory"){
+        return Some("configured program is not visible inside the bubblewrap sandbox; add its sandbox path to execution.path and expose only the required toolchain directory with execution.readonly_mounts (do not mount the whole HOME or credential directories)".into());
+    }
     None
 }
 impl Output{
@@ -100,4 +103,4 @@ impl Jobs{
     }
 }
 async fn pipe<R:AsyncRead+Unpin>(mut r:R,label:&'static str,tx:mpsc::Sender<(&'static str,Vec<u8>)>){let mut b=[0u8;8192];loop{match r.read(&mut b).await{Ok(0)|Err(_)=>break,Ok(n)=>if tx.send((label,b[..n].to_vec())).await.is_err(){break;}}}}
-#[cfg(test)]mod tests{use super::*;#[test]fn ring_output_is_bounded(){let mut out=Output{bytes:vec![],offset:0,total:0};out.append("stdout",b"abcdefghijklmnopqrstuvwxyz",12);assert_eq!(out.bytes.len(),12);assert!(out.offset>0);assert_eq!(out.total,out.offset+out.bytes.len() as u64);}#[test]fn namespace_eagain_has_actionable_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"bwrap: Creating new namespace failed: Resource temporarily unavailable\n").unwrap();assert!(h.contains("RLIMIT_NPROC"));}#[test]fn unrelated_failure_has_no_bwrap_hint(){assert!(bubblewrap_failure_hint("bubblewrap","failed",b"cargo: error").is_none());assert!(bubblewrap_failure_hint("host","failed",b"Creating new namespace failed: Resource temporarily unavailable").is_none());}}
+#[cfg(test)]mod tests{use super::*;#[test]fn ring_output_is_bounded(){let mut out=Output{bytes:vec![],offset:0,total:0};out.append("stdout",b"abcdefghijklmnopqrstuvwxyz",12);assert_eq!(out.bytes.len(),12);assert!(out.offset>0);assert_eq!(out.total,out.offset+out.bytes.len() as u64);}#[test]fn namespace_eagain_has_actionable_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"bwrap: Creating new namespace failed: Resource temporarily unavailable\n").unwrap();assert!(h.contains("RLIMIT_NPROC"));}#[test]fn missing_sandbox_program_has_mount_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"bwrap: execvp cargo: No such file or directory\n").unwrap();assert!(h.contains("readonly_mounts"));}#[test]fn unrelated_failure_has_no_bwrap_hint(){assert!(bubblewrap_failure_hint("bubblewrap","failed",b"cargo: error").is_none());assert!(bubblewrap_failure_hint("host","failed",b"Creating new namespace failed: Resource temporarily unavailable").is_none());}}
