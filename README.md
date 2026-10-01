@@ -30,6 +30,7 @@ Workspace: projects -> /home/user/projects
 - **OAuth for MCP**：Authorization Code、S256 PKCE、Dynamic Client Registration。
 - **冲突安全编辑**：文件写入和 patch 使用 SHA-256 做乐观并发检查。
 - **异步任务**：命令立即返回 Job ID，可查询状态、输出、超时和取消。
+- **长任务 Checkpoint**：`task_id + stage` 将 Job 与 Git commit 关联；成功 commit 自动成为阶段恢复点，stream 中断后可直接查询恢复。
 - **默认 Bubblewrap 沙箱**：网络与通用 Shell 默认关闭。
 - **受审查 Git 提交**：`git_diff` 生成 review token，`git_commit` 只提交明确审查过的文件。
 - **内嵌状态页**：无需独立前端服务。
@@ -175,7 +176,7 @@ MCP endpoint：`http://127.0.0.1:20000/mcp`
 | Workspace / Project | `list_workspaces`, `list_projects`, `inspect_project` |
 | 文件 | `list_directory`, `read_file`, `write_file`, `apply_patch`, `create_directory`, `search_code` |
 | 命令 | `run_command`, `run_shell` |
-| 任务 | `get_job`, `get_job_output`, `cancel_job`, `list_jobs` |
+| 任务 | `get_job`, `get_job_output`, `cancel_job`, `list_jobs`, `get_task_checkpoint`, `list_task_checkpoints` |
 | Git | `git_status`, `git_diff`, `git_log`, `git_commit` |
 
 除连接和 Job 查询类工具外，Project 操作统一使用：
@@ -196,6 +197,20 @@ MCP endpoint：`http://127.0.0.1:20000/mcp`
 
 例如 `projects/BAfter` 与 `projects/mHypr` 可以同时执行任务，只要没有超过全局 `max_jobs`；`projects/BAfter` 自己的文件、命令和 Git 操作会争用同一 Project 锁。
 
+长任务建议始终携带稳定的 `task_id` 和当前 `stage`：
+
+```json
+{"workspace":"projects","project":"BAfter","program":"cargo","args":["check"],"request_id":"release-check-01","task_id":"release-031","stage":"validate","timeout_seconds":120}
+```
+
+Job 会把 `job_id` 和终态写入阶段 checkpoint。阶段最终通过 `git_commit` 提交时继续传相同的 `task_id + stage`，该 commit SHA 会成为该阶段的持久恢复点。ChatGPT stream 中断后使用：
+
+```json
+{"workspace":"projects","project":"BAfter","task_id":"release-031"}
+```
+
+调用 `get_task_checkpoint`，即可取得最新阶段、关联 Job、Job 状态和最后 commit，无需猜测上一轮执行到了哪里。Job 成功本身不代表阶段完成；只有成功 commit 的阶段状态为 `committed`。
+
 ### Git
 
 推荐流程：
@@ -207,7 +222,7 @@ git_status(workspace, project)
   → git_commit(workspace, project, paths, expected_head, expected_diff_sha256)
 ```
 
-`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。默认 `.git` 仍只读，且 `run_command` 会继续拒绝 Git 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
+`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。长任务可以额外传 `task_id + stage`；commit 成功后会自动记录 checkpoint。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。默认 `.git` 仍只读，且 `run_command` 会继续拒绝 Git 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
 
 ## Cloudflare Tunnel
 

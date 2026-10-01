@@ -82,10 +82,10 @@ Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project �
 `run_command`：
 
 ```json
-{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120}
+{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120,"task_id":"combat-refactor","stage":"validate-core"}
 ```
 
-任务立即返回 `job_id`。请求去重键是 `workspace + project + request_id`，因此不同 Project 可以使用相同 request_id 而不会互相复用。
+任务立即返回 `job_id`。请求去重键是 `workspace + project + request_id`，因此不同 Project 可以使用相同 request_id 而不会互相复用。`task_id` 与 `stage` 必须同时提供或同时省略；提供后 Job 会自动挂到对应阶段 checkpoint。
 
 `run_shell`：
 
@@ -111,13 +111,53 @@ Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project �
 {"job_id":"真实 Job ID","offset":0,"limit":65536}
 ```
 
-`list_jobs` 可以按 Workspace、Project 或两者过滤：
+`list_jobs` 可以按 Workspace、Project、`task_id` 过滤：
 
 ```json
-{"workspace":"projects","project":"BAfter","limit":20}
+{"workspace":"projects","project":"BAfter","task_id":"release-031","limit":20}
 ```
 
 终态包括 `succeeded`、`failed`、`timed_out`、`cancelled`、`interrupted`。
+
+## 长任务 Checkpoint
+
+对可能跨多轮 ChatGPT stream 的工作，使用一个稳定 `task_id`，每个可独立审查的小阶段使用一个 `stage`：
+
+```text
+release-031
+├── prepare
+├── validate
+├── merge
+└── version-bump
+```
+
+每次 `run_command` / `run_shell` 带上：
+
+```json
+{"task_id":"release-031","stage":"validate"}
+```
+
+checkpoint 会保留最近 Job ID 及其状态。一个 stage 可以有多个 Job，默认最多保留该阶段最近 20 个 Job 引用。
+
+阶段完成时，`git_commit` 继续传入相同的 `task_id + stage`。只有 commit 成功后，该阶段才进入 `committed`，并记录 `last_commit`。因此 `job_succeeded` 只表示校验命令完成，不表示整个阶段已经落盘。
+
+stream 中断或新会话恢复时：
+
+`get_task_checkpoint`：
+
+```json
+{"workspace":"projects","project":"BAfter","task_id":"release-031"}
+```
+
+返回 `latest` 和最近阶段 `stages`，其中包含状态、Job ID/状态、最后 commit 和更新时间。
+
+`list_task_checkpoints`：
+
+```json
+{"workspace":"projects","project":"BAfter","task_id":"release-031","limit":20}
+```
+
+也可以省略 `task_id` 查看最近任务恢复点。服务重启时，原本 `queued/running` 的 Job 会标记为 `interrupted`，关联 checkpoint 同步更新；Job 不会自动重放。
 
 ## Git
 
@@ -138,7 +178,7 @@ Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project �
 `git_commit`：
 
 ```json
-{"workspace":"projects","project":"BAfter","paths":["README.md","src/example.cpp"],"message":"fix(example): handle missing value","expected_head":"git_diff 返回的 HEAD","expected_diff_sha256":"git_diff 返回的审查摘要"}
+{"workspace":"projects","project":"BAfter","paths":["README.md","src/example.cpp"],"message":"fix(example): handle missing value","expected_head":"git_diff 返回的 HEAD","expected_diff_sha256":"git_diff 返回的审查摘要","task_id":"release-031","stage":"version-bump"}
 ```
 
 `git_commit` 只提交已审查文件；选中文件已有用户 staged 修改时拒绝，其他 staged 内容保留。不运行 hooks/filters/签名，不 push，不改写工作树。首次提交的 HEAD 使用 `UNBORN`。
@@ -149,7 +189,7 @@ Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project �
 
 | 工具 | OAuth scopes |
 |---|---|
-| `list_workspaces` / `list_projects` / `inspect_project` | `projects:read` |
+| `list_workspaces` / `list_projects` / `inspect_project` / task checkpoint 查询 | `projects:read` |
 | 文件读取/搜索/目录、Git 查询 | `files:read` |
 | 文件写入/patch/创建目录 | `files:write` |
 | 命令/Shell | `commands:execute` + `files:write` |
