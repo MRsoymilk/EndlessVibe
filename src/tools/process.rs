@@ -1,4 +1,4 @@
-use crate::{config::Config, workspace::Workspace};
+use crate::{config::Config, workspace::Project};
 use anyhow::{bail, Context, Result};
 use std::{path::{Path,PathBuf}, process::Stdio, time::Duration};
 use tokio::{io::{AsyncRead,AsyncReadExt,AsyncWriteExt}, process::Command};
@@ -65,7 +65,7 @@ pub async fn probe_bubblewrap(config:&Config)->Result<()>{
     Ok(())
 }
 
-pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
+pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
     w.exec_allowed()?;
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
     if shell&&!config.execution.allow_shell{bail!("run_shell is disabled; set execution.allow_shell=true locally after reviewing the risks");}
@@ -81,7 +81,7 @@ pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String]
             if let Some(home)=std::env::var_os("HOME"){c.env("HOME",home);}c.args(args);c
         }
         "bubblewrap"=>{
-            let cache=config.security.data_dir.join("exec-cache").join(&w.config.id);crate::util::private_dir(&cache)?;
+            let cache=config.security.data_dir.join("exec-cache").join(&w.workspace_id).join(&w.config.id);crate::util::private_dir(&cache)?;
             let mut c=bubblewrap_base_command(config)?;
             c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
             // Builds may inspect Git state, but must use the reviewed git_commit tool for writes.

@@ -71,7 +71,7 @@ impl Jobs{
         }
         let w=rt.workspace(&a.workspace)?;w.exec_allowed()?;
         let permit=self.slots.clone().try_acquire_owned().context("All command slots are occupied; query existing jobs first")?;
-        let lock=w.lock.clone().try_lock_owned().context("WORKSPACE_BUSY: another operation is using this workspace")?;
+        let lock=w.lock.clone().try_lock_owned().context("PROJECT_BUSY: another operation is using this project")?;
         let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell)?;
         let record=JobRecord{id:util::random_secret()?,workspace:a.workspace,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:util::now(),started:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None};
         self.db.audit(if shell{"run_shell"}else{"run_command"},&record.workspace,"accepted",&record.id)?;
