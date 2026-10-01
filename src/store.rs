@@ -81,6 +81,19 @@ impl Store {
         })
     }
     pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { retention::prune_common(tx,crate::util::now())?; Ok(()) }) }
+    pub fn maintain(&self,retained_jobs:usize)->Result<serde_json::Value>{
+        let now=crate::util::now();
+        self.transaction(|tx|{
+            let mut stats=retention::prune_common(tx,now)?;
+            stats.jobs=retention::prune_jobs(tx,retained_jobs)?;
+            Ok(serde_json::json!({
+                "checked_at":now,
+                "deleted":{"expired_kv":stats.expired_kv,"task_checkpoints":stats.task_checkpoints,"audit":stats.audit,"operations":stats.operations,"traffic":stats.traffic,"jobs":stats.jobs,"total":stats.total()},
+                "policy":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS},
+                "safety":{"running_jobs_preserved":true,"running_operations_preserved":true,"vacuum_performed":false}
+            }))
+        })
+    }
 }
 fn sensitive_operation_key(key:&str)->bool{let key=key.to_ascii_lowercase();["authorization","access_token","refresh_token","password","passwd","secret","api_key","apikey","owner_key","private_key","credential"].iter().any(|part|key.contains(part))}
 fn sanitize_operation_value(value:&mut serde_json::Value){match value{serde_json::Value::Object(map)=>{for(key,value)in map.iter_mut(){if sensitive_operation_key(key){*value=serde_json::Value::String("[REDACTED]".into());}else if key.eq_ignore_ascii_case("script"){if let Some(text)=value.as_str(){*value=serde_json::json!({"omitted":true,"bytes":text.len(),"sha256":crate::util::digest(text)});}else{sanitize_operation_value(value);}}else{sanitize_operation_value(value);}}},serde_json::Value::Array(values)=>for value in values{sanitize_operation_value(value)},serde_json::Value::String(text)=>{for marker in ["Bearer ","token=","password=","secret=","api_key="]{if let Some(pos)=text.to_ascii_lowercase().find(&marker.to_ascii_lowercase()){let end=text[pos..].find(char::is_whitespace).map(|v|pos+v).unwrap_or(text.len());text.replace_range(pos..end,"[REDACTED]");break;}}},_=>{}}}
