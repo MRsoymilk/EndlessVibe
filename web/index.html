@@ -4,17 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>EndlessVibe · 服务状态</title>
+<title>EndlessVibe · Dashboard</title>
+<link rel="stylesheet" href="/vendor/uPlot/uPlot.min.css">
 <link rel="stylesheet" href="/assets/app.css">
+<script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
 <script src="/assets/app.js" defer></script>
 </head>
 <body>
 <main class="shell">
-<header><div class="brand"><span class="logo" aria-hidden="true">EV</span><div><p class="eyebrow">ENDLESSVIBE</p><h1>服务状态</h1></div></div><a class="api-link" href="/api/status">查看 JSON <span aria-hidden="true">↗</span></a></header>
+<header><div class="brand"><span class="logo" aria-hidden="true">EV</span><div><p class="eyebrow">ENDLESSVIBE</p><h1>Dashboard</h1></div></div><a class="api-link" href="/api/status">查看 JSON <span aria-hidden="true">↗</span></a></header>
 <section class="overview" aria-labelledby="status-title"><div class="overview-top"><div><p class="eyebrow">HTTP SERVICE</p><h2 id="status-title">正在检查服务</h2></div><span id="status-badge" class="badge pending" role="status"><span class="dot" aria-hidden="true"></span><span id="badge-text">检查中</span></span></div><p id="status-detail">正在请求当前站点的状态接口。</p><div class="refresh-row"><span id="last-success">尚未取得状态</span><button type="button" id="refresh">立即刷新</button></div></section>
-<section class="metrics" aria-label="运行信息"><article><p class="label">服务版本</p><p class="value" id="version">—</p><p class="caption">EndlessVibe</p></article><article><p class="label">运行时长</p><p class="value" id="uptime">—</p><p class="caption">自本次服务启动</p></article><article><p class="label">本地监听</p><p class="value mono address" id="listen">—</p><p class="caption">HTTP · 默认端口 20000</p></article><article><p class="label">启动时间</p><p class="value datetime" id="started">—</p><p class="caption">浏览器本地时间</p></article></section>
-<section class="endpoints" aria-labelledby="endpoints-title"><h2 id="endpoints-title">服务接口</h2><dl><div><dt>Web 主页</dt><dd><span class="method">GET</span><a href="/">/</a></dd></div><div><dt>实时状态</dt><dd><span class="method">GET</span><a href="/api/status">/api/status</a></dd></div><div><dt>健康检查</dt><dd><span class="method">GET</span><a href="/health">/health</a></dd></div><div><dt>MCP 接口</dt><dd><span class="method post">POST</span><code id="mcp-endpoint">/mcp</code></dd></div></dl><p class="notice">状态页只确认 HTTP 服务可响应。MCP 由官方 Rust SDK rmcp 提供，请使用下方完整 /mcp 地址创建连接；ChatGPT 注册结果仍需单独验证。本版提供项目、文件、命令任务和 Git 工具；私有工具必须通过 OAuth 授权。主页不展示项目路径、文件内容或密钥。</p></section>
-<section class="endpoints" aria-label="能力和安全"><h2>能力与安全</h2><dl><div><dt>认证</dt><dd>OAuth · S256 PKCE</dd></div><div><dt>MCP 工具</dt><dd id="tool-count">—</dd></div><div><dt>Workspace 数量</dt><dd id="workspace-count">—</dd></div><div><dt>Project 数量</dt><dd id="project-count">—</dd></div><div><dt>执行后端</dt><dd id="execution-backend">—</dd></div><div><dt>运行中的任务</dt><dd id="active-jobs">—</dd></div></dl><p class="notice">已有 No Authentication 连接需要改为 OAuth 后重新连接。只有显式挂载在 Workspace 下的 Project 可访问；Shell 默认关闭，默认沙箱无网络。</p></section><footer><span id="site-origin">EndlessVibe</span><span>每 5 秒自动刷新 · 无第三方资源</span></footer>
+<section class="metrics" aria-label="运行信息"><article><p class="label">服务版本</p><p class="value" id="version">—</p><p class="caption">EndlessVibe</p></article><article><p class="label">运行时长</p><p class="value" id="uptime">—</p><p class="caption">自本次服务启动</p></article><article><p class="label">本地监听</p><p class="value mono address" id="listen">—</p><p class="caption">MCP · 默认端口 20000</p></article><article><p class="label">启动时间</p><p class="value datetime" id="started">—</p><p class="caption">浏览器本地时间</p></article></section>
+<section class="charts" aria-labelledby="charts-title">
+<div class="section-heading"><div><p class="eyebrow">LAST 60 MINUTES</p><h2 id="charts-title">运行曲线</h2></div><span id="metrics-status">等待指标数据</span></div>
+<div class="chart-stats"><article><p class="label">Requests</p><p class="value" id="requests-1h">—</p><p class="caption">已审计工具请求</p></article><article><p class="label">Success</p><p class="value" id="success-1h">—</p><p class="caption">成功完成</p></article><article><p class="label">Failed</p><p class="value" id="failed-1h">—</p><p class="caption">失败 / 超时 / 取消</p></article><article><p class="label">Active Jobs</p><p class="value" id="active-jobs-chart">—</p><p class="caption">当前运行任务</p></article></div>
+<div class="chart-grid">
+<article class="chart-card"><div class="chart-header"><div><h3>Tool Activity</h3><p>按 1 分钟聚合的工具请求与结果</p></div><span>60 min</span></div><div id="activity-chart" class="chart-host" aria-label="工具请求曲线"></div></article>
+<article class="chart-card"><div class="chart-header"><div><h3>Active Jobs</h3><p>根据任务开始和结束时间重建</p></div><span>60 min</span></div><div id="jobs-chart" class="chart-host" aria-label="运行任务曲线"></div></article>
+</div>
+</section>
+<section class="endpoints" aria-labelledby="endpoints-title"><h2 id="endpoints-title">服务接口</h2><dl><div><dt>Dashboard</dt><dd><span class="method">GET</span><a href="/">/</a></dd></div><div><dt>实时状态</dt><dd><span class="method">GET</span><a href="/api/status">/api/status</a></dd></div><div><dt>曲线指标</dt><dd><span class="method">GET</span><a href="/api/metrics">/api/metrics</a></dd></div><div><dt>健康检查</dt><dd><span class="method">GET</span><a href="/health">/health</a></dd></div><div><dt>MCP 接口</dt><dd><span class="method post">POST</span><code id="mcp-endpoint">/mcp</code></dd></div></dl><p class="notice">Dashboard 仅监听本机 loopback。曲线来自 EndlessVibe 自己的 SQLite 审计/任务记录；uPlot 由 web/vendor 本地提供，运行时不访问 CDN。</p></section>
+<section class="endpoints" aria-label="能力和安全"><h2>能力与安全</h2><dl><div><dt>认证</dt><dd>OAuth · S256 PKCE</dd></div><div><dt>MCP 工具</dt><dd id="tool-count">—</dd></div><div><dt>Workspace 数量</dt><dd id="workspace-count">—</dd></div><div><dt>Project 数量</dt><dd id="project-count">—</dd></div><div><dt>执行后端</dt><dd id="execution-backend">—</dd></div><div><dt>运行中的任务</dt><dd id="active-jobs">—</dd></div></dl><p class="notice">只有显式挂载在 Workspace 下的 Project 可访问；Shell 默认关闭，默认沙箱无网络。</p></section>
+<footer><span id="site-origin">EndlessVibe</span><span>每 5 秒自动刷新 · 第三方依赖从 web/vendor 本地加载</span></footer>
 <noscript><p class="noscript">JavaScript 未启用。请访问 <a href="/api/status">/api/status</a> 查看实时状态。</p></noscript>
 </main>
 </body>
