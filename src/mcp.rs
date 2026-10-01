@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 pub const SDK_VERSION:&str="3.5.0";
 /// Bump whenever any exposed MCP tool name, argument schema, security metadata or semantics change.
-pub const TOOL_SCHEMA_REVISION:&str="2026-10-02.1";
+pub const TOOL_SCHEMA_REVISION:&str="2026-10-02.2";
 pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","get_task_checkpoint","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
-fn answer(result:anyhow::Result<Value>)->CallToolResult{match result{Ok(value)=>{let mut out=CallToolResult::success(vec![ContentBlock::text(value.to_string())]);out.structured_content=Some(value);out},Err(e)=>CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))])}}
+fn answer(result:anyhow::Result<Value>)->CallToolResult{match result{Ok(value)=>{let mut out=CallToolResult::success(vec![ContentBlock::text(value.to_string())]);out.structured_content=Some(value);out},Err(e)=>{let payload=crate::error::payload(&e);let message=payload["message"].as_str().unwrap_or("operation failed").to_owned();let mut out=CallToolResult::error(vec![ContentBlock::text(message)]);out.structured_content=Some(payload);out}}}
 fn logged_input<T:Serialize>(tool:&str,value:&T)->Value{let mut out=serde_json::to_value(value).unwrap_or_else(|_|json!({}));if tool=="write_file"{if let Some(object)=out.as_object_mut(){let summary=object.get("content").and_then(Value::as_str).map(|content|json!({"omitted":true,"bytes":content.len(),"sha256":crate::util::digest(content)}));if let Some(summary)=summary{object.insert("content".into(),summary);}}}out}
 fn begin<T:Serialize>(rt:&Arc<Runtime>,tool:&str,workspace:&str,project:&str,input:&T)->OperationTrace{rt.begin_operation(tool,workspace,project,logged_input(tool,input))}
 fn empty(rt:&Arc<Runtime>,tool:&str)->OperationTrace{rt.begin_operation(tool,"","",json!({}))}

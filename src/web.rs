@@ -30,9 +30,8 @@ fn mutation_response(result:anyhow::Result<Value>)->Response{
     match result{
         Ok(value)=>Json(value).into_response(),
         Err(error)=>{
-            let message=format!("{error:#}");
-            let status=if message.starts_with("CONFIG_CONFLICT:"){StatusCode::CONFLICT}else{StatusCode::BAD_REQUEST};
-            (status,Json(json!({"error":message}))).into_response()
+            let status=match crate::error::code(&error){"CONFIG_CONFLICT"|"FILE_CONFLICT"|"PATCH_CONFLICT"|"GIT_CONFLICT"|"STAGED_CONFLICT"|"PROJECT_BUSY"|"GIT_BUSY"|"IDEMPOTENCY_CONFLICT"=>StatusCode::CONFLICT,"PROJECT_READ_ONLY"|"PROJECT_EXEC_DISABLED"|"GIT_COMMIT_DISABLED"|"GIT_PUSH_DISABLED"=>StatusCode::FORBIDDEN,"WORKSPACE_NOT_AUTHORIZED"|"PROJECT_NOT_AUTHORIZED"=>StatusCode::NOT_FOUND,_=>StatusCode::BAD_REQUEST};
+            (status,Json(crate::error::payload(&error))).into_response()
         }
     }
 }
