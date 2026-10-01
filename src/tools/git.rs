@@ -113,7 +113,7 @@ pub async fn commit(rt:&Runtime,w:&Project,a:CommitArgs)->Result<Value>{
     }
     lock.keep=true;
     if let Err(e)=std::fs::rename(&lock.path,&index_path){bail!("COMMIT_PARTIALLY_PUBLISHED: HEAD is now {commit_id}; index.lock and {} were retained for recovery: {e}",journal.display());}
-    lock.published=true;let durability_warning=File::open(&gitdir).and_then(|d|d.sync_all()).is_err();let _=std::fs::remove_file(&journal);
-    Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"commit":commit_id,"branch":branch,"paths":p.paths,"pushed":false,"unrelated_staging_preserved":true,"working_tree_not_rewritten":true,"durability_warning":durability_warning}))
+    lock.published=true;let durability_warning=File::open(&gitdir).and_then(|d|d.sync_all()).is_err();let _=std::fs::remove_file(&journal);let operation_diff=p.diff.clone();
+    Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"commit":commit_id,"branch":branch,"paths":p.paths,"pushed":false,"unrelated_staging_preserved":true,"working_tree_not_rewritten":true,"durability_warning":durability_warning,"_operation_diff":operation_diff}))
 }
 #[cfg(test)]mod tests{use super::*;#[test]fn status_handles_renames_and_hides_sensitive_paths(){let v=parse_status(b" M src/main.rs\0R  new.rs\0old.rs\0?? .env\0").unwrap();assert_eq!(v.len(),2);assert_eq!(v[1]["original_path"],"old.rs");}#[test]fn object_ids_are_validated(){assert!(oid(b"bad\n".to_vec()).is_err());assert!(oid(format!("{}\n","a".repeat(40)).into_bytes()).is_ok());}}

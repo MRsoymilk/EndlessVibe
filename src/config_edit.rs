@@ -4,7 +4,7 @@ use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 use std::{os::unix::fs::MetadataExt,path::{Path,PathBuf}};
 
-#[derive(Clone,Debug,Deserialize)]
+#[derive(Clone,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddProjectRequest{
     pub expected_revision:String,
@@ -15,7 +15,7 @@ pub struct AddProjectRequest{
     #[serde(default="yes")]pub allow_exec:bool,
     #[serde(default="yes")]pub allow_git_commit:bool,
 }
-#[derive(Clone,Debug,Deserialize)]
+#[derive(Clone,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProjectRequest{
     pub expected_revision:String,
@@ -28,8 +28,11 @@ pub struct ConfigMutation{
     pub revision:String,
     pub requires_restart:bool,
     pub project:Value,
+    #[serde(rename="_operation_diff")]
+    pub operation_diff:String,
 }
 fn yes()->bool{true}
+fn config_diff(old:&str,new:&str)->String{if old==new{return String::new();}let old_lines=old.split_inclusive('\n').collect::<Vec<_>>();let new_lines=new.split_inclusive('\n').collect::<Vec<_>>();let mut prefix=0usize;while prefix<old_lines.len()&&prefix<new_lines.len()&&old_lines[prefix]==new_lines[prefix]{prefix+=1;}let mut suffix=0usize;while suffix<old_lines.len().saturating_sub(prefix)&&suffix<new_lines.len().saturating_sub(prefix)&&old_lines[old_lines.len()-1-suffix]==new_lines[new_lines.len()-1-suffix]{suffix+=1;}let context=3usize;let old_start=prefix.saturating_sub(context);let new_start=prefix.saturating_sub(context);let old_change_end=old_lines.len().saturating_sub(suffix);let new_change_end=new_lines.len().saturating_sub(suffix);let old_end=(old_change_end+context).min(old_lines.len());let new_end=(new_change_end+context).min(new_lines.len());let mut diff=format!("--- a/config.toml\n+++ b/config.toml\n@@ -{},{} +{},{} @@\n",old_start+1,old_end-old_start,new_start+1,new_end-new_start);for line in &old_lines[old_start..prefix]{diff.push(' ');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}for line in &old_lines[prefix..old_change_end]{diff.push('-');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}for line in &new_lines[prefix..new_change_end]{diff.push('+');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}for line in &old_lines[old_change_end..old_end]{diff.push(' ');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}if diff.len()>131072{let mut end=131072;while end>0&&!diff.is_char_boundary(end){end-=1;}diff.truncate(end);diff.push_str("\n… [diff truncated]\n");}diff}
 
 pub fn revision(path:&Path)->Result<String>{Ok(util::digest(std::fs::read(path).with_context(||format!("Read {}",path.display()))?))}
 fn read_checked(path:&Path,expected_revision:&str)->Result<(String,Config)>{
@@ -103,7 +106,7 @@ fn project_value(workspace:&str,project:&ProjectConfig,root:&Path)->Value{
 }
 pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>{
     validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit)?;
-    let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;
+    let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
     if !config::valid_id(&request.workspace){bail!("Invalid workspace ID");}
     let workspace_index=cfg.workspaces.iter().position(|w|w.id==request.workspace).with_context(||format!("Workspace {} is not configured",request.workspace))?;
     let root=cfg.workspaces[workspace_index].path.canonicalize().with_context(||format!("Cannot resolve workspace root {}",cfg.workspaces[workspace_index].path.display()))?;
@@ -123,11 +126,11 @@ pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>
     insert_project_text(&mut text,workspace_index,&project)?;
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
-    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(&request.workspace,&project,&root)})
+    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(&request.workspace,&project,&root),operation_diff:config_diff(&original,&text)})
 }
 pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:UpdateProjectRequest)->Result<ConfigMutation>{
     validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit)?;
-    let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;
+    let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
     let workspace_index=cfg.workspaces.iter().position(|w|w.id==workspace_id).with_context(||format!("Workspace {workspace_id} is not configured"))?;
     let project_index=cfg.workspaces[workspace_index].projects.iter().position(|p|p.id==project_id).with_context(||format!("Project {workspace_id}/{project_id} is not configured"))?;
     let root=cfg.workspaces[workspace_index].path.canonicalize()?;
@@ -145,7 +148,7 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
     let project=&cfg.workspaces[workspace_index].projects[project_index];
-    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,project,&root)})
+    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,project,&root),operation_diff:config_diff(&original,&text)})
 }
 
 #[cfg(test)]

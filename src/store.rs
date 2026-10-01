@@ -21,7 +21,9 @@ impl Store {
             CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL, output BLOB NOT NULL DEFAULT X'', output_offset INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, tool TEXT NOT NULL, workspace TEXT NOT NULL, outcome TEXT NOT NULL, note TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS traffic(bucket INTEGER PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0, rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS operation_log(seq INTEGER PRIMARY KEY AUTOINCREMENT, started INTEGER NOT NULL, finished INTEGER, tool TEXT NOT NULL, workspace TEXT NOT NULL, project TEXT NOT NULL, status TEXT NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0, input_json TEXT NOT NULL, output_json TEXT NOT NULL DEFAULT '{}', diff TEXT NOT NULL DEFAULT '', added_lines INTEGER NOT NULL DEFAULT 0, removed_lines INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');
             PRAGMA user_version=1;")?;
+        c.execute("UPDATE operation_log SET status='interrupted',finished=?1,error=CASE WHEN error='' THEN 'Service restarted before operation completed' ELSE error END WHERE status='running'",[crate::util::now()])?;
         Ok(Self { connection: Mutex::new(c) })
     }
     pub fn transaction<T>(&self, op: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
@@ -43,6 +45,20 @@ impl Store {
             let rows = statement.query_map([limit.min(200) as i64], |r| Ok(serde_json::json!({"seq":r.get::<_,i64>(0)?,"time":r.get::<_,u64>(1)?,"tool":r.get::<_,String>(2)?,"workspace":r.get::<_,String>(3)?,"outcome":r.get::<_,String>(4)?,"note":r.get::<_,String>(5)?})))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
+    }
+    pub fn operation_start(&self,tool:&str,workspace:&str,project:&str,input:&serde_json::Value)->Result<i64>{
+        let input_json=bounded_operation_json(input.clone());
+        self.transaction(|tx|{tx.execute("INSERT INTO operation_log(started,tool,workspace,project,status,input_json) VALUES(?1,?2,?3,?4,'running',?5)",params![crate::util::now(),tool,workspace,project,input_json])?;Ok(tx.last_insert_rowid())})
+    }
+    pub fn operation_finish(&self,seq:i64,status:&str,duration_ms:u64,output:Option<&serde_json::Value>,diff:&str,error:&str)->Result<()>{
+        let output_json=output.map(|v|bounded_operation_json(v.clone())).unwrap_or_else(||"{}".into());let diff=bounded_operation_text(diff,262144);let(added_lines,removed_lines)=diff_stats(&diff);let error=bounded_operation_text(error,8192);
+        self.transaction(|tx|{tx.execute("UPDATE operation_log SET finished=?2,status=?3,duration_ms=?4,output_json=?5,diff=?6,added_lines=?7,removed_lines=?8,error=?9 WHERE seq=?1",params![seq,crate::util::now(),status,duration_ms,output_json,diff,added_lines,removed_lines,error])?;tx.execute("DELETE FROM operation_log WHERE seq < (SELECT COALESCE(MAX(seq),0)-5000 FROM operation_log)",[])?;Ok(())})
+    }
+    pub fn operations(&self,limit:usize)->Result<Vec<serde_json::Value>>{
+        self.transaction(|tx|{let mut q=tx.prepare("SELECT seq,started,finished,tool,workspace,project,status,duration_ms,added_lines,removed_lines,error FROM operation_log ORDER BY seq DESC LIMIT ?1")?;let rows=q.query_map([limit.clamp(1,200) as i64],|r|Ok(serde_json::json!({"seq":r.get::<_,i64>(0)?,"started":r.get::<_,u64>(1)?,"finished":r.get::<_,Option<u64>>(2)?,"tool":r.get::<_,String>(3)?,"workspace":r.get::<_,String>(4)?,"project":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?,"duration_ms":r.get::<_,u64>(7)?,"added_lines":r.get::<_,u64>(8)?,"removed_lines":r.get::<_,u64>(9)?,"error":r.get::<_,String>(10)?})))?;Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)})
+    }
+    pub fn operation(&self,seq:i64)->Result<serde_json::Value>{
+        self.transaction(|tx|{let value=tx.query_row("SELECT seq,started,finished,tool,workspace,project,status,duration_ms,input_json,output_json,diff,added_lines,removed_lines,error FROM operation_log WHERE seq=?1",[seq],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,u64>(1)?,r.get::<_,Option<u64>>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,u64>(7)?,r.get::<_,String>(8)?,r.get::<_,String>(9)?,r.get::<_,String>(10)?,r.get::<_,u64>(11)?,r.get::<_,u64>(12)?,r.get::<_,String>(13)?))).optional()?.context("Operation not found")?;let input=serde_json::from_str::<serde_json::Value>(&value.8).unwrap_or_else(|_|serde_json::json!({"raw":value.8}));let output=serde_json::from_str::<serde_json::Value>(&value.9).unwrap_or_else(|_|serde_json::json!({"raw":value.9}));Ok(serde_json::json!({"seq":value.0,"started":value.1,"finished":value.2,"tool":value.3,"workspace":value.4,"project":value.5,"status":value.6,"duration_ms":value.7,"input":input,"output":output,"diff":value.10,"added_lines":value.11,"removed_lines":value.12,"error":value.13}))})
     }
     pub fn record_traffic(&self,requests:u64,rx_bytes:u64,tx_bytes:u64)->Result<()> {
         if requests==0&&rx_bytes==0&&tx_bytes==0{return Ok(());}let now=crate::util::now();let bucket=now/60*60;
@@ -67,6 +83,12 @@ impl Store {
     }
     pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { tx.execute("DELETE FROM kv WHERE expires>0 AND expires<?1", [crate::util::now()])?; Ok(()) }) }
 }
+fn sensitive_operation_key(key:&str)->bool{let key=key.to_ascii_lowercase();["authorization","access_token","refresh_token","password","passwd","secret","api_key","apikey","owner_key","private_key","credential"].iter().any(|part|key.contains(part))}
+fn sanitize_operation_value(value:&mut serde_json::Value){match value{serde_json::Value::Object(map)=>{for(key,value)in map.iter_mut(){if sensitive_operation_key(key){*value=serde_json::Value::String("[REDACTED]".into());}else if key.eq_ignore_ascii_case("script"){if let Some(text)=value.as_str(){*value=serde_json::json!({"omitted":true,"bytes":text.len(),"sha256":crate::util::digest(text)});}else{sanitize_operation_value(value);}}else{sanitize_operation_value(value);}}},serde_json::Value::Array(values)=>for value in values{sanitize_operation_value(value)},serde_json::Value::String(text)=>{for marker in ["Bearer ","token=","password=","secret=","api_key="]{if let Some(pos)=text.to_ascii_lowercase().find(&marker.to_ascii_lowercase()){let end=text[pos..].find(char::is_whitespace).map(|v|pos+v).unwrap_or(text.len());text.replace_range(pos..end,"[REDACTED]");break;}}},_=>{}}}
+fn bounded_operation_text(text:&str,max:usize)->String{if text.len()<=max{return text.to_owned();}let mut end=max.min(text.len());while end>0&&!text.is_char_boundary(end){end-=1;}format!("{}\n… [truncated {} bytes]",&text[..end],text.len().saturating_sub(end))}
+fn bounded_operation_json(mut value:serde_json::Value)->String{sanitize_operation_value(&mut value);let text=serde_json::to_string(&value).unwrap_or_else(|_|"{}".into());if text.len()<=262144{return text;}serde_json::json!({"truncated":true,"bytes":text.len(),"preview":bounded_operation_text(&text,131072)}).to_string()}
+fn diff_stats(diff:&str)->(u64,u64){let mut added=0;let mut removed=0;for line in diff.lines(){if line.starts_with("+++")||line.starts_with("---"){continue;}if line.starts_with('+'){added+=1;}else if line.starts_with('-'){removed+=1;}}(added,removed)}
+
 pub fn get<T: DeserializeOwned>(tx: &Transaction<'_>, namespace: &str, key: &str) -> Result<Option<T>> {
     let value: Option<String> = tx.query_row("SELECT value FROM kv WHERE namespace=?1 AND key=?2 AND (expires=0 OR expires>=?3)", params![namespace, key, crate::util::now()], |r| r.get(0)).optional()?;
     value.map(|s| serde_json::from_str(&s).context("Invalid stored record")).transpose()
@@ -81,4 +103,5 @@ pub fn count(tx: &Transaction<'_>, namespace: &str) -> Result<usize> { Ok(tx.que
     use super::*;
     #[test] fn private_storage_persists_and_rolls_back() { let d = tempfile::tempdir().unwrap(); let s = Store::open(&d.path().join("db")).unwrap(); s.put("x", "key", &42, 0).unwrap(); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); let r: Result<()> = s.transaction(|tx| { put(tx,"x","key",&43,0)?; anyhow::bail!("abort") }); assert!(r.is_err()); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); }
     #[test] fn dashboard_metrics_aggregate_audit_jobs_and_traffic(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();s.record_traffic(1,120,340).unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["totals"]["http_requests"],1);assert_eq!(value["totals"]["rx_bytes"],120);assert_eq!(value["totals"]["tx_bytes"],340);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
+    #[test] fn operation_log_redacts_and_tracks_diff(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();let id=s.operation_start("apply_patch","root","demo",&serde_json::json!({"authorization":"Bearer abc","path":"src/main.rs"})).unwrap();s.operation_finish(id,"succeeded",12,Some(&serde_json::json!({"changed":true})),"--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n","").unwrap();let detail=s.operation(id).unwrap();assert_eq!(detail["added_lines"],1);assert_eq!(detail["removed_lines"],1);assert_eq!(detail["input"]["authorization"],"[REDACTED]");}
 }

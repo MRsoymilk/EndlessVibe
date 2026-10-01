@@ -22,18 +22,29 @@ pub fn read(rt: &Runtime, w: &Project, a: ReadArgs) -> Result<Value> {
 fn check_expected(existing: Option<&[u8]>, expected: &str) -> Result<()> {
     match existing { None if expected=="MISSING"=>Ok(()),Some(b) if expected==util::digest(b)=>Ok(()),_=>bail!("FILE_CONFLICT: expected_sha256 does not match current content; read again, do not overwrite") }
 }
+fn operation_diff(path:&str,old:&[u8],new:&[u8])->String{
+    let(Ok(old),Ok(new))=(std::str::from_utf8(old),std::str::from_utf8(new))else{return format!("--- a/{path}\n+++ b/{path}\n@@ binary/text replacement @@\n-<{} bytes>\n+<{} bytes>\n",old.len(),new.len());};if old==new{return String::new();}
+    let old_lines=old.split_inclusive('\n').collect::<Vec<_>>();let new_lines=new.split_inclusive('\n').collect::<Vec<_>>();let mut prefix=0usize;while prefix<old_lines.len()&&prefix<new_lines.len()&&old_lines[prefix]==new_lines[prefix]{prefix+=1;}let mut suffix=0usize;while suffix<old_lines.len().saturating_sub(prefix)&&suffix<new_lines.len().saturating_sub(prefix)&&old_lines[old_lines.len()-1-suffix]==new_lines[new_lines.len()-1-suffix]{suffix+=1;}
+    let context=3usize;let old_start=prefix.saturating_sub(context);let new_start=prefix.saturating_sub(context);let old_change_end=old_lines.len().saturating_sub(suffix);let new_change_end=new_lines.len().saturating_sub(suffix);let old_end=(old_change_end+context).min(old_lines.len());let new_end=(new_change_end+context).min(new_lines.len());let mut diff=format!("--- a/{path}\n+++ b/{path}\n@@ -{},{} +{},{} @@\n",old_start+1,old_end-old_start,new_start+1,new_end-new_start);
+    for line in &old_lines[old_start..prefix]{diff.push(' ');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}
+    for line in &old_lines[prefix..old_change_end]{diff.push('-');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}
+    for line in &new_lines[prefix..new_change_end]{diff.push('+');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}
+    for line in &old_lines[old_change_end..old_end]{diff.push(' ');diff.push_str(line);if !line.ends_with('\n'){diff.push('\n');}}
+    if diff.len()>262144{let mut end=262144;while end>0&&!diff.is_char_boundary(end){end-=1;}diff.truncate(end);diff.push_str("\n… [diff truncated]\n");}diff
+}
 pub fn write(rt: &Runtime, w: &Project, a: WriteArgs) -> Result<Value> {
     w.write_allowed()?;
     if a.content.len()>rt.config.limits.max_file_bytes || a.content.contains('\0') { bail!("Content must be bounded UTF-8 text without NUL"); }
     let existing=w.root.read_optional(&a.path,rt.config.limits.max_file_bytes)?; check_expected(existing.as_deref(),&a.expected_sha256)?;
     let new_hash=util::digest(a.content.as_bytes());
     if existing.as_deref()==Some(a.content.as_bytes()) { return Ok(json!({"path":a.path,"sha256":new_hash,"changed":false})); }
+    let diff=operation_diff(&a.path,existing.as_deref().unwrap_or_default(),a.content.as_bytes());
     let backup=if let Some(old)=&existing { let id=util::random_secret()?; util::private_create(&rt.config.security.data_dir.join("backups").join(&id),old)?; Some(id) } else {None};
     // Compare again immediately before rename. External editors do not share our lock;
     // this is optimistic conflict detection, not a filesystem compare-and-swap primitive.
     check_expected(w.root.read_optional(&a.path,rt.config.limits.max_file_bytes)?.as_deref(),&a.expected_sha256)?;
     w.root.replace(&a.path,a.content.as_bytes(),existing.is_none(),a.create_parents)?;
-    Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"path":a.path,"changed":true,"sha256":new_hash,"previous_sha256":existing.as_ref().map(util::digest),"backup_id":backup,"bytes":a.content.len()}))
+    Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"path":a.path,"changed":true,"sha256":new_hash,"previous_sha256":existing.as_ref().map(util::digest),"backup_id":backup,"bytes":a.content.len(),"_operation_diff":diff}))
 }
 pub fn patch(rt: &Runtime, w: &Project, a: PatchArgs) -> Result<Value> {
     w.write_allowed()?; if a.edits.is_empty() || a.edits.len()>128 { bail!("edits must contain 1..128 exact replacements"); }
