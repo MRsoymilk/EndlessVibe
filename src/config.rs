@@ -43,7 +43,7 @@ pub fn valid_id(s: &str) -> bool { !s.is_empty() && s.len() <= 64 && s.bytes().a
 
 impl Config {
     pub fn load_file(path: &Path) -> Result<Self> {
-        let mut c: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("Read {}; initialize first with --init --workspace NAME=/absolute/project/path", path.display()))?).context("Invalid config.toml")?;
+        let mut c: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("Read {}; initialize first with --init --workspace NAME=/absolute/root/path", path.display()))?).context("Invalid config.toml")?;
         c.server.public_url = c.server.public_url.trim_end_matches('/').to_owned();c.validate()?;Ok(c)
     }
     pub fn load(path: &Path) -> Result<Self> {
