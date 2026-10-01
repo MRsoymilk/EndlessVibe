@@ -11,6 +11,20 @@ use tokio_util::sync::CancellationToken;
 #[derive(Serialize,Deserialize)] struct JobRef{id:String,fingerprint:String}
 pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>> }
 struct Output{bytes:Vec<u8>,offset:u64,total:u64}
+fn bubblewrap_failure_hint(backend:&str,status:&str,bytes:&[u8])->Option<String>{
+    if backend!="bubblewrap"||status!="failed"{return None;}
+    let text=String::from_utf8_lossy(bytes);
+    if text.contains("Creating new namespace failed: Resource temporarily unavailable"){
+        return Some("bubblewrap namespace creation failed with EAGAIN; check inherited RLIMIT_NPROC/cgroup pids limits and user-namespace availability, then rebuild/restart EndlessVibe after changing execution settings".into());
+    }
+    if text.contains("No permissions to create a new namespace"){
+        return Some("bubblewrap cannot create an unprivileged user namespace; enable the kernel/distribution user-namespace setting or use another explicitly configured execution backend".into());
+    }
+    if text.contains("max_*_namespaces exceeded"){
+        return Some("bubblewrap namespace quota is exhausted; inspect /proc/sys/user/max_*_namespaces and current namespace usage".into());
+    }
+    None
+}
 impl Output{
     fn append(&mut self,stream:&str,chunk:&[u8],max:usize){let prefix=format!("[{stream}] ");self.bytes.extend_from_slice(prefix.as_bytes());self.bytes.extend_from_slice(chunk);self.total+=(prefix.len()+chunk.len()) as u64;let excess=self.bytes.len().saturating_sub(max);if excess>0{self.bytes.drain(..excess);self.offset+=excess as u64;}}
 }
@@ -82,8 +96,8 @@ impl Jobs{
         group.kill();
         let _=tokio::time::timeout(Duration::from_secs(2),async{while let Some((stream,bytes))=rx.recv().await{output.append(stream,&bytes,self.config.limits.max_output_bytes);}}).await;
         out.abort();err.abort();r.exit_code=status.code();r.status=forced.unwrap_or(if status.success(){"succeeded"}else{"failed"}).into();r.finished=Some(util::now());r.output_bytes_total=output.total;r.output_truncated=output.offset>0;
-        if r.status=="timed_out"{r.error=Some(format!("Execution exceeded {timeout} seconds; process group was terminated"));}self.save(r,Some(&output))
+        if r.status=="timed_out"{r.error=Some(format!("Execution exceeded {timeout} seconds; process group was terminated"));}else if let Some(hint)=bubblewrap_failure_hint(&r.backend,&r.status,&output.bytes){r.error=Some(hint);}self.save(r,Some(&output))
     }
 }
 async fn pipe<R:AsyncRead+Unpin>(mut r:R,label:&'static str,tx:mpsc::Sender<(&'static str,Vec<u8>)>){let mut b=[0u8;8192];loop{match r.read(&mut b).await{Ok(0)|Err(_)=>break,Ok(n)=>if tx.send((label,b[..n].to_vec())).await.is_err(){break;}}}}
-#[cfg(test)]mod tests{use super::*;#[test]fn ring_output_is_bounded(){let mut out=Output{bytes:vec![],offset:0,total:0};out.append("stdout",b"abcdefghijklmnopqrstuvwxyz",12);assert_eq!(out.bytes.len(),12);assert!(out.offset>0);assert_eq!(out.total,out.offset+out.bytes.len() as u64);}}
+#[cfg(test)]mod tests{use super::*;#[test]fn ring_output_is_bounded(){let mut out=Output{bytes:vec![],offset:0,total:0};out.append("stdout",b"abcdefghijklmnopqrstuvwxyz",12);assert_eq!(out.bytes.len(),12);assert!(out.offset>0);assert_eq!(out.total,out.offset+out.bytes.len() as u64);}#[test]fn namespace_eagain_has_actionable_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"bwrap: Creating new namespace failed: Resource temporarily unavailable\n").unwrap();assert!(h.contains("RLIMIT_NPROC"));}#[test]fn unrelated_failure_has_no_bwrap_hint(){assert!(bubblewrap_failure_hint("bubblewrap","failed",b"cargo: error").is_none());assert!(bubblewrap_failure_hint("host","failed",b"Creating new namespace failed: Resource temporarily unavailable").is_none());}}
