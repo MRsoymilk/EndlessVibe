@@ -71,6 +71,7 @@ fn insert_project_text(text:&mut String,workspace_index:usize,project:&ProjectCo
     text.insert_str(insert,&block);
     Ok(())
 }
+fn workspace_block_range(text:&str,workspace_index:usize)->Result<(usize,usize)>{let workspaces=workspace_table_offsets(text);let start=*workspaces.get(workspace_index).context("Workspace table is missing from config text")?;let end=workspaces.get(workspace_index+1).copied().unwrap_or(text.len());Ok((start,end))}
 fn project_block_range(text:&str,workspace_index:usize,project_index:usize)->Result<(usize,usize)>{
     let workspaces=workspace_table_offsets(text);
     let start=*workspaces.get(workspace_index).context("Workspace table is missing from config text")?;
@@ -135,29 +136,39 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
     validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit,request.allow_git_mutation)?;
     let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
     let workspace_index=cfg.workspaces.iter().position(|w|w.id==workspace_id).with_context(||format!("Workspace {workspace_id} is not configured"))?;
-    let project_index=cfg.workspaces[workspace_index].projects.iter().position(|p|p.id==project_id).with_context(||format!("Project {workspace_id}/{project_id} is not configured"))?;
     let root=cfg.workspaces[workspace_index].path.canonicalize()?;
-    {
-        let project=&mut cfg.workspaces[workspace_index].projects[project_index];
-        project.allow_write=request.allow_write;project.allow_exec=request.allow_exec;project.allow_git_commit=request.allow_git_commit;project.allow_git_mutation=request.allow_git_mutation;
-    }
+    let direct=cfg.workspaces[workspace_index].projects.iter().position(|p|p.id==project_id);
+    let project=if let Some(project_index)=direct{
+        {
+            let project=&mut cfg.workspaces[workspace_index].projects[project_index];
+            project.allow_write=request.allow_write;project.allow_exec=request.allow_exec;project.allow_git_commit=request.allow_git_commit;project.allow_git_mutation=request.allow_git_mutation;
+        }
+        let (start,end)=project_block_range(&text,workspace_index,project_index)?;let mut block=text[start..end].to_owned();
+        for(key,value)in [("allow_write",request.allow_write),("allow_exec",request.allow_exec),("allow_git_commit",request.allow_git_commit),("allow_git_mutation",request.allow_git_mutation)]{replace_bool(&mut block,key,value)?;}text.replace_range(start..end,&block);
+        cfg.workspaces[workspace_index].projects[project_index].clone()
+    }else{
+        let legacy_index=cfg.workspaces.iter().enumerate().find_map(|(index,w)|{
+            if index==workspace_index||w.id!=project_id||!w.projects.is_empty()||!(w.allow_write.is_some()||w.allow_exec.is_some()||w.allow_git_commit.is_some()||w.allow_git_mutation.is_some()){return None;}
+            let child=w.path.canonicalize().ok()?;if child==root||!child.starts_with(&root){return None;}Some(index)
+        }).with_context(||format!("Project {workspace_id}/{project_id} is not configured"))?;
+        let relative=cfg.workspaces[legacy_index].path.canonicalize()?.strip_prefix(&root)?.to_owned();
+        {
+            let legacy=&mut cfg.workspaces[legacy_index];legacy.allow_write=Some(request.allow_write);legacy.allow_exec=Some(request.allow_exec);legacy.allow_git_commit=Some(request.allow_git_commit);legacy.allow_git_mutation=Some(request.allow_git_mutation);
+        }
+        let (start,end)=workspace_block_range(&text,legacy_index)?;let mut block=text[start..end].to_owned();
+        for(key,value)in [("allow_write",request.allow_write),("allow_exec",request.allow_exec),("allow_git_commit",request.allow_git_commit),("allow_git_mutation",request.allow_git_mutation)]{replace_bool(&mut block,key,value)?;}text.replace_range(start..end,&block);
+        ProjectConfig{id:project_id.into(),path:relative,allow_write:request.allow_write,allow_exec:request.allow_exec,allow_git_commit:request.allow_git_commit,allow_git_mutation:request.allow_git_mutation}
+    };
     cfg.validate()?;drop(workspace::load(&cfg,path)?);
-    let (start,end)=project_block_range(&text,workspace_index,project_index)?;
-    let mut block=text[start..end].to_owned();
-    replace_bool(&mut block,"allow_write",request.allow_write)?;
-    replace_bool(&mut block,"allow_exec",request.allow_exec)?;
-    replace_bool(&mut block,"allow_git_commit",request.allow_git_commit)?;
-    replace_bool(&mut block,"allow_git_mutation",request.allow_git_mutation)?;
-    text.replace_range(start..end,&block);
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
-    let project=&cfg.workspaces[workspace_index].projects[project_index];
-    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,project,&root),operation_diff:config_diff(&original,&text)})
+    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,&project,&root),operation_diff:config_diff(&original,&text)})
 }
 
 #[cfg(test)]
 mod tests{
     use super::*;
-    fn config(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![crate::config::WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None}];c}
+    fn config(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![crate::config::WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None}];c}
     #[test]fn add_and_update_preserve_comments(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let child=root.join("demo");let state=t.path().join("state");std::fs::create_dir_all(&child).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let mut text=toml::to_string_pretty(&config(&root,&state)).unwrap();text.push_str("\n# keep-comment\n");std::fs::write(&path,&text).unwrap();let rev=revision(&path).unwrap();let added=add_project(&path,AddProjectRequest{expected_revision:rev,workspace:"root".into(),project:None,path:child.display().to_string(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false}).unwrap();let updated=update_project(&path,"root","demo",UpdateProjectRequest{expected_revision:added.revision,allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:false}).unwrap();assert!(updated.requires_restart);let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-comment"));let loaded=Config::load_file(&path).unwrap();assert!(!loaded.workspaces[0].projects[0].allow_exec);}
+    #[test]fn legacy_child_project_permissions_are_editable(){let t=tempfile::tempdir().unwrap();let root=t.path().join("projects");let child=root.join("EndlessVibe");let state=t.path().join("state");std::fs::create_dir_all(&child).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let mut cfg=Config::default();cfg.security.data_dir=state;cfg.workspaces=vec![crate::config::WorkspaceConfig{id:"NAME".into(),path:root.clone(),projects:vec![],allow_write:Some(true),allow_exec:Some(true),allow_git_commit:Some(true),allow_git_mutation:Some(false)},crate::config::WorkspaceConfig{id:"EndlessVibe".into(),path:child,projects:vec![],allow_write:Some(true),allow_exec:Some(true),allow_git_commit:Some(true),allow_git_mutation:Some(false)}];std::fs::write(&path,toml::to_string_pretty(&cfg).unwrap()).unwrap();let rev=revision(&path).unwrap();update_project(&path,"NAME","EndlessVibe",UpdateProjectRequest{expected_revision:rev,allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:true}).unwrap();let loaded=Config::load_file(&path).unwrap();let legacy=loaded.workspaces.iter().find(|w|w.id=="EndlessVibe").unwrap();assert_eq!(legacy.allow_git_mutation,Some(true));let effective=workspace::load(&loaded,&path).unwrap();assert!(effective["NAME"].projects["EndlessVibe"].config.allow_git_mutation);}
 }
