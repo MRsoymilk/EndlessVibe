@@ -1,0 +1,7 @@
+PASS page JS: initial status / version / capability counts
+PASS page JS: HTTP 502 marks previous values stale
+PASS page JS: malformed JSON is not treated as healthy
+PASS page JS: network error
+PASS page JS: timeout / duplicate request suppression / button recovery
+PASS page JS: successful recovery
+6 JS harness checks passed (not browser rendering or real HTTP).

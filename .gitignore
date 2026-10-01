@@ -1,0 +1,11 @@
+/target/
+/.env
+/config.toml
+/owner.key
+/state/
+*.sqlite3
+*.sqlite3-*
+__pycache__/
+*.pyc
+*.log
+# Cargo.lock should be committed after a successful dependency resolution for this binary project.

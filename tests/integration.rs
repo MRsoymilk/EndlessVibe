@@ -1,0 +1,170 @@
+//! Integration tests run by cargo test. All projects and credentials are temporary.
+use axum::{body::{to_bytes,Body},http::{header,Request,StatusCode},Router};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD,Engine};
+use endlessvibe::{config::{Config,WorkspaceConfig},mcp,runtime::Runtime,server,tools::{filesystem,git,types::*},util};
+use serde_json::{json,Value};
+use sha2::{Digest,Sha256};
+use std::{path::Path,sync::Arc,time::Duration};
+use tower::ServiceExt;
+
+struct Fixture{_dir:tempfile::TempDir,rt:Arc<Runtime>,owner:String}
+fn fixture(edit:impl FnOnce(&mut Config))->Fixture{
+    let d=tempfile::tempdir().unwrap();let project=d.path().join("project");std::fs::create_dir_all(project.join("src")).unwrap();std::fs::write(project.join("src/main.rs"),"fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+    let mut config=Config::default();config.security.data_dir=d.path().join("state");config.workspaces=vec![WorkspaceConfig{id:"demo".into(),path:project,allow_write:true,allow_exec:true,allow_git_commit:true}];config.execution.backend="host".into();config.execution.acknowledge_unsafe_host_execution=true;config.execution.allow_shell=true;config.git.author_name="Test Agent".into();config.git.author_email="test@example.invalid".into();edit(&mut config);
+    util::private_dir(&config.security.data_dir).unwrap();let owner=util::random_secret().unwrap();util::private_create(&config.security.data_dir.join("owner.key"),owner.as_bytes()).unwrap();let path=d.path().join("config.toml");util::private_create(&path,toml::to_string(&config).unwrap().as_bytes()).unwrap();let rt=Runtime::new(config,&path).unwrap();Fixture{_dir:d,rt,owner}
+}
+fn git_cli(path:&Path,args:&[&str])->Vec<u8>{let out=std::process::Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("HOME","/nonexistent").env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null").arg("-C").arg(path).args(["-c","user.name=Test","-c","user.email=test@example.invalid","-c","core.fsmonitor=false","-c","core.hooksPath=/dev/null","-c","commit.gpgSign=false"]).args(args).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));out.stdout}
+fn initialize_git(f:&Fixture,initial:bool){let w=f.rt.workspace("demo").unwrap();git_cli(&w.root.path,&["init","-q","--initial-branch=main"]);if initial{std::fs::write(w.root.path.join("tracked.txt"),"one\n").unwrap();std::fs::write(w.root.path.join("other.txt"),"base\n").unwrap();git_cli(&w.root.path,&["add","--all"]);git_cli(&w.root.path,&["commit","-qm","initial"]);}}
+
+#[tokio::test]async fn file_edits_require_current_hash_and_backup(){let f=fixture(|_|{});let w=f.rt.workspace("demo").unwrap();let r=filesystem::read(&f.rt,&w,ReadArgs{workspace:"demo".into(),path:"src/main.rs".into(),start_line:1,max_lines:2}).unwrap();let hash=r["sha256"].as_str().unwrap().to_owned();let result=filesystem::patch(&f.rt,&w,PatchArgs{workspace:"demo".into(),path:"src/main.rs".into(),expected_sha256:hash.clone(),edits:vec![Edit{old_text:"hello".into(),new_text:"world".into(),expected_occurrences:1}]}).unwrap();assert!(result["backup_id"].is_string());assert!(String::from_utf8(w.root.read("src/main.rs",4096).unwrap()).unwrap().contains("world"));let stale=filesystem::write(&f.rt,&w,WriteArgs{workspace:"demo".into(),path:"src/main.rs".into(),content:"lost edit".into(),expected_sha256:hash,create_parents:false});assert!(stale.is_err());}
+#[tokio::test]async fn new_files_do_not_overwrite_existing_work(){let f=fixture(|_|{});let w=f.rt.workspace("demo").unwrap();let a=WriteArgs{workspace:"demo".into(),path:"docs/new.txt".into(),content:"new\n".into(),expected_sha256:"MISSING".into(),create_parents:true};filesystem::write(&f.rt,&w,a.clone()).unwrap();assert!(filesystem::write(&f.rt,&w,a).is_err());}
+#[tokio::test]async fn read_only_workspaces_refuse_changes(){let f=fixture(|c|{c.workspaces[0].allow_write=false;c.workspaces[0].allow_exec=false;c.workspaces[0].allow_git_commit=false;});let w=f.rt.workspace("demo").unwrap();assert!(filesystem::mkdir(&w,MakeDirectoryArgs{workspace:"demo".into(),path:"new".into()}).is_err());assert!(w.exec_allowed().is_err());}
+#[tokio::test]async fn search_excludes_credentials_and_generated_files(){let f=fixture(|_|{});let w=f.rt.workspace("demo").unwrap();std::fs::write(w.root.path.join(".env"),"hello SECRET=private").unwrap();std::fs::create_dir(w.root.path.join("target")).unwrap();std::fs::write(w.root.path.join("target/cache"),"hello generated").unwrap();let r=filesystem::search(&f.rt,&w,SearchArgs{workspace:"demo".into(),query:"hello".into(),path:".".into(),regex:false,case_sensitive:true,max_results:100}).unwrap();assert_eq!(r["matches"].as_array().unwrap().len(),1);assert!(!r.to_string().contains("SECRET"));}
+#[tokio::test]async fn workspaces_cannot_escape_to_server_state(){let f=fixture(|_|{});let w=f.rt.workspace("demo").unwrap();std::os::unix::fs::symlink(&f.rt.config.security.data_dir,w.root.path.join("escape")).unwrap();assert!(w.root.read("escape/owner.key",4096).is_err());assert!(f.rt.workspace("/etc").is_err());}
+
+#[tokio::test]async fn git_commit_preserves_unrelated_staging_and_working_files(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.workspace("demo").unwrap();std::fs::write(w.root.path.join("other.txt"),"staged user work\n").unwrap();git_cli(&w.root.path,&["add","other.txt"]);let before=git_cli(&w.root.path,&["diff","--cached","--binary"]);std::fs::write(w.root.path.join("tracked.txt"),"reviewed\n").unwrap();std::fs::write(w.root.path.join("new.txt"),"new file\n").unwrap();let paths=vec!["tracked.txt".into(),"new.txt".into()];let d=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),paths:paths.clone()}).await.unwrap();let result=git::commit(&f.rt,&w,CommitArgs{workspace:"demo".into(),paths,message:"feat(test): reviewed snapshot".into(),expected_head:d["head"].as_str().unwrap().into(),expected_diff_sha256:d["diff_sha256"].as_str().unwrap().into()}).await.unwrap();assert_eq!(result["pushed"],false);assert_eq!(git_cli(&w.root.path,&["show","HEAD:tracked.txt"]),b"reviewed\n");assert_eq!(git_cli(&w.root.path,&["show","HEAD:new.txt"]),b"new file\n");assert_eq!(git_cli(&w.root.path,&["show","HEAD:other.txt"]),b"base\n");assert_eq!(git_cli(&w.root.path,&["diff","--cached","--binary"]),before);assert_eq!(std::fs::read(w.root.path.join("other.txt")).unwrap(),b"staged user work\n");assert!(!w.root.path.join(".git/index.lock").exists());}
+#[tokio::test]async fn git_rejects_stale_reviews(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.workspace("demo").unwrap();std::fs::write(w.root.path.join("tracked.txt"),"first\n").unwrap();let paths=vec!["tracked.txt".into()];let d=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),paths:paths.clone()}).await.unwrap();std::fs::write(w.root.path.join("tracked.txt"),"new user change\n").unwrap();let e=git::commit(&f.rt,&w,CommitArgs{workspace:"demo".into(),paths,message:"fix(test): stale".into(),expected_head:d["head"].as_str().unwrap().into(),expected_diff_sha256:d["diff_sha256"].as_str().unwrap().into()}).await;assert!(e.is_err());assert!(!w.root.path.join(".git/index.lock").exists());assert_eq!(std::fs::read(w.root.path.join("tracked.txt")).unwrap(),b"new user change\n");}
+#[tokio::test]async fn git_refuses_selected_pre_staged_work(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.workspace("demo").unwrap();std::fs::write(w.root.path.join("tracked.txt"),"user staged\n").unwrap();git_cli(&w.root.path,&["add","tracked.txt"]);let index=std::fs::read(w.root.path.join(".git/index")).unwrap();let paths=vec!["tracked.txt".into()];let d=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),paths:paths.clone()}).await.unwrap();assert!(git::commit(&f.rt,&w,CommitArgs{workspace:"demo".into(),paths,message:"fix(test): forbidden".into(),expected_head:d["head"].as_str().unwrap().into(),expected_diff_sha256:d["diff_sha256"].as_str().unwrap().into()}).await.is_err());assert_eq!(std::fs::read(w.root.path.join(".git/index")).unwrap(),index);}
+#[tokio::test]async fn git_can_make_first_commit(){let f=fixture(|_|{});initialize_git(&f,false);let w=f.rt.workspace("demo").unwrap();let paths=vec!["src/main.rs".into()];let d=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),paths:paths.clone()}).await.unwrap();assert_eq!(d["head"],"UNBORN");git::commit(&f.rt,&w,CommitArgs{workspace:"demo".into(),paths,message:"feat: initial".into(),expected_head:"UNBORN".into(),expected_diff_sha256:d["diff_sha256"].as_str().unwrap().into()}).await.unwrap();assert!(!git_cli(&w.root.path,&["rev-parse","HEAD"]).is_empty());}
+
+async fn wait_job(rt:&Arc<Runtime>,id:&str)->Value{for _ in 0..150{let j=rt.jobs.get(id).unwrap();if !matches!(j["status"].as_str(),Some("queued"|"running")){return j;}tokio::time::sleep(Duration::from_millis(30)).await;}panic!("Job did not finish");}
+#[tokio::test]async fn jobs_return_output_and_deduplicate(){let f=fixture(|_|{});let a=CommandArgs{workspace:"demo".into(),program:"python3".into(),args:vec!["-c".into(),"print('job-output')".into()],cwd:".".into(),request_id:"once".into(),timeout_seconds:Some(3)};let j=f.rt.jobs.submit(f.rt.clone(),a.clone(),false).await.unwrap();let id=j["job_id"].as_str().unwrap();let finished=wait_job(&f.rt,id).await;assert_eq!(finished["status"],"succeeded");let out=f.rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:4096}).unwrap();assert!(out["output"].as_str().unwrap().contains("job-output"));let reused=f.rt.jobs.submit(f.rt.clone(),a.clone(),false).await.unwrap();assert_eq!(reused["job_id"],id);assert_eq!(reused["reused"],true);let mut changed=a;changed.args.push("different".into());assert!(f.rt.jobs.submit(f.rt.clone(),changed,false).await.is_err());}
+#[tokio::test]async fn job_cancellation_releases_workspace_lock(){let f=fixture(|_|{});let a=CommandArgs{workspace:"demo".into(),program:"python3".into(),args:vec!["-c".into(),"import time; time.sleep(30)".into()],cwd:".".into(),request_id:"cancel-me".into(),timeout_seconds:Some(60)};let j=f.rt.jobs.submit(f.rt.clone(),a,false).await.unwrap();let id=j["job_id"].as_str().unwrap();assert!(f.rt.workspace("demo").unwrap().lock.clone().try_lock_owned().is_err());f.rt.jobs.cancel(id).unwrap();let finished=wait_job(&f.rt,id).await;assert_eq!(finished["status"],"cancelled");for _ in 0..20{if f.rt.jobs.active_count()==0{break;}tokio::time::sleep(Duration::from_millis(10)).await;}assert!(f.rt.workspace("demo").unwrap().lock.clone().try_lock_owned().is_ok());}
+#[tokio::test]async fn job_timeout_is_a_terminal_state(){let f=fixture(|c|c.limits.command_timeout_seconds=1);let a=CommandArgs{workspace:"demo".into(),program:"python3".into(),args:vec!["-c".into(),"import time; time.sleep(10)".into()],cwd:".".into(),request_id:"timeout".into(),timeout_seconds:Some(1)};let j=f.rt.jobs.submit(f.rt.clone(),a,false).await.unwrap();assert_eq!(wait_job(&f.rt,j["job_id"].as_str().unwrap()).await["status"],"timed_out");}
+
+async fn http(app:&Router,method:&str,uri:&str,body:Body,content_type:Option<&str>,token:Option<&str>,cookie:Option<&str>)->axum::response::Response{let mut r=Request::builder().method(method).uri(uri).header(header::HOST,"localhost");if let Some(t)=content_type{r=r.header(header::CONTENT_TYPE,t);}if let Some(t)=token{r=r.header(header::AUTHORIZATION,format!("Bearer {t}"));}if let Some(c)=cookie{r=r.header(header::COOKIE,c);}r=r.header(header::ACCEPT,"application/json, text/event-stream").header("MCP-Protocol-Version","2025-06-18");app.clone().oneshot(r.body(body).unwrap()).await.unwrap()}
+async fn json_body(r:axum::response::Response)->Value{serde_json::from_slice(&to_bytes(r.into_body(),2*1024*1024).await.unwrap()).unwrap()}
+fn form(fields:&[(&str,&str)])->String{url::form_urlencoded::Serializer::new(String::new()).extend_pairs(fields.iter().copied()).finish()}
+async fn consent_http(app:&Router,body:String,cookie:Option<&str>,origin:&str)->axum::response::Response{
+    let mut request=Request::builder().method("POST").uri("/oauth/authorize").header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/x-www-form-urlencoded").header(header::ORIGIN,origin);
+    if let Some(cookie)=cookie{request=request.header(header::COOKIE,cookie);}
+    app.clone().oneshot(request.body(Body::from(body)).unwrap()).await.unwrap()
+}
+async fn oauth_login(f:&Fixture,app:&Router,scope:&str)->(String,Value){
+    let response=http(app,"POST","/oauth/register",Body::from(json!({"client_name":"Test","redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"],"token_endpoint_auth_method":"none"}).to_string()),Some("application/json"),None,None).await;assert_eq!(response.status(),StatusCode::CREATED);let client=json_body(response).await["client_id"].as_str().unwrap().to_owned();
+    let verifier="v".repeat(43);let challenge=URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));let resource=f.rt.config.resource();let authorize=format!("/oauth/authorize?{}",form(&[("client_id",&client),("redirect_uri","https://chatgpt.com/connector_platform_oauth_redirect"),("response_type","code"),("state","test-state"),("code_challenge",&challenge),("code_challenge_method","S256"),("resource",&resource),("scope",scope)]));
+    let response=http(app,"GET",&authorize,Body::empty(),None,None,None).await;assert_eq!(response.status(),StatusCode::OK);assert_eq!(response.headers()[header::REFERRER_POLICY],"same-origin");let cookie=response.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();let html=String::from_utf8(to_bytes(response.into_body(),32768).await.unwrap().to_vec()).unwrap();let transaction=html.split("name=\"transaction\" value=\"").nth(1).unwrap().split('"').next().unwrap();
+    let origin=f.rt.config.public_url().unwrap().origin().ascii_serialization();let response=consent_http(app,form(&[("transaction",transaction),("owner_key",&f.owner),("decision","approve")]),Some(&cookie),&origin).await;assert_eq!(response.status(),StatusCode::SEE_OTHER);let redirect=url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();let code=redirect.query_pairs().find(|(k,_)|k=="code").unwrap().1.to_string();let iss=redirect.query_pairs().find(|(k,_)|k=="iss").unwrap().1.to_string();assert_eq!(iss,f.rt.config.server.public_url);
+    let request=form(&[("grant_type","authorization_code"),("client_id",&client),("redirect_uri","https://chatgpt.com/connector_platform_oauth_redirect"),("code",&code),("code_verifier",&verifier),("resource",&resource)]);let response=http(app,"POST","/oauth/token",Body::from(request.clone()),Some("application/x-www-form-urlencoded"),None,None).await;assert_eq!(response.status(),StatusCode::OK);let tokens=json_body(response).await;assert_eq!(http(app,"POST","/oauth/token",Body::from(request),Some("application/x-www-form-urlencoded"),None,None).await.status(),StatusCode::BAD_REQUEST);(client,tokens)
+}
+#[tokio::test]async fn public_health_does_not_expose_paths_or_secrets(){let f=fixture(|_|{});let app=server::create_router(f.rt.clone());let response=http(&app,"GET","/health",Body::empty(),None,None,None).await;assert_eq!(response.status(),StatusCode::OK);let data=json_body(response).await.to_string();assert!(!data.contains(&f.owner));assert!(!data.contains(&f.rt.config.security.data_dir.to_string_lossy().to_string()));assert_eq!(http(&app,"POST","/mcp",Body::from("{}"),Some("application/json"),None,None).await.status(),StatusCode::UNAUTHORIZED);}
+#[tokio::test]async fn oauth_authorization_and_scope_enforcement(){let f=fixture(|_|{});let app=server::create_router(f.rt.clone());let(_,tokens)=oauth_login(&f,&app,"files:read").await;let bearer=tokens["access_token"].as_str().unwrap();let call=json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"workspace":"demo","program":"python3","args":["-c","print(1)"],"request_id":"blocked"}}});let response=http(&app,"POST","/mcp",Body::from(call.to_string()),Some("application/json"),Some(bearer),None).await;assert_eq!(response.status(),StatusCode::OK);let result=json_body(response).await;assert_eq!(result["result"]["isError"],true);let challenge=result["result"]["_meta"]["mcp/www_authenticate"][0].as_str().unwrap();assert!(challenge.contains("error=\"insufficient_scope\""));assert!(challenge.contains("commands:execute files:write"));assert_eq!(f.rt.jobs.active_count(),0);let read=json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"demo","path":"src/main.rs"}}});let response=http(&app,"POST","/mcp",Body::from(read.to_string()),Some("application/json"),Some(bearer),None).await;assert_eq!(response.status(),StatusCode::OK);let result=json_body(response).await;assert_ne!(result["result"]["isError"],true);assert!(result["result"]["structuredContent"].is_object());}
+#[tokio::test]async fn refresh_rotation_replay_revokes_the_family(){let f=fixture(|_|{});let app=server::create_router(f.rt.clone());let(client,tokens)=oauth_login(&f,&app,"files:read").await;let body=form(&[("grant_type","refresh_token"),("client_id",&client),("refresh_token",tokens["refresh_token"].as_str().unwrap()),("resource",&f.rt.config.resource())]);let response=http(&app,"POST","/oauth/token",Body::from(body.clone()),Some("application/x-www-form-urlencoded"),None,None).await;assert_eq!(response.status(),StatusCode::OK);let rotated=json_body(response).await;assert_eq!(http(&app,"POST","/oauth/token",Body::from(body),Some("application/x-www-form-urlencoded"),None,None).await.status(),StatusCode::BAD_REQUEST);assert_eq!(http(&app,"POST","/mcp",Body::from("{}"),Some("application/json"),rotated["access_token"].as_str(),None).await.status(),StatusCode::UNAUTHORIZED);}
+#[tokio::test]async fn mcp_initialization_and_tools_are_real(){let f=fixture(|_|{});let app=server::create_router(f.rt.clone());let token=f.rt.auth.issue_local_token().unwrap();let init=json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"tests","version":"1"}}});let response=http(&app,"POST","/mcp",Body::from(init.to_string()),Some("application/json"),Some(&token),None).await;assert_eq!(response.status(),StatusCode::OK);let data=json_body(response).await;assert_eq!(data["result"]["serverInfo"]["name"],"EndlessVibe");let response=http(&app,"POST","/mcp",Body::from(json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string()),Some("application/json"),Some(&token),None).await;assert_eq!(response.status(),StatusCode::ACCEPTED);let response=http(&app,"POST","/mcp",Body::from(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}).to_string()),Some("application/json"),Some(&token),None).await;assert_eq!(response.status(),StatusCode::OK);let list=json_body(response).await;let tools=list["result"]["tools"].as_array().unwrap();assert_eq!(tools.len(),mcp::TOOL_NAMES.len());for name in mcp::TOOL_NAMES{assert!(tools.iter().any(|t|t["name"]==*name),"missing {name}");}let response=http(&app,"POST","/mcp",Body::from(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}).to_string()),Some("application/json"),Some(&token),None).await;let data=json_body(response).await;assert_ne!(data["result"]["isError"],true);assert!(data.to_string().contains("demo"));}
+
+#[tokio::test]async fn git_refuses_repository_helpers_without_executing_them(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.workspace("demo").unwrap();git_cli(&w.root.path,&["config","filter.unsafe.clean","touch SHOULD_NOT_EXIST"]);assert!(git::status(&f.rt,&w).await.is_err());assert!(!w.root.path.join("SHOULD_NOT_EXIST").exists());}
+
+#[tokio::test]
+async fn oauth_linking_can_discover_static_tools_before_authorization(){
+    let f=fixture(|_|{});let app=server::create_router(f.rt.clone());
+    let init=json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"unauthorized-discovery","version":"1"}}});
+    let response=http(&app,"POST","/mcp",Body::from(init.to_string()),Some("application/json"),None,None).await;
+    assert_eq!(response.status(),StatusCode::OK);
+    assert_eq!(json_body(response).await["result"]["serverInfo"]["name"],"EndlessVibe");
+    let initialized=json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    assert_eq!(http(&app,"POST","/mcp",Body::from(initialized.to_string()),Some("application/json"),None,None).await.status(),StatusCode::ACCEPTED);
+    let list=json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}});
+    for token in [None,Some(f.rt.auth.issue_local_token().unwrap())]{
+        let response=http(&app,"POST","/mcp/",Body::from(list.to_string()),Some("application/json"),token.as_deref(),None).await;
+        assert_eq!(response.status(),StatusCode::OK);let data=json_body(response).await;
+        let tools=data["result"]["tools"].as_array().unwrap();assert_eq!(tools.len(),mcp::TOOL_NAMES.len());
+        for tool in tools{
+            let name=tool["name"].as_str().unwrap();
+            let expected=json!([{"type":"oauth2","scopes":endlessvibe::security::auth::required_scopes(name)}]);
+            assert_eq!(tool["securitySchemes"],expected,"{name}");
+            assert_eq!(tool["_meta"]["securitySchemes"],expected,"{name}");
+        }
+        assert!(!data.to_string().contains(&f.owner));
+        assert!(!data.to_string().contains(f._dir.path().to_str().unwrap()));
+    }
+    for path in ["/.well-known/oauth-protected-resource","/.well-known/oauth-protected-resource/mcp"]{
+        let data=json_body(http(&app,"GET",path,Body::empty(),None,None,None).await).await;
+        assert_eq!(data["resource"],f.rt.config.resource());
+        assert_eq!(data["authorization_servers"][0],f.rt.config.server.public_url);
+    }
+    let meta=json_body(http(&app,"GET","/.well-known/oauth-authorization-server",Body::empty(),None,None,None).await).await;
+    assert_eq!(meta["authorization_endpoint"],format!("{}/oauth/authorize",f.rt.config.server.public_url));
+    assert_eq!(meta["code_challenge_methods_supported"],json!(["S256"]));
+}
+
+#[tokio::test]
+async fn every_private_tool_returns_oauth_challenge_without_valid_credentials(){
+    let f=fixture(|_|{});let app=server::create_router(f.rt.clone());
+    let revoked=f.rt.auth.issue_local_token().unwrap();f.rt.auth.revoke_all().unwrap();
+    let expired=f.rt.auth.issue_local_token().unwrap();let key=util::digest(&expired);
+    let mut record=f.rt.db.get::<Value>("tokens",&key).unwrap().unwrap();record["expires"]=json!(util::now()-1);
+    f.rt.db.put("tokens",&key,&record,0).unwrap();
+    for token in [None,Some("invalid"),Some(revoked.as_str()),Some(expired.as_str())]{
+        for name in mcp::TOOL_NAMES{
+            let call=json!({"jsonrpc":"2.0","id":"link-request","method":"tools/call","params":{"name":name,"arguments":{}}});
+            let response=http(&app,"POST","/mcp",Body::from(call.to_string()),Some("application/json"),token,None).await;
+            assert_eq!(response.status(),StatusCode::OK,"{name}");
+            let header=response.headers()[header::WWW_AUTHENTICATE].to_str().unwrap().to_owned();
+            let result=json_body(response).await;
+            assert_eq!(result["jsonrpc"],"2.0");assert_eq!(result["id"],"link-request");
+            assert_eq!(result["result"]["isError"],true,"{name}");
+            assert_eq!(result["result"]["_meta"]["mcp/www_authenticate"][0],header);
+            assert!(header.contains("resource_metadata=\"https://endlessvibe.soymilk.xin/.well-known/oauth-protected-resource\""));
+            assert!(header.contains("error=\"invalid_token\""));assert!(header.contains("error_description="));
+            assert!(result["result"]["structuredContent"].is_null());
+            assert!(!result.to_string().contains(f._dir.path().to_str().unwrap()));
+        }
+    }
+    assert_eq!(f.rt.jobs.active_count(),0);assert!(f.rt.db.audits(100).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unauthorized_writes_and_mixed_batches_cannot_execute_tools(){
+    let f=fixture(|_|{});let app=server::create_router(f.rt.clone());
+    let write=json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_file","arguments":{"workspace":"demo","path":"forbidden.txt","content":"must not be written","expected_sha256":"MISSING"}}});
+    let response=http(&app,"POST","/mcp",Body::from(write.to_string()),Some("application/json"),None,None).await;
+    assert_eq!(json_body(response).await["result"]["isError"],true);
+    let batch=json!([{"jsonrpc":"2.0","id":2,"method":"tools/list"},write]);
+    let token=f.rt.auth.issue_local_token().unwrap();
+    for token in [None,Some(token.as_str())]{
+        let response=http(&app,"POST","/mcp",Body::from(batch.to_string()),Some("application/json"),token,None).await;
+        assert!(response.status().is_client_error());
+    }
+    for malformed in [json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"write_file","arguments":{"workspace":"demo","path":"forbidden.txt","content":"must not be written","expected_sha256":"MISSING"}}}),json!({"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"hello"}}),json!({"jsonrpc":"1.0","id":1,"method":"tools/list"}),json!({"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///etc/passwd"}})]{
+        assert_eq!(http(&app,"POST","/mcp",Body::from(malformed.to_string()),Some("application/json"),None,None).await.status(),StatusCode::UNAUTHORIZED);
+    }
+    assert!(!f.rt.workspace("demo").unwrap().root.path.join("forbidden.txt").exists());
+    assert!(f.rt.db.audits(100).unwrap().is_empty());
+    assert_eq!(http(&app,"GET","/mcp",Body::empty(),None,None,None).await.status(),StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn browser_consent_preserves_origin_and_rejects_cross_site_or_missing_cookies(){
+    let f=fixture(|config|config.server.public_url="https://ENDLESSVIBE.SOYMILK.XIN:443".into());
+    let app=server::create_router(f.rt.clone());
+    let response=http(&app,"POST","/oauth/register",Body::from(json!({"redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"]}).to_string()),Some("application/json"),None,None).await;
+    assert_eq!(response.status(),StatusCode::CREATED);let client=json_body(response).await["client_id"].as_str().unwrap().to_owned();
+    let challenge=URL_SAFE_NO_PAD.encode(Sha256::digest("v".repeat(43).as_bytes()));
+    let authorize=format!("/oauth/authorize?{}",form(&[("client_id",&client),("redirect_uri","https://chatgpt.com/connector_platform_oauth_redirect"),("response_type","code"),("state","browser-test"),("code_challenge",&challenge),("code_challenge_method","S256"),("resource",&f.rt.config.resource())]));
+    let response=http(&app,"GET",&authorize,Body::empty(),None,None,None).await;
+    assert_eq!(response.status(),StatusCode::OK);
+    assert_eq!(response.headers()[header::REFERRER_POLICY],"same-origin");
+    let cookie=response.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
+    let html=String::from_utf8(to_bytes(response.into_body(),32768).await.unwrap().to_vec()).unwrap();
+    let transaction=html.split("name=\"transaction\" value=\"").nth(1).unwrap().split('"').next().unwrap();
+    let body=form(&[("transaction",transaction),("owner_key",&f.owner),("decision","approve")]);
+    for origin in ["null","https://evil.test","https://chatgpt.com","http://endlessvibe.soymilk.xin","https://endlessvibe.soymilk.xin:444"]{
+        let response=consent_http(&app,body.clone(),Some(&cookie),origin).await;
+        assert_eq!(response.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error_description"],"Cross-origin consent POST refused");
+    }
+    let origin="https://endlessvibe.soymilk.xin";
+    for cookie in [None,Some("ev_consent=wrong")]{
+        let response=consent_http(&app,body.clone(),cookie,origin).await;
+        assert_eq!(response.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error_description"],"Consent cookie invalid; restart linking");
+    }
+    let response=consent_http(&app,body,Some(&cookie),origin).await;
+    assert_eq!(response.status(),StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::REFERRER_POLICY],"no-referrer");
+    let redirect=url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+    assert!(redirect.query_pairs().any(|(name,_)|name=="code"));
+    assert_eq!(f.rt.db.audits(100).unwrap().len(),1);
+    let response=http(&app,"GET","/",Body::empty(),None,None,None).await;
+    assert_eq!(response.headers()[header::REFERRER_POLICY],"no-referrer");
+}

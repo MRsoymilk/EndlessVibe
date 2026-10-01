@@ -1,0 +1,33 @@
+Reference/asset tests only: these do NOT compile or execute EndlessVibe Rust.
+test_configuration_parses (__main__.Assets.test_configuration_parses) ... ok
+test_every_module_exists (__main__.Assets.test_every_module_exists) ... ok
+test_manifest_and_tool_list (__main__.Assets.test_manifest_and_tool_list) ... ok
+test_mutations_have_required_scopes (__main__.Assets.test_mutations_have_required_scopes) ... ok
+test_no_embedded_owner_secrets (__main__.Assets.test_no_embedded_owner_secrets) ... ok
+test_non_root_and_sandbox_are_explicit (__main__.Assets.test_non_root_and_sandbox_are_explicit) ... ok
+test_page_uses_local_assets (__main__.Assets.test_page_uses_local_assets) ... ok
+test_binary_diff_and_literal_dash_filename (__main__.GitReference.test_binary_diff_and_literal_dash_filename) ... ok
+test_config_parse_does_not_follow_includes (__main__.GitReference.test_config_parse_does_not_follow_includes) ... ok
+test_delete_file (__main__.GitReference.test_delete_file) ... ok
+test_initial_commit (__main__.GitReference.test_initial_commit) ... ok
+test_preserves_unrelated_staged_changes (__main__.GitReference.test_preserves_unrelated_staged_changes) ... ok
+test_preview_changes_no_real_index_or_objects (__main__.GitReference.test_preview_changes_no_real_index_or_objects) ... ok
+test_read_raw_bytes_without_clean_filters (__main__.GitReference.test_read_raw_bytes_without_clean_filters) ... ok
+test_ref_compare_and_swap_rejects_wrong_head (__main__.GitReference.test_ref_compare_and_swap_rejects_wrong_head) ... ok
+test_stale_content_changes_review_hash (__main__.GitReference.test_stale_content_changes_review_hash) ... ok
+test_atomic_create_never_overwrites (__main__.LinuxPrimitives.test_atomic_create_never_overwrites) ... ok
+test_fifo_does_not_block_and_is_not_regular (__main__.LinuxPrimitives.test_fifo_does_not_block_and_is_not_regular) ... ok
+test_hardlink_needs_nlink_check (__main__.LinuxPrimitives.test_hardlink_needs_nlink_check) ... ok
+test_parent_escape_rejected (__main__.LinuxPrimitives.test_parent_escape_rejected) ... ok
+test_read_inside_directory (__main__.LinuxPrimitives.test_read_inside_directory) ... ok
+test_symlink_escape_rejected (__main__.LinuxPrimitives.test_symlink_escape_rejected) ... ok
+test_incomplete_sse (__main__.SmokeParser.test_incomplete_sse) ... ok
+test_json (__main__.SmokeParser.test_json) ... ok
+test_pkce_reference_vector (__main__.SmokeParser.test_pkce_reference_vector) ... ok
+test_plain_network_credentials_not_allowed (__main__.SmokeParser.test_plain_network_credentials_not_allowed) ... ok
+test_sse (__main__.SmokeParser.test_sse) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 0.311s
+
+OK

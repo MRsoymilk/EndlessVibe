@@ -1,0 +1,7 @@
+# This is a COMPOSE OVERRIDE, not a standalone deployment.
+# Merge with your original compose.yaml. Preserve image, command, token, mounts and networks.
+# Rename 'cloudflared' here if your original Compose service uses a different name.
+services:
+  cloudflared:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

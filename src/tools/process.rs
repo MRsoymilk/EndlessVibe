@@ -1,0 +1,79 @@
+use crate::{config::Config, workspace::Workspace};
+use anyhow::{bail, Context, Result};
+use std::{path::{Path,PathBuf}, process::Stdio, time::Duration};
+use tokio::{io::{AsyncRead,AsyncReadExt,AsyncWriteExt}, process::Command};
+
+pub fn kill_group(pid:u32,signal:i32){if pid>1{unsafe{libc::kill(-(pid as i32),signal);}}}
+pub struct GroupGuard{pid:Option<u32>}
+impl GroupGuard{pub fn new(pid:u32)->Self{Self{pid:Some(pid)}}pub fn kill(&mut self){if let Some(pid)=self.pid.take(){kill_group(pid,libc::SIGKILL);}}}
+impl Drop for GroupGuard{fn drop(&mut self){self.kill();}}
+pub async fn terminate_group(pid:u32){kill_group(pid,libc::SIGTERM);tokio::time::sleep(Duration::from_millis(200)).await;kill_group(pid,libc::SIGKILL);}
+async fn drain<R:AsyncRead+Unpin>(mut r:R,limit:usize)->Result<(Vec<u8>,bool)>{let mut bytes=Vec::new();let mut buf=[0u8;8192];let mut truncated=false;loop{let n=r.read(&mut buf).await?;if n==0{break;}let take=n.min(limit.saturating_sub(bytes.len()));bytes.extend_from_slice(&buf[..take]);truncated|=take<n;}Ok((bytes,truncated))}
+pub struct Captured{pub code:Option<i32>,pub stdout:Vec<u8>,pub stderr:Vec<u8>}
+pub async fn capture(mut cmd:Command,input:Option<Vec<u8>>,limit:usize,seconds:u64)->Result<Captured>{
+    cmd.stdin(if input.is_some(){Stdio::piped()}else{Stdio::null()}).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
+    let mut child=cmd.spawn().context("Cannot start configured executable")?;let pid=child.id().context("Missing process ID")?;let mut group=GroupGuard::new(pid);
+    let mut out=tokio::spawn(drain(child.stdout.take().context("stdout missing")?,limit));let mut err=tokio::spawn(drain(child.stderr.take().context("stderr missing")?,limit));
+    let writer=if let Some(input)=input{let mut stdin=child.stdin.take().context("stdin missing")?;Some(tokio::spawn(async move{stdin.write_all(&input).await?;stdin.shutdown().await}))}else{None};
+    let status=match tokio::time::timeout(Duration::from_secs(seconds),child.wait()).await{Ok(result)=>result?,Err(_)=>{terminate_group(pid).await;let _=child.wait().await;out.abort();err.abort();if let Some(w)=writer{w.abort();}bail!("Command timed out after {seconds}s");}};
+    group.kill();
+    let output=tokio::time::timeout(Duration::from_secs(2),&mut out).await;
+    let error=tokio::time::timeout(Duration::from_secs(2),&mut err).await;
+    if let Some(w)=writer{if !w.is_finished(){w.abort();}else{let _=w.await;}}
+    if output.is_err()||error.is_err(){out.abort();err.abort();bail!("Command descendant kept output pipes open");}
+    let (stdout,ot)=output???;let (stderr,et)=error???;
+    if ot||et{bail!("Command output exceeds limit; narrow the query");}
+    Ok(Captured{code:status.code(),stdout,stderr})
+}
+
+pub fn clean_environment(cmd:&mut Command,path:&str){cmd.env_clear().env("PATH",path).env("LANG","C.UTF-8").env("LC_ALL","C.UTF-8").env("TERM","dumb");}
+fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
+    if program.is_empty()||program.len()>64||!program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){bail!("program must be a simple executable name; use args for arguments");}
+    for dir in path.split(':'){let p=Path::new(dir).join(program);if p.is_file(){return Ok(p);}}
+    bail!("Executable {program} not found in configured PATH")
+}
+
+pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
+    w.exec_allowed()?;
+    if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
+    if shell&&!config.execution.allow_shell{bail!("run_shell is disabled; set execution.allow_shell=true locally after reviewing the risks");}
+    if !shell&&!config.execution.allowed_programs.iter().any(|p|p==program){bail!("Program is not in execution.allowed_programs");}
+    let host_cwd=w.root.directory_path(cwd)?;
+    let mut command=match config.execution.backend.as_str(){
+        "disabled"=>bail!("Command execution backend is disabled"),
+        "host"=>{
+            if !config.execution.acknowledge_unsafe_host_execution{bail!("Host execution has not been explicitly authorized");}
+            let executable=if shell{PathBuf::from("/bin/bash")}else{validated_executable(&config.execution.path,program)?};
+            let mut c=Command::new(executable);clean_environment(&mut c,&config.execution.path);c.current_dir(host_cwd);
+            // Explicit host mode is not a sandbox; no service token/key is inherited.
+            if let Some(home)=std::env::var_os("HOME"){c.env("HOME",home);}c.args(args);c
+        }
+        "bubblewrap"=>{
+            if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
+            let cache=config.security.data_dir.join("exec-cache").join(&w.config.id);crate::util::private_dir(&cache)?;
+            let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
+            c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
+            if config.execution.allow_network{c.arg("--share-net");}
+            for p in ["/usr","/bin","/sbin","/lib","/lib64"]{let p=Path::new(p);if p.exists(){c.arg("--ro-bind").arg(p).arg(p);}}
+            c.args(["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/etc"]);
+            for p in ["/etc/ld.so.cache","/etc/ld.so.conf","/etc/ld.so.conf.d","/etc/localtime"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}
+            if config.execution.allow_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
+            for mount in &config.execution.readonly_mounts{c.arg("--ro-bind").arg(&mount.source).arg(&mount.target);}
+            c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
+            // Builds may inspect Git state, but must use the reviewed git_commit tool for writes.
+            let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}
+            let inside=if cwd=="."{PathBuf::from("/workspace")}else{Path::new("/workspace").join(cwd)};
+            c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb"]);
+            c.arg("--").arg(if shell{"/bin/bash"}else{program}).args(args);c
+        }
+        _=>bail!("Unknown execution backend"),
+    };
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
+    let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=config.execution.max_processes;let cpu=config.limits.command_timeout_seconds+5;
+    // SAFETY: only async-signal-safe Linux syscalls are used in this pre_exec closure.
+    unsafe{command.pre_exec(move||{
+        for (resource,value) in [(libc::RLIMIT_AS,address_space),(libc::RLIMIT_NPROC,processes),(libc::RLIMIT_CPU,cpu)]{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(resource,&lim)!=0{return Err(std::io::Error::last_os_error());}}
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong)!=0{return Err(std::io::Error::last_os_error());}Ok(())
+    });}
+    Ok(command)
+}

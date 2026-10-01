@@ -1,0 +1,55 @@
+# EXAMPLE ONLY: use `endlessvibe --init --workspace ID=/absolute/path` to create the initial config, then `--add-project [ID=]/absolute/path` to add projects.
+# Environment variables and '~' are NOT expanded inside TOML paths.
+[server]
+bind = "0.0.0.0:20000"
+public_url = "https://mcp.example.com"
+allowed_hosts = ["localhost", "127.0.0.1", "host.docker.internal", "endlessvibe"]
+
+[security]
+data_dir = "/home/user/.local/state/endlessvibe"
+allow_http_loopback = false
+extra_redirect_uris = []
+access_token_seconds = 3600
+refresh_token_seconds = 2592000
+
+[limits]
+max_file_bytes = 2097152
+max_read_bytes = 262144
+max_output_bytes = 1048576
+command_timeout_seconds = 120
+max_jobs = 2
+retained_jobs = 100
+search_max_files = 5000
+search_max_bytes = 67108864
+
+[execution]
+backend = "bubblewrap"
+acknowledge_unsafe_host_execution = false
+allow_shell = false
+allow_network = false
+bubblewrap = "/usr/bin/bwrap"
+path = "/usr/local/bin:/usr/bin:/bin"
+allowed_programs = ["cargo", "rustc", "cmake", "ninja", "make", "ctest", "python3", "git", "rg"]
+readonly_mounts = []
+memory_limit_mb = 8192
+max_processes = 256
+
+[git]
+executable = "/usr/bin/git"
+author_name = "EndlessVibe"
+author_email = "endlessvibe@localhost"
+
+[[workspaces]]
+id = "my-project"
+path = "/home/user/projects/my-project"
+allow_write = true
+allow_exec = true
+allow_git_commit = true
+
+# Add only projects you intend to authorize; the server never scans all of /home automatically.
+# [[workspaces]]
+# id = "another-project"
+# path = "/home/user/projects/another-project"
+# allow_write = true
+# allow_exec = true
+# allow_git_commit = true

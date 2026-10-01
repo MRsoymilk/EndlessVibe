@@ -1,0 +1,88 @@
+use anyhow::{bail,Context,Result};
+use endlessvibe::{config::{self,Config,WorkspaceConfig},runtime::Runtime,security::auth::Auth,server,store::Store,util,workspace};
+use std::{os::unix::fs::MetadataExt,path::{Path,PathBuf},sync::Arc};
+
+#[derive(Default)]struct Cli{config:Option<PathBuf>,init:bool,workspaces:Vec<String>,add_projects:Vec<String>,public_url:Option<String>,bind:Option<String>,read_only:bool,no_exec:bool,allow_shell:bool,unsafe_host:bool,issue_token:bool,revoke_all:bool,rotate_key:bool,audit:bool}
+fn arguments()->Result<Option<Cli>>{
+    let mut c=Cli::default();let mut args=std::env::args().skip(1);
+    while let Some(arg)=args.next(){match arg.as_str(){
+        "--help"|"-h"=>{println!("EndlessVibe {}\n\nInitialize once:\n  endlessvibe --init --workspace my-project=/absolute/path/to/project\n\nAdd a project later (service must be stopped):\n  endlessvibe --add-project my-project=/absolute/path/to/project\n  endlessvibe --add-project /absolute/path/to/project\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Create a new configuration and an owner key; never overwrite config\n  --workspace ID=/ABS/PATH      Authorize a project at initialization; repeat for multiple projects\n  --add-project [ID=]/ABS/PATH  Add a project to an existing config; repeat for multiple projects\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --bind IP:PORT                Override bind address (default 0.0.0.0:20000)\n  --read-only                   Make initialized/added workspaces read-only\n  --no-exec                     Disable command execution for initialized/added workspaces\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --version                     Print version\n\nDefault execution uses bubblewrap with networking disabled.\nChatGPT endpoint: /mcp; select OAuth, not No Authentication.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
+        "--version"|"-V"=>{println!("EndlessVibe {}",env!("CARGO_PKG_VERSION"));return Ok(None);},
+        "--config"=>c.config=Some(PathBuf::from(args.next().context("--config needs a path")?)),
+        "--workspace"=>c.workspaces.push(args.next().context("--workspace needs ID=/absolute/path")?),
+        "--add-project"=>c.add_projects.push(args.next().context("--add-project needs [ID=]/absolute/path")?),
+        "--public-url"=>c.public_url=Some(args.next().context("--public-url needs an origin")?),
+        "--bind"=>c.bind=Some(args.next().context("--bind needs IP:port")?),
+        "--init"=>c.init=true,"--read-only"=>c.read_only=true,"--no-exec"=>c.no_exec=true,"--allow-shell"=>c.allow_shell=true,"--unsafe-host-exec"=>c.unsafe_host=true,"--issue-token"=>c.issue_token=true,"--revoke-all"=>c.revoke_all=true,"--rotate-owner-key"=>c.rotate_key=true,"--audit-tail"=>c.audit=true,
+        _=>bail!("Unknown argument {arg}; use --help"),
+    }}Ok(Some(c))
+}
+fn workspace_arg(value:&str,read_only:bool,no_exec:bool,infer_id:bool)->Result<WorkspaceConfig>{
+    let (id,raw)=match value.split_once('='){Some((id,path))=>(id.to_owned(),path.to_owned()),None if infer_id=>{let p=PathBuf::from(value);let id=p.file_name().and_then(|v|v.to_str()).filter(|v|!v.is_empty()).context("Cannot infer workspace ID from path; use ID=/absolute/path")?.to_owned();(id,value.to_owned())},None=>bail!("Workspace format is ID=/absolute/project/path")};
+    if !config::valid_id(&id){bail!("Workspace ID must contain only ASCII letters, digits, '_' or '-' and be at most 64 characters");}
+    let p=PathBuf::from(raw);if !p.is_absolute(){bail!("Workspace paths must be absolute");}let p=p.canonicalize().with_context(||format!("Cannot resolve workspace path {}",p.display()))?;
+    Ok(WorkspaceConfig{id,path:p,allow_write:!read_only,allow_exec:!read_only&&!no_exec,allow_git_commit:!read_only})
+}
+fn replace_config(path:&Path,bytes:&[u8])->Result<()>{
+    let md=std::fs::symlink_metadata(path).with_context(||format!("Read metadata for {}",path.display()))?;if !md.is_file()||md.file_type().is_symlink()||md.nlink()!=1||md.uid()!=unsafe{libc::geteuid()}{bail!("Config must be a regular, single-link file owned by the service user");}
+    let parent=path.parent().context("Config needs a parent directory")?;let name=path.file_name().and_then(|v|v.to_str()).unwrap_or("config.toml");let temp=parent.join(format!(".{name}.{}.tmp",util::random_secret()?));
+    util::private_create(&temp,bytes)?;if let Err(e)=std::fs::rename(&temp,path){let _=std::fs::remove_file(&temp);return Err(e).with_context(||format!("Replace {}",path.display()));}Ok(())
+}
+fn add_projects(c:&Cli,path:&Path)->Result<()>{
+    if c.add_projects.is_empty(){return Ok(());}if !c.workspaces.is_empty()||c.init||c.allow_shell||c.unsafe_host||c.issue_token||c.revoke_all||c.rotate_key||c.audit||c.public_url.is_some()||c.bind.is_some(){bail!("--add-project may only be combined with --config, --read-only and --no-exec");}
+    let mut cfg=Config::load_file(path)?;util::private_dir(&cfg.security.data_dir)?;let _instance=util::single_instance(&cfg.security.data_dir.join("service.lock")).context("Stop the running EndlessVibe service before changing workspaces")?;
+    let mut added=Vec::new();for value in &c.add_projects{let w=workspace_arg(value,c.read_only,c.no_exec,true)?;if cfg.workspaces.iter().any(|v|v.id.as_str()==w.id.as_str()){bail!("Workspace ID {} already exists",w.id);}if cfg.workspaces.iter().filter_map(|v|v.path.canonicalize().ok()).any(|v|v.as_path()==w.path.as_path()){bail!("Workspace path {} is already authorized",w.path.display());}cfg.workspaces.push(w.clone());added.push(w);}
+    cfg.validate()?;let checked=workspace::load(&cfg,path)?;drop(checked);let mut text=std::fs::read_to_string(path)?;if !text.ends_with('\n'){text.push('\n');}for w in &added{text.push_str("\n[[workspaces]]\n");text.push_str(&toml::to_string(w)?);}let verify:Config=toml::from_str(&text).context("Generated workspace config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;for w in &added{eprintln!("Added workspace {} = {} (write={}, exec={}, commit={})",w.id,w.path.display(),w.allow_write,w.allow_exec,w.allow_git_commit);}eprintln!("Restart EndlessVibe to load the updated workspace list.");Ok(())
+}
+fn initialize(c:&Cli,path:&std::path::Path)->Result<()>{
+    if path.exists(){bail!("{} already exists; edit it instead of overwriting",path.display());}
+    if c.workspaces.is_empty(){bail!("--init requires at least one explicit --workspace ID=/absolute/project/path");}
+    let mut cfg=Config::default();if let Some(url)=&c.public_url{cfg.server.public_url=url.trim_end_matches('/').into();}if let Some(bind)=&c.bind{cfg.server.bind=bind.parse()?;}
+    if c.unsafe_host{cfg.execution.backend="host".into();cfg.execution.acknowledge_unsafe_host_execution=true;}cfg.execution.allow_shell=c.allow_shell;
+    for value in &c.workspaces{cfg.workspaces.push(workspace_arg(value,c.read_only,c.no_exec,false)?);}
+    cfg.validate()?;util::private_dir(path.parent().context("Config needs a parent directory")?)?;util::private_dir(&cfg.security.data_dir)?;
+    let key_path=cfg.security.data_dir.join("owner.key");if !key_path.exists(){util::private_create(&key_path,format!("{}\n",util::random_secret()?).as_bytes())?;}
+    // Root probing validates kernel support, credentials, overlaps and locks before publishing config.
+    let probe=Runtime::new(cfg.clone(),path)?;drop(probe);
+    util::private_create(path,toml::to_string_pretty(&cfg)?.as_bytes())?;
+    eprintln!("Created {}\nOwner key: {} (keep private; enter only in your own OAuth browser page)\nStart with: endlessvibe --config {}\nChatGPT URL: {}/mcp (OAuth)\n",path.display(),key_path.display(),path.display(),cfg.server.public_url);Ok(())
+}
+#[tokio::main]
+async fn main()->Result<()>{
+    // Credentials, jobs and backups must not become group/world-readable, including SQLite sidecars.
+    unsafe{libc::umask(0o077);}
+    tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"endlessvibe=info,rmcp=warn".into())).init();
+    let Some(cli)=arguments()? else{return Ok(());};if unsafe{libc::geteuid()}==0{bail!("Run EndlessVibe as a non-root user; root service execution is refused");}let path=cli.config.clone().unwrap_or_else(config::default_config_path);let path=if path.is_absolute(){path}else{std::env::current_dir()?.join(path)};
+    if cli.init{if !cli.add_projects.is_empty(){bail!("Use --workspace with --init; --add-project modifies an existing config");}return initialize(&cli,&path);}
+    if !cli.add_projects.is_empty(){return add_projects(&cli,&path);}
+    if !cli.workspaces.is_empty()||cli.read_only||cli.no_exec||cli.allow_shell||cli.unsafe_host{bail!("Workspace/permission flags require --init or --add-project");}
+    let mut settings=Config::load(&path)?;if let Some(url)=cli.public_url{settings.server.public_url=url.trim_end_matches('/').into();}if let Some(bind)=cli.bind{settings.server.bind=bind.parse()?;}settings.validate()?;
+    if cli.issue_token||cli.revoke_all||cli.rotate_key||cli.audit{
+        util::private_dir(&settings.security.data_dir)?;let settings=Arc::new(settings);let db=Arc::new(Store::open(&settings.security.data_dir.join("state.sqlite3"))?);let auth=Auth::new(settings.clone(),db.clone())?;
+        if cli.rotate_key{let _lock=util::single_instance(&settings.security.data_dir.join("service.lock"))?;auth.revoke_all()?;let temp=settings.security.data_dir.join(format!("owner-{}.tmp",util::random_secret()?));util::private_create(&temp,format!("{}\n",util::random_secret()?).as_bytes())?;std::fs::rename(temp,settings.security.data_dir.join("owner.key"))?;eprintln!("Owner key rotated; all prior tokens revoked. Restart the service and relink OAuth.");}
+        if cli.revoke_all{auth.revoke_all()?;eprintln!("All access/refresh tokens and pending authorizations revoked; OAuth client IDs retained.");}
+        if cli.issue_token{println!("{}",auth.issue_local_token()?);}
+        if cli.audit{println!("{}",serde_json::to_string_pretty(&db.audits(100)?)?);}
+        return Ok(());
+    }
+    let listener=tokio::net::TcpListener::bind(settings.server.bind).await.with_context(||format!("Cannot listen on {}; stop the previous EndlessVibe process",settings.server.bind))?;settings.server.bind=listener.local_addr()?;
+    let rt=Runtime::new(settings,&path)?;let app=server::create_router(rt.clone());
+    tracing::info!(version=env!("CARGO_PKG_VERSION"),listen=%rt.config.server.bind,projects=rt.workspaces.len(),backend=%rt.config.execution.backend,"EndlessVibe started; private MCP endpoints require OAuth");
+    if rt.config.execution.backend=="host"{tracing::warn!("UNSANDBOXED host execution was explicitly enabled; tools have the service user's permissions");}
+    if rt.config.execution.backend=="bubblewrap"&&!rt.config.execution.bubblewrap.exists(){tracing::warn!("bubblewrap is not installed; file/Git tools work, command jobs fail closed until it is installed");}
+    eprintln!("Homepage: http://127.0.0.1:{}/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.bind.port(),rt.config.server.public_url);
+    let shutdown_rt=rt.clone();let result=axum::serve(listener,app).with_graceful_shutdown(async move{shutdown_signal().await;shutdown_rt.jobs.cancel_all();shutdown_rt.shutdown.cancel();}).await;
+    rt.jobs.shutdown().await;rt.wait_for_operations().await;result.context("HTTP server failed")
+}
+async fn shutdown_signal(){
+    let ctrl=async{if let Err(e)=tokio::signal::ctrl_c().await{tracing::error!(error=%e,"Cannot install Ctrl-C handler");}};
+    let term=async{match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()){Ok(mut signal)=>{signal.recv().await;},Err(e)=>{tracing::error!(error=%e,"Cannot install SIGTERM handler");std::future::pending::<()>().await;}}};
+    tokio::select!{_=ctrl=>{},_=term=>{}};
+}
+
+#[cfg(test)]mod tests{
+    use super::*;
+    #[test]fn add_project_infers_id_and_permissions(){let t=tempfile::tempdir().unwrap();let p=t.path().join("demo");std::fs::create_dir(&p).unwrap();let w=workspace_arg(p.to_str().unwrap(),false,false,true).unwrap();assert_eq!(w.id,"demo");assert!(w.allow_write&&w.allow_exec&&w.allow_git_commit);}
+    #[test]fn add_project_read_only_disables_mutation(){let t=tempfile::tempdir().unwrap();let p=t.path().join("demo");std::fs::create_dir(&p).unwrap();let w=workspace_arg(&format!("custom={}",p.display()),true,false,true).unwrap();assert_eq!(w.id,"custom");assert!(!w.allow_write&&!w.allow_exec&&!w.allow_git_commit);}
+    #[test]fn add_project_preserves_config_comments(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let parent=t.path().join("projects");let child=parent.join("demo");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&child).unwrap();let mut cfg=Config::default();cfg.security.data_dir=state;cfg.workspaces=vec![WorkspaceConfig{id:"root".into(),path:parent,allow_write:true,allow_exec:true,allow_git_commit:true}];let path=t.path().join("config.toml");let mut text=toml::to_string_pretty(&cfg).unwrap();text.push_str("\n# keep-this-comment\n");std::fs::write(&path,text).unwrap();let mut cli=Cli::default();cli.add_projects.push(child.to_string_lossy().into_owned());add_projects(&cli,&path).unwrap();let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-this-comment"));let loaded=Config::load_file(&path).unwrap();assert!(loaded.workspaces.iter().any(|w|w.id=="demo"&&w.path==child));}
+}
