@@ -15,8 +15,49 @@ impl Runtime{
         let workspaces=workspace::load(&config,config_path)?;let config=Arc::new(config);let db=Arc::new(Store::open(&config.security.data_dir.join("state.sqlite3"))?);let auth=Arc::new(Auth::new(config.clone(),db.clone())?);let jobs=Jobs::new(db.clone(),config.clone())?;
         Ok(Arc::new(Self{config,db,auth,jobs,workspaces,shutdown:CancellationToken::new(),started:Instant::now(),started_unix:util::now(),_instance:instance}))
     }
-    pub fn workspace_root(&self,id:&str)->Result<Arc<Workspace>>{self.workspaces.get(id).cloned().context("WORKSPACE_NOT_AUTHORIZED: call list_workspaces and use an exact configured workspace ID")}
-    pub fn project(&self,workspace:&str,project:&str)->Result<Arc<Project>>{self.workspace_root(workspace)?.project(project)}
+    pub fn workspace_root_exact(&self,id:&str)->Result<Arc<Workspace>>{self.workspaces.get(id).cloned().context("WORKSPACE_NOT_AUTHORIZED: call list_workspaces and use an exact configured workspace ID")}
+    pub fn workspace_root(&self,id:&str)->Result<Arc<Workspace>>{
+        if !id.is_empty() {
+            return self.workspace_root_exact(id);
+        }
+
+        if self.workspaces.len() == 1 {
+            let workspace_id = self.workspaces.keys().next().expect("workspace count checked");
+            return self.workspace_root_exact(workspace_id);
+        }
+
+        self.workspace_root_exact(id)
+    }
+    pub fn project_exact(&self,workspace:&str,project:&str)->Result<Arc<Project>>{self.workspace_root(workspace)?.project(project)}
+    pub fn project(&self,workspace:&str,project:&str)->Result<Arc<Project>>{
+        if !project.is_empty() {
+            return self.project_exact(workspace, project);
+        }
+
+        // Cached pre-refactor ChatGPT tool schemas sent the project ID
+        // through the old `workspace` field and had no `project` property.
+        let legacy_project = workspace;
+        let mut resolved = None;
+
+        for workspace_id in self.workspaces.keys() {
+            if self.project_exact(workspace_id, legacy_project).is_ok() {
+                if resolved.is_some() {
+                    anyhow::bail!(
+                        "PROJECT_AMBIGUOUS: legacy project ID {} exists in more than one workspace; use workspace + project",
+                        legacy_project
+                    );
+                }
+                resolved = Some(workspace_id.clone());
+            }
+        }
+
+        let workspace_id = resolved.ok_or_else(|| anyhow::anyhow!(
+            "PROJECT_NOT_AUTHORIZED: no configured project matches legacy project ID {}",
+            legacy_project
+        ))?;
+
+        self.project_exact(&workspace_id, legacy_project)
+    }
     pub async fn wait_for_operations(&self){let until=Instant::now()+std::time::Duration::from_secs(30);loop{let busy=self.workspaces.values().flat_map(|w|w.projects.values()).any(|p|p.lock.try_lock().is_err());if !busy||Instant::now()>=until{break;}tokio::time::sleep(std::time::Duration::from_millis(50)).await;}}
     pub fn body_limit(&self)->usize{self.config.limits.max_file_bytes.saturating_mul(6).saturating_add(65536)}
     pub fn snapshot(&self)->Value{let projects=self.workspaces.values().map(|w|w.projects.len()).sum::<usize>();json!({"status":"running","name":"EndlessVibe","version":env!("CARGO_PKG_VERSION"),"listen_address":self.config.server.bind.to_string(),"port":self.config.server.bind.port(),"uptime_seconds":self.started.elapsed().as_secs(),"started_at_unix_seconds":self.started_unix,"checked_at_unix_seconds":util::now(),"security":{"authentication":"oauth2_pkce","anonymous_private_tools":false,"execution_backend":self.config.execution.backend,"shell_enabled":self.config.execution.allow_shell,"network_enabled":self.config.execution.backend=="host"||self.config.execution.allow_network,"network_isolation":if self.config.execution.backend=="host"{"none_host_permissions"}else if self.config.execution.allow_network{"shared_host_network"}else{"isolated_or_disabled"}},"workspace_count":self.workspaces.len(),"project_count":projects,"active_jobs":self.jobs.active_count(),"mcp":{"endpoint":"/mcp","method":"POST","transport":"streamable_http","session_mode":"stateless","protocol_version":"negotiated","implementation":"rmcp","sdk_version":crate::mcp::SDK_VERSION,"chatgpt_registration":"client_specific_not_asserted","tools":crate::mcp::TOOL_NAMES}})}
