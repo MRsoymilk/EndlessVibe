@@ -23,7 +23,7 @@ pub fn relative(s: &str, allow_root: bool) -> Result<PathBuf> {
     if (!allow_root && s.ends_with('/')) || s.len() > 4096 || s.contains(['\0', '\\', '\n', '\r']) { bail!("Invalid relative path"); }
     let p = Path::new(s);
     if s.is_empty() || p == Path::new(".") { if allow_root { return Ok(PathBuf::from(".")); } bail!("A file path is required"); }
-    for c in p.components() { match c { Component::Normal(v) => { let name = v.to_str().context("Non-UTF8 path")?; if denied_component(name) { bail!("Sensitive or internal path is not accessible through file tools"); } }, Component::CurDir => {}, _ => bail!("Only workspace-relative paths without '..' are accepted") } }
+    for c in p.components() { match c { Component::Normal(v) => { let name = v.to_str().context("Non-UTF8 path")?; if denied_component(name) { bail!("Sensitive or internal path is not accessible through file tools"); } }, Component::CurDir => {}, _ => bail!("Only project-relative paths without '..' are accepted") } }
     if p.file_name().is_none() { bail!("Invalid file path"); }
     Ok(p.to_owned())
 }

@@ -4,17 +4,108 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>EndlessVibe · 服务状态</title>
-<link rel="stylesheet" href="/assets/app.css">
-<script src="/assets/app.js" defer></script>
+<title>EndlessVibe · Dashboard</title>
+<link rel="stylesheet" href="/vendor/uPlot/uPlot.min.css">
+<link rel="stylesheet" href="/assets/app.css?v=config-save-2">
+<script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
+<script src="/assets/app.js?v=config-save-2" defer></script>
 </head>
 <body>
 <main class="shell">
-<header><div class="brand"><span class="logo" aria-hidden="true">EV</span><div><p class="eyebrow">ENDLESSVIBE</p><h1>服务状态</h1></div></div><a class="api-link" href="/api/status">查看 JSON <span aria-hidden="true">↗</span></a></header>
-<section class="overview" aria-labelledby="status-title"><div class="overview-top"><div><p class="eyebrow">HTTP SERVICE</p><h2 id="status-title">正在检查服务</h2></div><span id="status-badge" class="badge pending" role="status"><span class="dot" aria-hidden="true"></span><span id="badge-text">检查中</span></span></div><p id="status-detail">正在请求当前站点的状态接口。</p><div class="refresh-row"><span id="last-success">尚未取得状态</span><button type="button" id="refresh">立即刷新</button></div></section>
-<section class="metrics" aria-label="运行信息"><article><p class="label">服务版本</p><p class="value" id="version">—</p><p class="caption">EndlessVibe</p></article><article><p class="label">运行时长</p><p class="value" id="uptime">—</p><p class="caption">自本次服务启动</p></article><article><p class="label">本地监听</p><p class="value mono address" id="listen">—</p><p class="caption">HTTP · 默认端口 20000</p></article><article><p class="label">启动时间</p><p class="value datetime" id="started">—</p><p class="caption">浏览器本地时间</p></article></section>
-<section class="endpoints" aria-labelledby="endpoints-title"><h2 id="endpoints-title">服务接口</h2><dl><div><dt>Web 主页</dt><dd><span class="method">GET</span><a href="/">/</a></dd></div><div><dt>实时状态</dt><dd><span class="method">GET</span><a href="/api/status">/api/status</a></dd></div><div><dt>健康检查</dt><dd><span class="method">GET</span><a href="/health">/health</a></dd></div><div><dt>MCP 接口</dt><dd><span class="method post">POST</span><code id="mcp-endpoint">/mcp</code></dd></div></dl><p class="notice">状态页只确认 HTTP 服务可响应。MCP 由官方 Rust SDK rmcp 提供，请使用下方完整 /mcp 地址创建连接；ChatGPT 注册结果仍需单独验证。本版提供项目、文件、命令任务和 Git 工具；私有工具必须通过 OAuth 授权。主页不展示项目路径、文件内容或密钥。</p></section>
-<section class="endpoints" aria-label="能力和安全"><h2>能力与安全</h2><dl><div><dt>认证</dt><dd>OAuth · S256 PKCE</dd></div><div><dt>MCP 工具</dt><dd id="tool-count">—</dd></div><div><dt>授权工作区数量</dt><dd id="workspace-count">—</dd></div><div><dt>执行后端</dt><dd id="execution-backend">—</dd></div><div><dt>运行中的任务</dt><dd id="active-jobs">—</dd></div></dl><p class="notice">已有 No Authentication 连接需要改为 OAuth 后重新连接。只有管理员明确配置的项目可访问；Shell 默认关闭，默认沙箱无网络。</p></section><footer><span id="site-origin">EndlessVibe</span><span>每 5 秒自动刷新 · 无第三方资源</span></footer>
+<header class="topbar">
+<div class="brand"><span class="logo" aria-hidden="true">EV</span><div><p class="eyebrow">ENDLESSVIBE</p><h1>Dashboard</h1></div></div>
+<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="config" href="/config">配置</a></nav>
+<div id="header-status" class="header-status pending"><span class="dot"></span><span id="header-status-text">检查中</span></div>
+</header>
+
+<nav class="breadcrumb" aria-label="面包屑"><a href="/">EndlessVibe</a><span>/</span><span id="breadcrumb-current">首页</span></nav>
+
+<section class="page" data-page="home">
+<section class="overview" aria-labelledby="status-title">
+<div class="overview-top"><div><p class="eyebrow">SERVICE OVERVIEW</p><h2 id="status-title">正在检查服务</h2></div><button type="button" id="refresh">立即刷新</button></div>
+<p id="status-detail">正在请求本地 Dashboard 状态接口。</p><div class="refresh-row"><span id="last-success">尚未取得状态</span><a href="/api/status">状态 JSON ↗</a></div>
+</section>
+
+<section class="metrics six" aria-label="运行信息">
+<article><p class="label">服务版本</p><p class="value" id="version">—</p><p class="caption">EndlessVibe</p></article>
+<article><p class="label">运行时长</p><p class="value" id="uptime">—</p><p class="caption">自本次服务启动</p></article>
+<article><p class="label">Workspace</p><p class="value" id="workspace-count">—</p><p class="caption">管理根节点</p></article>
+<article><p class="label">Project</p><p class="value" id="project-count">—</p><p class="caption">已授权项目</p></article>
+<article><p class="label">Active Jobs</p><p class="value" id="active-jobs">—</p><p class="caption">当前任务</p></article>
+<article><p class="label">Execution</p><p class="value compact" id="execution-backend">—</p><p class="caption">执行后端</p></article>
+</section>
+
+<section class="section-block">
+<div class="section-heading"><div><p class="eyebrow">ACTIVITY BOARD</p><h2>活动看板</h2></div><a href="/activity">查看全部活动 →</a></div>
+<div class="metrics six compact-cards">
+<article><p class="label">Tool Requests</p><p class="value" id="home-requests">—</p><p class="caption">最近 60 分钟</p></article>
+<article><p class="label">Success</p><p class="value" id="home-success">—</p><p class="caption">成功完成</p></article>
+<article><p class="label">Failed</p><p class="value" id="home-failed">—</p><p class="caption">失败 / 超时 / 取消</p></article>
+<article><p class="label">HTTP Requests</p><p class="value" id="home-http-requests">—</p><p class="caption">公网 listener</p></article>
+<article><p class="label">RX</p><p class="value compact" id="home-rx">—</p><p class="caption">HTTP payload</p></article>
+<article><p class="label">TX</p><p class="value compact" id="home-tx">—</p><p class="caption">HTTP payload</p></article>
+</div>
+<div class="chart-grid home-charts">
+<article class="chart-card"><div class="chart-header"><div><h3>Tool Activity</h3><p>Requests / Success / Failed · 1 min</p></div><span>60 min</span></div><div id="home-tool-chart" class="chart-host"></div></article>
+<article class="chart-card"><div class="chart-header"><div><h3>Network Traffic</h3><p>公网 HTTP payload RX / TX</p></div><span>60 min</span></div><div id="home-traffic-chart" class="chart-host"></div></article>
+</div>
+</section>
+
+<section class="panel">
+<div class="panel-heading"><div><p class="eyebrow">RECENT</p><h2>最近活动</h2></div><span id="home-activity-updated">—</span></div>
+<div id="home-activity-list" class="activity-list empty-state">暂无活动</div>
+</section>
+<section class="panel capability-panel">
+<div class="panel-heading"><div><p class="eyebrow">CAPABILITIES & SECURITY</p><h2>能力与安全</h2></div><a href="/config">查看配置 →</a></div>
+<div class="security-summary"><div><span>认证</span><strong id="home-auth">—</strong></div><div><span>Shell</span><strong id="home-shell">—</strong></div><div><span>Network</span><strong id="home-network">—</strong></div><div><span>MCP Tools</span><strong id="home-tool-count">—</strong></div></div>
+<div id="home-mcp-tools" class="tool-list compact-tools"></div>
+</section>
+</section>
+
+<section class="page" data-page="activity">
+<div class="page-title"><div><p class="eyebrow">ACTIVITY</p><h2>活动与流量</h2><p>最近 60 分钟工具活动、任务并发和公网 HTTP payload 流量。</p></div><span id="activity-updated">等待数据</span></div>
+<div class="metrics six compact-cards">
+<article><p class="label">Tool Requests</p><p class="value" id="activity-requests">—</p></article>
+<article><p class="label">Success</p><p class="value" id="activity-success">—</p></article>
+<article><p class="label">Failed</p><p class="value" id="activity-failed">—</p></article>
+<article><p class="label">HTTP Requests</p><p class="value" id="activity-http-requests">—</p></article>
+<article><p class="label">RX</p><p class="value compact" id="activity-rx">—</p></article>
+<article><p class="label">TX</p><p class="value compact" id="activity-tx">—</p></article>
+</div>
+<div class="chart-grid activity-charts">
+<article class="chart-card wide"><div class="chart-header"><div><h3>Tool Activity</h3><p>工具请求与完成结果</p></div><span>60 min</span></div><div id="activity-tool-chart" class="chart-host"></div></article>
+<article class="chart-card"><div class="chart-header"><div><h3>Active Jobs</h3><p>运行中任务数量</p></div><span>60 min</span></div><div id="activity-jobs-chart" class="chart-host"></div></article>
+<article class="chart-card wide"><div class="chart-header"><div><h3>Network Traffic</h3><p>公网 listener RX / TX</p></div><span>60 min</span></div><div id="activity-traffic-chart" class="chart-host"></div></article>
+</div>
+<div class="two-column">
+<section class="panel"><div class="panel-heading"><div><p class="eyebrow">AUDIT</p><h2>最近审计事件</h2></div></div><div id="audit-list" class="activity-list empty-state">暂无审计事件</div></section>
+<section class="panel"><div class="panel-heading"><div><p class="eyebrow">JOBS</p><h2>最近任务</h2></div></div><div id="job-list" class="activity-list empty-state">暂无任务</div></section>
+</div>
+</section>
+
+<section class="page" data-page="operations">
+<div class="operations-page-head"><div><p class="eyebrow">OPERATION TIMELINE</p><h2>操作日志</h2><p>按时间顺序展示每次操作。主列固定为 Timeline / Operation / Input / Diff，Output 与 Error 仅在展开详情中显示。</p></div><div class="operations-actions"><span id="operation-updated">等待数据</span><button type="button" id="expand-all-operations">全部展开</button><button type="button" id="collapse-all-operations">全部折叠</button></div></div>
+<div class="operations-log-shell">
+<div class="operation-grid-head"><span>Timeline</span><span>Operation</span><span>Input</span><span>Diff</span></div>
+<div id="operation-list" class="operation-stream empty-state">暂无操作日志</div>
+</div>
+</section>
+
+<section class="page" data-page="config">
+<div class="page-title"><div><p class="eyebrow">CONFIGURATION</p><h2>配置</h2><p>只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。</p></div><span id="config-restart-badge" class="badge-note">检查配置状态</span></div>
+<div class="config-grid">
+<section class="config-card"><div class="config-heading"><h3>Server / Dashboard</h3><span>NETWORK</span></div><dl id="config-server" class="config-list"></dl></section>
+<section class="config-card"><div class="config-heading"><h3>Security</h3><span>AUTH</span></div><dl id="config-security" class="config-list"></dl></section>
+<section class="config-card"><div class="config-heading"><h3>Execution</h3><span>SANDBOX</span></div><dl id="config-execution" class="config-list"></dl></section>
+<section class="config-card"><div class="config-heading"><h3>Limits</h3><span>LIMITS</span></div><dl id="config-limits" class="config-list"></dl></section>
+<section class="config-card"><div class="config-heading"><h3>Git</h3><span>IDENTITY</span></div><dl id="config-git" class="config-list"></dl></section>
+<section class="config-card full"><div class="config-heading"><h3>添加 Project</h3><span>WRITE CONFIG</span></div><p class="config-note">写入 config.toml；目标目录必须已存在，并且严格位于所选 Workspace 根目录下。保存后需重启 EndlessVibe 才会加入 MCP 运行时。</p><form id="add-project-form" class="config-form"><label>Workspace<select id="add-project-workspace" required></select></label><label>Project ID<input id="add-project-id" type="text" maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="留空时使用目录名"></label><label class="path-field">Absolute Path<input id="add-project-path" type="text" required placeholder="/home/vv/project/example"></label><div class="permission-editor"><label><input id="add-project-write" type="checkbox" checked> write</label><label><input id="add-project-exec" type="checkbox" checked> exec</label><label><input id="add-project-commit" type="checkbox" checked> commit</label><label><input id="add-project-git-mutation" type="checkbox"> git rw</label></div><button type="submit" id="add-project-save">保存并添加</button><div id="config-write-status" class="write-status" role="status" aria-live="polite"></div></form></section>
+<section class="config-card full"><div class="config-heading"><h3>Workspace → Project</h3><span>ACCESS</span></div><div id="workspace-config" class="workspace-config"></div></section>
+<section class="config-card full"><div class="config-heading"><h3>MCP 工具</h3><span id="mcp-tool-count">—</span></div><p class="config-note">当前服务向 ChatGPT 暴露的工具如下。</p><div id="mcp-tools" class="tool-list"></div></section>
+</div>
+</section>
+
+<footer><span id="site-origin">EndlessVibe</span><span>Dashboard 127.0.0.1:20001 · uPlot 从 web/vendor 本地加载</span></footer>
 <noscript><p class="noscript">JavaScript 未启用。请访问 <a href="/api/status">/api/status</a> 查看实时状态。</p></noscript>
 </main>
 </body>

@@ -1,4 +1,4 @@
-use crate::{config::Config, workspace::Workspace};
+use crate::{config::Config, workspace::Project};
 use anyhow::{bail, Context, Result};
 use std::{path::{Path,PathBuf}, process::Stdio, time::Duration};
 use tokio::{io::{AsyncRead,AsyncReadExt,AsyncWriteExt}, process::Command};
@@ -33,8 +33,42 @@ fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
     bail!("Executable {program} not found in configured PATH")
 }
 
-pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
+fn pre_exec_nproc_limit(backend:&str,max_processes:u64)->Option<u64>{
+    // RLIMIT_NPROC is counted against every thread/process owned by the real UID.
+    // Applying it to bwrap before namespace creation can make bwrap's clone() fail
+    // with EAGAIN when the desktop user already owns >= max_processes tasks.
+    // Host execution can still opt into this coarse per-UID limit; bubblewrap must
+    // finish creating its namespaces before any process-count isolation is applied.
+    (backend=="host").then_some(max_processes)
+}
+
+fn bubblewrap_base_command(config:&Config)->Result<Command>{
+    if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
+    let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
+    c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
+    if config.execution.allow_network{c.arg("--share-net");}
+    for p in ["/usr","/bin","/sbin","/lib","/lib64"]{let p=Path::new(p);if p.exists(){c.arg("--ro-bind").arg(p).arg(p);}}
+    c.args(["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/etc"]);
+    for p in ["/etc/ld.so.cache","/etc/ld.so.conf","/etc/ld.so.conf.d","/etc/localtime"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}
+    if config.execution.allow_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
+    for mount in &config.execution.readonly_mounts{c.arg("--ro-bind").arg(&mount.source).arg(&mount.target);}
+    Ok(c)
+}
+
+pub async fn probe_bubblewrap(config:&Config)->Result<()>{
+    if config.execution.backend!="bubblewrap"{bail!("Configured execution backend is not bubblewrap");}
+    let executable=[Path::new("/usr/bin/true"),Path::new("/bin/true")].into_iter().find(|p|p.is_file()).context("Cannot find /usr/bin/true or /bin/true for sandbox probe")?;
+    let mut c=bubblewrap_base_command(config)?;
+    c.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--"]).arg(executable);
+    let result=capture(c,None,16384,5).await?;
+    if result.code!=Some(0){bail!("bubblewrap sandbox probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}
+    Ok(())
+}
+
+fn git_network_subcommand(args:&[String])->bool{args.iter().any(|arg|matches!(arg.as_str(),"push"|"fetch"|"pull"|"clone"|"ls-remote"|"remote"|"submodule"))}
+pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
     w.exec_allowed()?;
+    if program=="git"&&git_network_subcommand(args){bail!("Network Git subcommands are disabled in run_command; allow_git_mutation only permits local repository mutations");}
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
     if shell&&!config.execution.allow_shell{bail!("run_shell is disabled; set execution.allow_shell=true locally after reviewing the risks");}
     if !shell&&!config.execution.allowed_programs.iter().any(|p|p==program){bail!("Program is not in execution.allowed_programs");}
@@ -49,31 +83,33 @@ pub fn build_job_command(config:&Config,w:&Workspace,program:&str,args:&[String]
             if let Some(home)=std::env::var_os("HOME"){c.env("HOME",home);}c.args(args);c
         }
         "bubblewrap"=>{
-            if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
-            let cache=config.security.data_dir.join("exec-cache").join(&w.config.id);crate::util::private_dir(&cache)?;
-            let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
-            c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
-            if config.execution.allow_network{c.arg("--share-net");}
-            for p in ["/usr","/bin","/sbin","/lib","/lib64"]{let p=Path::new(p);if p.exists(){c.arg("--ro-bind").arg(p).arg(p);}}
-            c.args(["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/etc"]);
-            for p in ["/etc/ld.so.cache","/etc/ld.so.conf","/etc/ld.so.conf.d","/etc/localtime"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}
-            if config.execution.allow_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
-            for mount in &config.execution.readonly_mounts{c.arg("--ro-bind").arg(&mount.source).arg(&mount.target);}
+            let cache=config.security.data_dir.join("exec-cache").join(&w.workspace_id).join(&w.config.id);crate::util::private_dir(&cache)?;
+            let mut c=bubblewrap_base_command(config)?;
             c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
-            // Builds may inspect Git state, but must use the reviewed git_commit tool for writes.
-            let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}
+            // Git metadata is read-only by default. Explicit allow_git_mutation keeps the project's
+            // own .git writable while HOME, credentials, service state and network remain isolated.
+            let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}if !w.config.allow_git_mutation{c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}}
             let inside=if cwd=="."{PathBuf::from("/workspace")}else{Path::new("/workspace").join(cwd)};
             c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb"]);
             c.arg("--").arg(if shell{"/bin/bash"}else{program}).args(args);c
         }
         _=>bail!("Unknown execution backend"),
     };
+    if !shell&&program=="git"{command.env("GIT_AUTHOR_NAME",&config.git.author_name).env("GIT_AUTHOR_EMAIL",&config.git.author_email).env("GIT_COMMITTER_NAME",&config.git.author_name).env("GIT_COMMITTER_EMAIL",&config.git.author_email).env("GIT_MERGE_AUTOEDIT","no").env("GIT_EDITOR","true");}
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
-    let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=config.execution.max_processes;let cpu=config.limits.command_timeout_seconds+5;
+    let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=pre_exec_nproc_limit(&config.execution.backend,config.execution.max_processes);let cpu=config.limits.command_timeout_seconds+5;
     // SAFETY: only async-signal-safe Linux syscalls are used in this pre_exec closure.
     unsafe{command.pre_exec(move||{
-        for (resource,value) in [(libc::RLIMIT_AS,address_space),(libc::RLIMIT_NPROC,processes),(libc::RLIMIT_CPU,cpu)]{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(resource,&lim)!=0{return Err(std::io::Error::last_os_error());}}
+        for (resource,value) in [(libc::RLIMIT_AS,address_space),(libc::RLIMIT_CPU,cpu)]{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(resource,&lim)!=0{return Err(std::io::Error::last_os_error());}}
+        if let Some(value)=processes{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(libc::RLIMIT_NPROC,&lim)!=0{return Err(std::io::Error::last_os_error());}}
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong)!=0{return Err(std::io::Error::last_os_error());}Ok(())
     });}
     Ok(command)
+}
+
+#[cfg(test)]mod tests{
+    use super::*;
+    #[test]fn bubblewrap_does_not_limit_launcher_nproc(){assert_eq!(pre_exec_nproc_limit("bubblewrap",256),None);}
+    #[test]fn host_keeps_configured_nproc_limit(){assert_eq!(pre_exec_nproc_limit("host",256),Some(256));}
+    #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
 }
