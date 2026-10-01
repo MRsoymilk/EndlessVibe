@@ -1,4 +1,7 @@
-# EXAMPLE ONLY: use `endlessvibe --init --workspace ID=/absolute/path` to create the initial config, then `--add-project [ID=]/absolute/path` to add projects.
+# EXAMPLE ONLY: create workspace roots with:
+#   endlessvibe --init --workspace projects=/home/user/projects
+# Then stop the service and mount projects with:
+#   endlessvibe --add-project projects:my-project=/home/user/projects/my-project
 # Environment variables and '~' are NOT expanded inside TOML paths.
 [server]
 bind = "0.0.0.0:20000"
@@ -40,16 +43,22 @@ author_name = "EndlessVibe"
 author_email = "endlessvibe@localhost"
 
 [[workspaces]]
+id = "projects"
+path = "/home/user/projects"
+
+[[workspaces.projects]]
 id = "my-project"
-path = "/home/user/projects/my-project"
+path = "my-project"
 allow_write = true
 allow_exec = true
 allow_git_commit = true
 
-# Add only projects you intend to authorize; the server never scans all of /home automatically.
-# [[workspaces]]
-# id = "another-project"
-# path = "/home/user/projects/another-project"
-# allow_write = true
-# allow_exec = true
-# allow_git_commit = true
+[[workspaces.projects]]
+id = "another-project"
+path = "another-project"
+allow_write = true
+allow_exec = false
+allow_git_commit = true
+
+# Workspace roots are management boundaries. Project paths are relative to their
+# workspace root and are the units used by file, command and Git tools.

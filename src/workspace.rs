@@ -18,7 +18,8 @@ impl Workspace{
     pub fn projects_summary(&self)->Value{json!({"workspace":self.config.id,"projects":self.projects.values().map(|p|p.summary()).collect::<Vec<_>>()})}
 }
 fn same_root(a:&Root,b:&Root)->Result<bool>{use std::os::unix::fs::MetadataExt;let a=a.metadata(".")?;let b=b.metadata(".")?;Ok(a.dev()==b.dev()&&a.ino()==b.ino())}
-fn project_config(id:String,path:PathBuf,w:&WorkspaceConfig)->ProjectConfig{ProjectConfig{id,path,allow_write:w.allow_write,allow_exec:w.allow_exec,allow_git_commit:w.allow_git_commit}}
+fn legacy(w:&WorkspaceConfig)->bool{w.allow_write.is_some()||w.allow_exec.is_some()||w.allow_git_commit.is_some()}
+fn project_config(id:String,path:PathBuf,w:&WorkspaceConfig)->ProjectConfig{ProjectConfig{id,path,allow_write:w.allow_write.unwrap_or(false),allow_exec:w.allow_exec.unwrap_or(false),allow_git_commit:w.allow_git_commit.unwrap_or(false)}}
 fn insert_project(map:&mut BTreeMap<String,Arc<Project>>,workspace_id:&str,root_path:&Path,config:ProjectConfig,legacy_overlap:bool)->Result<()>{
     if map.contains_key(&config.id){bail!("Duplicate project ID {}/{}",workspace_id,config.id);}
     let host=if config.path==Path::new("."){root_path.to_owned()}else{root_path.join(&config.path)};
@@ -49,23 +50,20 @@ pub fn load(config:&Config,config_path:&Path)->Result<BTreeMap<String,Arc<Worksp
     opened.sort_by_key(|(_,root)|root.path.components().count());
     let mut legacy_parent:Vec<Option<usize>>=vec![None;opened.len()];
     for i in 0..opened.len(){
-        if !opened[i].0.projects.is_empty(){continue;}
-        for j in (0..i).rev(){if opened[i].1.path.starts_with(&opened[j].1.path){legacy_parent[i]=Some(j);break;}}
+        if !legacy(&opened[i].0)||!opened[i].0.projects.is_empty(){continue;}
+        for j in (0..i).rev(){if opened[i].1.path.starts_with(&opened[j].1.path)&&legacy(&opened[j].0){legacy_parent[i]=Some(j);break;}}
     }
     let mut out=BTreeMap::new();
     for i in 0..opened.len(){
         if legacy_parent[i].is_some(){continue;}
         let item=opened[i].0.clone();let root_path=opened[i].1.path.clone();
         for (other,other_root) in &opened{
-            if other.id!=item.id&&!other.projects.is_empty()&&(root_path.starts_with(&other_root.path)||other_root.path.starts_with(&root_path)){bail!("Configured workspace roots must not overlap");}
+            if other.id!=item.id&&!(legacy(&item)&&legacy(other))&&(root_path.starts_with(&other_root.path)||other_root.path.starts_with(&root_path)){bail!("Configured workspace roots must not overlap");}
         }
         let root=Root::open(&root_path)?;
         let mut projects=BTreeMap::new();
-        if item.projects.is_empty(){
-            insert_project(&mut projects,&item.id,&root_path,project_config(item.id.clone(),PathBuf::from("."),&item),true)?;
-        }else{
-            for p in &item.projects{insert_project(&mut projects,&item.id,&root_path,p.clone(),false)?;}
-        }
+        if legacy(&item)&&item.projects.is_empty(){insert_project(&mut projects,&item.id,&root_path,project_config(item.id.clone(),PathBuf::from("."),&item),true)?;}
+        for p in &item.projects{insert_project(&mut projects,&item.id,&root_path,p.clone(),false)?;}
         for k in 0..opened.len(){
             let mut parent=legacy_parent[k];let mut belongs=false;
             while let Some(p)=parent{if p==i{belongs=true;break;}parent=legacy_parent[p];}
@@ -88,8 +86,8 @@ pub fn inspect(project:&Project)->Result<Value>{
 
 #[cfg(test)]mod tests{
     use super::*;
-    fn legacy(id:&str,path:&Path)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects:vec![],allow_write:true,allow_exec:true,allow_git_commit:true}}
-    fn nested(id:&str,path:&Path,projects:Vec<ProjectConfig>)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects,allow_write:false,allow_exec:false,allow_git_commit:false}}
+    fn legacy(id:&str,path:&Path)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects:vec![],allow_write:Some(true),allow_exec:Some(true),allow_git_commit:Some(true)}}
+    fn nested(id:&str,path:&Path,projects:Vec<ProjectConfig>)->WorkspaceConfig{WorkspaceConfig{id:id.into(),path:path.into(),projects,allow_write:None,allow_exec:None,allow_git_commit:None}}
     fn project(id:&str,path:&str)->ProjectConfig{ProjectConfig{id:id.into(),path:path.into(),allow_write:true,allow_exec:true,allow_git_commit:true}}
     #[test]fn legacy_parent_child_become_one_workspace_with_projects(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");let child=root.join("child");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&child).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![legacy("NAME",&root),legacy("child",&child)];let m=load(&c,&cfg_path).unwrap();assert_eq!(m.len(),1);assert!(m["NAME"].projects.contains_key("NAME"));assert!(m["NAME"].projects.contains_key("child"));assert!(Arc::ptr_eq(&m["NAME"].projects["NAME"].lock,&m["NAME"].projects["child"].lock));}
     #[test]fn configured_projects_get_independent_locks(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(root.join("a")).unwrap();std::fs::create_dir_all(root.join("b")).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut c=Config::default();c.security.data_dir=state;c.workspaces=vec![nested("root",&root,vec![project("a","a"),project("b","b")])];let m=load(&c,&cfg_path).unwrap();assert!(!Arc::ptr_eq(&m["root"].projects["a"].lock,&m["root"].projects["b"].lock));}
