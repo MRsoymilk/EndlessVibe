@@ -10,7 +10,7 @@
 ./target/release/endlessvibe --check-sandbox
 ```
 
-该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目代码。它还会在 sandbox 内使用实际的 `execution.path` 逐项解析 `execution.allowed_programs ∪ execution.required_programs`。`allowed_programs` 控制可被 `run_command` 直接启动的顶层程序；`required_programs` 只表示环境必须存在，不额外授予直接执行权限，适合声明由构建/测试脚本间接调用的 Rust/PostgreSQL 工具。成功时会打印每个程序的 sandbox 路径，例如：
+该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目代码。默认 `execution.auto_discover_toolchains=true`：EndlessVibe 会解析宿主程序及符号链接的真实安装位置，对安全的 `/opt/<toolchain>` 前缀自动建立同路径只读 mount，并自动把 `/usr/lib*/postgresql*/bin`、安全 `/opt/.../bin` 等已发现目录加入本次 sandbox PATH；不再要求为 Gentoo `/usr/bin/rustc -> /opt/rust-bin-*` 这类布局手写 mount。它还会在 sandbox 内逐项解析 `execution.allowed_programs ∪ execution.required_programs`。`allowed_programs` 控制全局可直接启动的顶层程序；项目 manifest 自动检测到的受支持工具也可在该项目内使用。`required_programs` 表示服务级环境必须存在，适合声明全局门禁。成功时会打印每个程序的 sandbox 路径，例如：
 
 ```text
 sandbox program: cargo -> /opt/rust/bin/cargo
@@ -29,9 +29,13 @@ bubblewrap sandbox probe: ok (9 configured programs visible)
 
 网络默认关闭。依赖还未下载时 Cargo/npm 等失败是预期行为：在本机管理独立缓存，或经过风险确认后将 `execution.allow_network=true`。该选项会允许访问网络（包括可能可达的内网），不是单纯允许 crates.io。系统代理环境变量不会自动传给子进程。
 
-## Rustup / 自定义 SDK
+## 工具链自动发现与手工覆盖
 
-当 cargo/rustc 在 `/usr/bin` 时可以直接调用。使用 Rustup 时，默认不会挂载整个 `~/.cargo` 或 `~/.rustup`，因为 `~/.cargo` 可能包含 registry 凭据。应只挂载实际 toolchain 目录。
+新 Project 会在最多 3 层目录内检查常见 manifest：`Cargo.toml`、`CMakeLists.txt`、`pyproject.toml` / `requirements.txt`、`package.json`、`project.godot`、`go.mod` 与 compose 文件。Rust、CMake、Python、Node、Godot、Go 会自动形成项目工具链；Rust/Python/compose manifest 中的常见 PostgreSQL 依赖还会自动加入 `initdb/postgres/pg_isready/createdb` preflight。检测只读取小于等于 512 KiB 的 manifest，并跳过 `.git`、`target`、`node_modules`、虚拟环境和构建目录。
+
+自动发现只会额外暴露已识别程序所需的系统目录与 `/opt/<toolchain>` 安装前缀，不会自动挂载 HOME、凭据目录、数据库 data directory、socket 或 Docker socket。可设置 `auto_discover_toolchains=false` 恢复完全手工模式；显式 `readonly_mounts` 与 `execution.path` 仍可作为特殊 SDK 的覆盖配置。
+
+使用 Rustup 时，仍不会挂载整个 `~/.cargo` 或 `~/.rustup`，因为 `~/.cargo` 可能包含 registry 凭据。若自动发现无法安全定位 Rustup 工具链，应只挂载实际 toolchain 目录。
 
 先在宿主机查询实际 Rust 工具链：
 
