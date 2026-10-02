@@ -59,12 +59,12 @@ fn scan_program_mentions(text:&str,out:&mut Vec<String>){
     const PROGRAMS:[&str;14]=["cargo","rustc","cmake","ninja","make","ctest","python3","node","npm","go","godot","initdb","postgres","pg_isready"];
     for program in PROGRAMS{let double=format!("\"{program}\"");let single=format!("'{program}'");if text.contains(&double)||text.contains(&single){add_programs(out,&[program]);}}
     if text.contains("\"createdb\"")||text.contains("'createdb'"){add_programs(out,&["createdb"]);}
-    if out.iter().any(|p|matches!(p.as_str(),"initdb"|"postgres"|"pg_isready"|"createdb")){add_programs(out,&["initdb","postgres","pg_isready","createdb"]);}
     if out.iter().any(|p|p=="cargo"){add_programs(out,&["rustc"]);}
 }
+fn python_compile_only(args:&[String])->bool{args.windows(2).any(|pair|pair[0]=="-m"&&matches!(pair[1].as_str(),"py_compile"|"compileall"))}
 pub fn detect_command_programs(project:&Project,cwd:&str,program:&str,args:&[String])->Vec<String>{
     let mut out=Vec::new();
-    if program=="python3"{
+    if program=="python3"&&!python_compile_only(args){
         if let Some(script)=args.iter().find(|arg|!arg.starts_with('-')&&arg.ends_with(".py")){let path=if cwd=="."{PathBuf::from(script)}else{Path::new(cwd).join(script)};if let Some(path)=path.to_str(){if let Ok(bytes)=project.root.read(path,512*1024){if let Ok(text)=std::str::from_utf8(&bytes){scan_program_mentions(text,&mut out);}}}}
     }else if program=="bash"{
         if let Some(pos)=args.iter().position(|arg|arg=="-c"){if let Some(script)=args.get(pos+1){if script.len()<=65536{scan_program_mentions(script,&mut out);}}}
@@ -242,6 +242,7 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
     #[test]fn project_manifest_detection_finds_joint_toolchains(){let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("Cargo.toml"),"[dependencies]\nsqlx = \"1\"\n").unwrap();std::fs::create_dir_all(d.path().join("game")).unwrap();std::fs::write(d.path().join("game/project.godot"),"[application]\n").unwrap();let mut programs=Vec::new();inspect_project_dir(d.path(),0,&mut programs);for p in ["cargo","rustc","initdb","postgres","pg_isready","createdb","godot"]{assert!(programs.contains(&p.to_owned()),"missing {p}");}}
     #[test]fn oversized_manifest_is_not_read(){let d=tempfile::tempdir().unwrap();let p=d.path().join("Cargo.toml");std::fs::write(&p,vec![b'x';512*1024+1]).unwrap();assert!(read_small_manifest(&p).is_none());}
-    #[test]fn script_mentions_expand_postgres_and_rust_toolchains(){let mut p=Vec::new();scan_program_mentions("subprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);for expected in ["cargo","rustc","initdb","postgres","pg_isready","createdb"]{assert!(p.contains(&expected.to_owned()),"missing {expected}");}}
+    #[test]fn script_mentions_require_only_explicit_postgres_tools(){let mut p=Vec::new();scan_program_mentions("subprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);for expected in ["cargo","rustc","initdb","postgres"]{assert!(p.contains(&expected.to_owned()),"missing {expected}");}for unexpected in ["pg_isready","createdb"]{assert!(!p.contains(&unexpected.to_owned()),"unexpected {unexpected}");}}
+    #[test]fn python_compile_modes_skip_runtime_tool_scan(){assert!(python_compile_only(&["-m".into(),"py_compile".into(),"tools/check.py".into()]));assert!(python_compile_only(&["-m".into(),"compileall".into(),"tools".into()]));assert!(!python_compile_only(&["tools/check.py".into()]));}
     #[test]fn gentoo_install_hint_is_search_only(){let hint=install_hint_for_os("gentoo","postgres");assert!(hint.contains("emerge -s postgresql"));assert!(!hint.contains("emerge -av"));}
 }
