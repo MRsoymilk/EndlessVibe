@@ -57,8 +57,10 @@ fn inspect_project_dir(path:&Path,depth:usize,out:&mut Vec<String>){
 pub fn detect_project_programs(project:&Project)->Vec<String>{let mut out=Vec::new();inspect_project_dir(&project.root.path,0,&mut out);out.sort();out.dedup();out}
 fn scan_program_mentions(text:&str,out:&mut Vec<String>){
     const PROGRAMS:[&str;14]=["cargo","rustc","cmake","ninja","make","ctest","python3","node","npm","go","godot","initdb","postgres","pg_isready"];
-    for program in PROGRAMS{let double=format!("\"{program}\"");let single=format!("'{program}'");if text.contains(&double)||text.contains(&single){add_programs(out,&[program]);}}
-    if text.contains("\"createdb\"")||text.contains("'createdb'"){add_programs(out,&["createdb"]);}
+    let mut optional=Vec::<String>::new();
+    for line in text.lines(){if let Some(rest)=line.trim().strip_prefix("# endlessvibe-optional-programs:"){for program in rest.split_whitespace(){if simple_program(program)&&!optional.iter().any(|p|p==program){optional.push(program.to_owned());}}}}
+    for program in PROGRAMS{let double=format!("\"{program}\"");let single=format!("'{program}'");if (text.contains(&double)||text.contains(&single))&&!optional.iter().any(|p|p==program){add_programs(out,&[program]);}}
+    if (text.contains("\"createdb\"")||text.contains("'createdb'"))&&!optional.iter().any(|p|p=="createdb"){add_programs(out,&["createdb"]);}
     if out.iter().any(|p|p=="cargo"){add_programs(out,&["rustc"]);}
 }
 fn python_compile_only(args:&[String])->bool{args.windows(2).any(|pair|pair[0]=="-m"&&matches!(pair[1].as_str(),"py_compile"|"compileall"))}
@@ -243,6 +245,7 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn project_manifest_detection_finds_joint_toolchains(){let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("Cargo.toml"),"[dependencies]\nsqlx = \"1\"\n").unwrap();std::fs::create_dir_all(d.path().join("game")).unwrap();std::fs::write(d.path().join("game/project.godot"),"[application]\n").unwrap();let mut programs=Vec::new();inspect_project_dir(d.path(),0,&mut programs);for p in ["cargo","rustc","initdb","postgres","pg_isready","createdb","godot"]{assert!(programs.contains(&p.to_owned()),"missing {p}");}}
     #[test]fn oversized_manifest_is_not_read(){let d=tempfile::tempdir().unwrap();let p=d.path().join("Cargo.toml");std::fs::write(&p,vec![b'x';512*1024+1]).unwrap();assert!(read_small_manifest(&p).is_none());}
     #[test]fn script_mentions_require_only_explicit_postgres_tools(){let mut p=Vec::new();scan_program_mentions("subprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);for expected in ["cargo","rustc","initdb","postgres"]{assert!(p.contains(&expected.to_owned()),"missing {expected}");}for unexpected in ["pg_isready","createdb"]{assert!(!p.contains(&unexpected.to_owned()),"unexpected {unexpected}");}}
+    #[test]fn script_optional_programs_do_not_block_preflight(){let mut p=Vec::new();scan_program_mentions("# endlessvibe-optional-programs: initdb postgres\nsubprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);assert!(p.contains(&"cargo".to_owned()));assert!(p.contains(&"rustc".to_owned()));assert!(!p.contains(&"initdb".to_owned()));assert!(!p.contains(&"postgres".to_owned()));}
     #[test]fn python_compile_modes_skip_runtime_tool_scan(){assert!(python_compile_only(&["-m".into(),"py_compile".into(),"tools/check.py".into()]));assert!(python_compile_only(&["-m".into(),"compileall".into(),"tools".into()]));assert!(!python_compile_only(&["tools/check.py".into()]));}
     #[test]fn gentoo_install_hint_is_search_only(){let hint=install_hint_for_os("gentoo","postgres");assert!(hint.contains("emerge -s postgresql"));assert!(!hint.contains("emerge -av"));}
 }
