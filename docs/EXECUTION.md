@@ -31,9 +31,9 @@ bubblewrap sandbox probe: ok (9 configured programs visible)
 
 ## 工具链自动发现与手工覆盖
 
-新 Project 会在最多 3 层目录内检查常见 manifest：`Cargo.toml`、`CMakeLists.txt`、`pyproject.toml` / `requirements.txt`、`package.json`、`project.godot`、`go.mod` 与 compose 文件。Rust、CMake、Python、Node、Godot、Go 会自动形成项目工具链；Rust/Python/compose manifest 中的常见 PostgreSQL 依赖还会自动加入 `initdb/postgres/pg_isready/createdb` preflight。检测只读取小于等于 512 KiB 的 manifest，并跳过 `.git`、`target`、`node_modules`、虚拟环境和构建目录。
+新 Project 会在最多 3 层目录内检查常见 manifest：`Cargo.toml`、`CMakeLists.txt`、`pyproject.toml` / `requirements.txt`、`package.json`、`project.godot`、`go.mod` 与 compose 文件。Rust、CMake、Python、Node、Godot、Go 会自动形成项目工具链，用于构造该项目 Job 的安全 PATH / readonly mount；它们不会因此成为每个 Job 的强制门禁。对 `python3 relative/script.py` 和显式 Bash `-c`，EndlessVibe 会有界扫描当前脚本中直接引用的受支持子进程工具，并仅把这些工具加入本次 preflight。例如交易 verifier 同时引用 Cargo、Godot 与本地 PostgreSQL 工具时会在 Job 创建前一次检查，而普通 `python3 -c` 不会因为项目同时存在 PostgreSQL 代码而被误拦。manifest 和脚本检测均限制为小文件，并跳过 `.git`、`target`、`node_modules`、虚拟环境和构建目录。
 
-自动发现只会额外暴露已识别程序所需的系统目录与 `/opt/<toolchain>` 安装前缀，不会自动挂载 HOME、凭据目录、数据库 data directory、socket 或 Docker socket。可设置 `auto_discover_toolchains=false` 恢复完全手工模式；显式 `readonly_mounts` 与 `execution.path` 仍可作为特殊 SDK 的覆盖配置。
+自动发现只会额外暴露已识别程序所需的系统目录与 `/opt/<toolchain>` 安装前缀，不会自动挂载 HOME、凭据目录、数据库 data directory、socket 或 Docker socket。缺失工具会区分为 `host_missing`（宿主未安装）与 `sandbox_missing`（宿主存在但 sandbox 不可见）；Dashboard 和结构化 Job preflight 错误会给出宿主路径或只读的发行版包查询提示。EndlessVibe 不执行 sudo/emerge/apt 等宿主包安装。可设置 `auto_discover_toolchains=false` 恢复完全手工模式；显式 `readonly_mounts` 与 `execution.path` 仍可作为特殊 SDK 的覆盖配置。
 
 使用 Rustup 时，仍不会挂载整个 `~/.cargo` 或 `~/.rustup`，因为 `~/.cargo` 可能包含 registry 凭据。若自动发现无法安全定位 Rustup 工具链，应只挂载实际 toolchain 目录。
 
