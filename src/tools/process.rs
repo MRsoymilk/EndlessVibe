@@ -35,6 +35,26 @@ pub fn job_summary_contract(config:&Config,workspace:&str,project:&str,job_id:&s
     let exposed_path=match config.execution.backend.as_str(){"bubblewrap"=>format!("/cache/{file}"),"host"=>host_path.to_string_lossy().into_owned(),"disabled"=>bail!("execution backend is disabled"),_=>bail!("Unknown execution backend")};Ok(JobSummaryContract{host_path,exposed_path})
 }
 fn simple_program(program:&str)->bool{!program.is_empty()&&program.len()<=64&&program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b))}
+fn add_programs(out:&mut Vec<String>,items:&[&str]){for item in items{if !out.iter().any(|p|p==item){out.push((*item).to_owned());}}}
+fn read_small_manifest(path:&Path)->Option<String>{let meta=std::fs::metadata(path).ok()?;if meta.len()>512*1024{return None;}std::fs::read_to_string(path).ok()}
+fn inspect_project_dir(path:&Path,depth:usize,out:&mut Vec<String>){
+    if depth>3{return;}let Ok(entries)=std::fs::read_dir(path) else{return};
+    for entry in entries.filter_map(|e|e.ok()){
+        let p=entry.path();let Ok(ft)=entry.file_type() else{continue};if ft.is_symlink(){continue;}let name=entry.file_name();let name=name.to_string_lossy();
+        if ft.is_dir(){if !matches!(name.as_ref(),".git"|"target"|"node_modules"|".venv"|"venv"|"build"|"dist"){inspect_project_dir(&p,depth+1,out);}continue;}
+        match name.as_ref(){
+            "Cargo.toml"=>{add_programs(out,&["cargo","rustc"]);if let Some(text)=read_small_manifest(&p){if ["sqlx","tokio-postgres","postgres =","diesel"].iter().any(|needle|text.contains(needle)){add_programs(out,&["initdb","postgres","pg_isready","createdb"]);}}},
+            "CMakeLists.txt"=>add_programs(out,&["cmake","ninja","make","ctest"]),
+            "pyproject.toml"|"requirements.txt"=>{add_programs(out,&["python3"]);if let Some(text)=read_small_manifest(&p){if ["psycopg","asyncpg","postgres"].iter().any(|needle|text.contains(needle)){add_programs(out,&["initdb","postgres","pg_isready","createdb"]);}}},
+            "package.json"=>add_programs(out,&["node","npm"]),
+            "project.godot"=>add_programs(out,&["godot"]),
+            "go.mod"=>add_programs(out,&["go"]),
+            "docker-compose.yml"|"docker-compose.yaml"|"compose.yml"|"compose.yaml"=>{if let Some(text)=read_small_manifest(&p){if text.contains("postgres"){add_programs(out,&["initdb","postgres","pg_isready","createdb"]);}}},
+            _=>{}
+        }
+    }
+}
+pub fn detect_project_programs(project:&Project)->Vec<String>{let mut out=Vec::new();inspect_project_dir(&project.root.path,0,&mut out);out.sort();out.dedup();out}
 fn configured_executable(path:&str,program:&str)->Option<PathBuf>{for dir in path.split(':'){let p=Path::new(dir).join(program);if p.is_file(){return Some(p);}}None}
 fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
     if !simple_program(program){bail!("program must be a simple executable name; use args for arguments");}
@@ -50,24 +70,45 @@ fn pre_exec_nproc_limit(backend:&str,max_processes:u64)->Option<u64>{
     (backend=="host").then_some(max_processes)
 }
 
-fn bubblewrap_base_command(config:&Config)->Result<Command>{
+const DIAGNOSTIC_PROGRAMS:[&str;6]=["cargo","rustc","initdb","postgres","pg_isready","createdb"];
+fn configured_probe_programs(config:&Config)->Vec<String>{let mut programs=config.execution.allowed_programs.clone();programs.extend(config.execution.required_programs.iter().cloned());programs.sort();programs.dedup();programs}
+fn diagnostic_programs(config:&Config)->Vec<String>{let mut programs=configured_probe_programs(config);programs.extend(DIAGNOSTIC_PROGRAMS.map(str::to_owned));programs.sort();programs.dedup();programs}
+fn host_executable(program:&str)->Option<String>{let path=std::env::var_os("PATH")?;for dir in std::env::split_paths(&path){let candidate=dir.join(program);if candidate.is_file(){return Some(candidate.to_string_lossy().into_owned());}}None}
+fn versioned_bin_candidate(root:&Path,program:&str,prefix:Option<&str>)->Option<PathBuf>{let mut dirs=std::fs::read_dir(root).ok()?.filter_map(|e|e.ok()).map(|e|e.path()).filter(|p|p.is_dir()&&prefix.is_none_or(|prefix|p.file_name().and_then(|n|n.to_str()).is_some_and(|n|n.starts_with(prefix)))).collect::<Vec<_>>();dirs.sort();dirs.reverse();for dir in dirs{for bin in [dir.join("bin"),dir.clone()]{let candidate=bin.join(program);if candidate.is_file(){return Some(candidate);}}}None}
+fn discover_host_executable(program:&str)->Option<PathBuf>{
+    if let Some(path)=host_executable(program){return Some(PathBuf::from(path));}
+    for root in ["/usr/lib/postgresql","/usr/lib64/postgresql","/usr/lib/postgresql-bin","/usr/lib64/postgresql-bin"]{if let Some(path)=versioned_bin_candidate(Path::new(root),program,None){return Some(path);}}
+    for root in ["/usr/lib","/usr/lib64"]{if let Some(path)=versioned_bin_candidate(Path::new(root),program,Some("postgresql")){return Some(path);}}
+    if let Some(path)=versioned_bin_candidate(Path::new("/opt"),program,None){return Some(path);}
+    None
+}
+fn system_visible(path:&Path)->bool{["/usr","/bin","/sbin","/lib","/lib64"].iter().any(|root|path.starts_with(root))}
+fn auto_mount_root(path:&Path)->Option<PathBuf>{let canonical=std::fs::canonicalize(path).ok()?;let mut components=canonical.components();match (components.next(),components.next()){(Some(std::path::Component::RootDir),Some(std::path::Component::Normal(first))) if first=="opt"=>components.next().and_then(|name|match name{std::path::Component::Normal(name)=>Some(Path::new("/opt").join(name)),_=>None}),_=>None}}
+fn execution_environment(config:&Config,programs:&[String])->(String,Vec<(PathBuf,PathBuf)>){
+    let mut path_entries=config.execution.path.split(':').filter(|p|!p.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    let mut mounts=config.execution.readonly_mounts.iter().map(|m|(m.source.clone(),m.target.clone())).collect::<Vec<_>>();
+    if config.execution.auto_discover_toolchains{
+        for program in programs{
+            let Some(host)=discover_host_executable(program) else{continue};
+            let auto_root=auto_mount_root(&host);
+            if let Some(parent)=host.parent(){let entry=parent.to_string_lossy().into_owned();if (system_visible(parent)||auto_root.is_some())&&!path_entries.iter().any(|p|p==&entry){path_entries.insert(0,entry);}}
+            if let Some(root)=auto_root{if !mounts.iter().any(|(source,target)|source==&root&&target==&root){mounts.push((root.clone(),root));}}
+        }
+    }
+    (path_entries.join(":"),mounts)
+}
+fn bubblewrap_base_command(config:&Config,programs:&[String])->Result<(Command,String)>{
     if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
-    let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
+    let (path,mounts)=execution_environment(config,programs);let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
     c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
     if config.execution.allow_network{c.arg("--share-net");}
     for p in ["/usr","/bin","/sbin","/lib","/lib64"]{let p=Path::new(p);if p.exists(){c.arg("--ro-bind").arg(p).arg(p);}}
     c.args(["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/etc"]);
     for p in ["/etc/ld.so.cache","/etc/ld.so.conf","/etc/ld.so.conf.d","/etc/localtime"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}
     if config.execution.allow_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
-    for mount in &config.execution.readonly_mounts{c.arg("--ro-bind").arg(&mount.source).arg(&mount.target);}
-    Ok(c)
+    for (source,target) in mounts{c.arg("--ro-bind").arg(source).arg(target);}
+    Ok((c,path))
 }
-
-const DIAGNOSTIC_PROGRAMS:[&str;6]=["cargo","rustc","initdb","postgres","pg_isready","createdb"];
-fn configured_probe_programs(config:&Config)->Vec<String>{let mut programs=config.execution.allowed_programs.clone();programs.extend(config.execution.required_programs.iter().cloned());programs.sort();programs.dedup();programs}
-fn diagnostic_programs(config:&Config)->Vec<String>{let mut programs=configured_probe_programs(config);programs.extend(DIAGNOSTIC_PROGRAMS.map(str::to_owned));programs.sort();programs.dedup();programs}
-fn host_executable(program:&str)->Option<String>{let path=std::env::var_os("PATH")?;for dir in std::env::split_paths(&path){let candidate=dir.join(program);if candidate.is_file(){return Some(candidate.to_string_lossy().into_owned());}}None}
-fn system_visible(path:&Path)->bool{["/usr","/bin","/sbin","/lib","/lib64"].iter().any(|root|path.starts_with(root))}
 fn rust_toolchain_root()->Option<PathBuf>{
     let rustup=host_executable("rustup")?;let output=std::process::Command::new(rustup).args(["which","rustc"]).output().ok()?;if !output.status.success(){return None;}let rustc=PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());let bin=rustc.parent()?;if bin.file_name()? != "bin"{return None;}Some(bin.parent()?.to_owned())
 }
@@ -87,19 +128,19 @@ fn mount_suggestion(program:&str,host_path:&str)->Option<Value>{
     }
     Some(json!({"kind":"readonly-mount","source":bin,"target":format!("/opt/{program}"),"path_entry":format!("/opt/{program}"),"reason":"review this minimal executable directory before adding it"}))
 }
-async fn probe_namespace(config:&Config)->Result<()>{
-    let mut namespace=bubblewrap_base_command(config)?;
-    namespace.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","exit 0"]);
+async fn probe_namespace(config:&Config,programs:&[String])->Result<()>{
+    let (mut namespace,path)=bubblewrap_base_command(config,programs)?;
+    namespace.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","exit 0"]);
     let result=capture(namespace,None,16384,5).await?;
     if result.code!=Some(0){bail!("bubblewrap sandbox probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}Ok(())
 }
 async fn sandbox_paths(config:&Config,programs:&[String])->Result<BTreeMap<String,String>>{
-    probe_namespace(config).await?;let mut probe=bubblewrap_base_command(config)?;
-    probe.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","for p do if v=$(command -v \"$p\" 2>/dev/null); then printf 'OK\\t%s\\t%s\\n' \"$p\" \"$v\"; else printf 'MISSING\\t%s\\n' \"$p\"; fi; done","probe"]);probe.args(programs);
+    probe_namespace(config,programs).await?;let (mut probe,path)=bubblewrap_base_command(config,programs)?;
+    probe.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","for p do if v=$(command -v \"$p\" 2>/dev/null); then printf 'OK\\t%s\\t%s\\n' \"$p\" \"$v\"; else printf 'MISSING\\t%s\\n' \"$p\"; fi; done","probe"]);probe.args(programs);
     let result=capture(probe,None,262144,10).await?;if result.code!=Some(0){bail!("bubblewrap program visibility probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}let stdout=String::from_utf8(result.stdout).context("Sandbox toolchain probe output is not UTF-8")?;let mut visible=BTreeMap::new();for line in stdout.lines(){let mut fields=line.split('\t');if fields.next()==Some("OK"){if let (Some(program),Some(path))=(fields.next(),fields.next()){visible.insert(program.to_owned(),path.to_owned());}}}Ok(visible)
 }
 pub async fn sandbox_diagnostics(config:&Config)->Result<Value>{
-    let programs=diagnostic_programs(config);let sandbox=if config.execution.backend=="bubblewrap"{sandbox_paths(config,&programs).await?}else{BTreeMap::new()};let mut suggested_paths=Vec::<String>::new();let mut suggested_mounts=Vec::<Value>::new();let rows=programs.iter().map(|program|{let host_path=host_executable(program);let sandbox_path=sandbox.get(program).cloned();let status=if sandbox_path.is_some(){"available"}else if host_path.is_some(){"host-only"}else{"missing"};let suggestion=if status=="host-only"{host_path.as_deref().and_then(|path|mount_suggestion(program,path))}else{None};if let Some(value)=&suggestion{if let Some(path)=value.get("path_entry").and_then(Value::as_str){if !config.execution.path.split(':').any(|entry|entry==path)&&!suggested_paths.iter().any(|entry|entry==path){suggested_paths.push(path.to_owned());}}if value.get("kind").and_then(Value::as_str)==Some("readonly-mount"){let source=value.get("source").cloned().unwrap_or(Value::Null);let target=value.get("target").cloned().unwrap_or(Value::Null);if !suggested_mounts.iter().any(|m|m.get("source")==Some(&source)&&m.get("target")==Some(&target)){suggested_mounts.push(json!({"source":source,"target":target}));}}}json!({"program":program,"status":status,"allowed":config.execution.allowed_programs.contains(program),"required":config.execution.required_programs.contains(program),"host_path":host_path,"sandbox_path":sandbox_path,"suggestion":suggestion})}).collect::<Vec<_>>();let mounts=config.execution.readonly_mounts.iter().map(|m|json!({"source":m.source,"target":m.target,"source_exists":m.source.exists(),"target_allowed":m.target.starts_with("/opt/")||m.target.starts_with("/cache-readonly/")})).collect::<Vec<_>>();let toml=suggested_toml(&config.execution.path,&suggested_paths,&suggested_mounts);Ok(json!({"backend":config.execution.backend,"path":config.execution.path,"namespace_ok":config.execution.backend=="bubblewrap","programs":rows,"readonly_mounts":mounts,"suggested_config":{"prepend_path_entries":suggested_paths,"readonly_mounts":suggested_mounts,"toml":toml},"network":config.execution.allow_network,"shell":config.execution.allow_shell}))
+    let programs=diagnostic_programs(config);let (effective_path,effective_mounts)=execution_environment(config,&programs);let sandbox=if config.execution.backend=="bubblewrap"{sandbox_paths(config,&programs).await?}else{BTreeMap::new()};let mut suggested_paths=Vec::<String>::new();let mut suggested_mounts=Vec::<Value>::new();let rows=programs.iter().map(|program|{let host=discover_host_executable(program);let host_path=host.as_ref().map(|p|p.to_string_lossy().into_owned());let sandbox_path=sandbox.get(program).cloned();let status=if sandbox_path.is_some(){"available"}else if host_path.is_some(){"host-only"}else{"missing"};let suggestion=if status=="host-only"{host_path.as_deref().and_then(|path|mount_suggestion(program,path))}else{None};if let Some(value)=&suggestion{if let Some(path)=value.get("path_entry").and_then(Value::as_str){if !effective_path.split(':').any(|entry|entry==path)&&!suggested_paths.iter().any(|entry|entry==path){suggested_paths.push(path.to_owned());}}if value.get("kind").and_then(Value::as_str)==Some("readonly-mount"){let source=value.get("source").cloned().unwrap_or(Value::Null);let target=value.get("target").cloned().unwrap_or(Value::Null);if !suggested_mounts.iter().any(|m|m.get("source")==Some(&source)&&m.get("target")==Some(&target)){suggested_mounts.push(json!({"source":source,"target":target}));}}}json!({"program":program,"status":status,"allowed":config.execution.allowed_programs.contains(program),"required":config.execution.required_programs.contains(program),"host_path":host_path,"sandbox_path":sandbox_path,"suggestion":suggestion})}).collect::<Vec<_>>();let mounts=effective_mounts.iter().map(|(source,target)|json!({"source":source,"target":target,"source_exists":source.exists(),"target_allowed":target.starts_with("/opt/")||target.starts_with("/cache-readonly/"),"automatic":!config.execution.readonly_mounts.iter().any(|m|m.source==*source&&m.target==*target)})).collect::<Vec<_>>();let toml=suggested_toml(&effective_path,&suggested_paths,&suggested_mounts);Ok(json!({"backend":config.execution.backend,"path":effective_path,"configured_path":config.execution.path,"auto_discover_toolchains":config.execution.auto_discover_toolchains,"namespace_ok":config.execution.backend=="bubblewrap","programs":rows,"readonly_mounts":mounts,"suggested_config":{"prepend_path_entries":suggested_paths,"readonly_mounts":suggested_mounts,"toml":toml},"network":config.execution.allow_network,"shell":config.execution.allow_shell}))
 }
 fn job_preflight_programs(program:&str,requested:&[String],shell:bool)->Result<Vec<String>>{if requested.len()>32{bail!("preflight_programs accepts at most 32 program names");}let mut programs=requested.to_vec();if !shell{programs.push(program.to_owned());if program=="cargo"{programs.push("rustc".into());}}for item in &programs{if !simple_program(item){bail!("preflight_programs must contain simple executable names");}}programs.sort();programs.dedup();Ok(programs)}
 pub async fn preflight_job(config:&Config,program:&str,requested:&[String],shell:bool)->Result<Value>{
@@ -117,12 +158,12 @@ pub async fn probe_bubblewrap(config:&Config)->Result<Vec<(String,String)>>{
 }
 
 fn git_network_subcommand(args:&[String])->bool{args.iter().any(|arg|matches!(arg.as_str(),"push"|"fetch"|"pull"|"clone"|"ls-remote"|"remote"|"submodule"))}
-pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool)->Result<Command>{
+pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool,project_programs:&[String])->Result<Command>{
     w.exec_allowed()?;
     if program=="git"&&git_network_subcommand(args){bail!("Network Git subcommands are disabled in run_command; allow_git_mutation only permits local repository mutations");}
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
     if shell&&!config.execution.allow_shell{bail!("run_shell is disabled; set execution.allow_shell=true locally after reviewing the risks");}
-    if !shell&&!config.execution.allowed_programs.iter().any(|p|p==program){bail!("Program is not in execution.allowed_programs");}
+    if !shell&&!config.execution.allowed_programs.iter().any(|p|p==program)&&!project_programs.iter().any(|p|p==program){bail!("Program is neither globally allowed nor detected from this project's toolchain manifests");}
     let host_cwd=w.root.directory_path(cwd)?;
     let mut command=match config.execution.backend.as_str(){
         "disabled"=>bail!("Command execution backend is disabled"),
@@ -135,13 +176,13 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
         }
         "bubblewrap"=>{
             let cache=config.security.data_dir.join("exec-cache").join(&w.workspace_id).join(&w.config.id);crate::util::private_dir(&cache)?;
-            let mut c=bubblewrap_base_command(config)?;
+            let mut programs=configured_probe_programs(config);programs.extend(project_programs.iter().cloned());programs.sort();programs.dedup();let (mut c,path)=bubblewrap_base_command(config,&programs)?;
             c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
             // Git metadata is read-only by default. Explicit allow_git_mutation keeps the project's
             // own .git writable while HOME, credentials, service state and network remain isolated.
             let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}if !w.config.allow_git_mutation{c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}}
             let inside=if cwd=="."{PathBuf::from("/workspace")}else{Path::new("/workspace").join(cwd)};
-            c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb"]);
+            c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb"]);
             c.arg("--").arg(if shell{"/bin/bash"}else{program}).args(args);c
         }
         _=>bail!("Unknown execution backend"),
@@ -171,4 +212,6 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn shell_preflight_is_explicit(){assert_eq!(job_preflight_programs("bash",&["postgres".into()],true).unwrap(),vec!["postgres".to_owned()]);}
     #[test]fn summary_contract_uses_private_cache_path(){let d=tempfile::tempdir().unwrap();let mut c=Config::default();c.security.data_dir=d.path().to_owned();let contract=job_summary_contract(&c,"root","demo","abc-123").unwrap();assert!(contract.host_path.starts_with(d.path().join("exec-cache/root/demo")));assert_eq!(contract.exposed_path,"/cache/job-summary-abc-123.json");}
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
+    #[test]fn project_manifest_detection_finds_joint_toolchains(){let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("Cargo.toml"),"[dependencies]\nsqlx = \"1\"\n").unwrap();std::fs::create_dir_all(d.path().join("game")).unwrap();std::fs::write(d.path().join("game/project.godot"),"[application]\n").unwrap();let mut programs=Vec::new();inspect_project_dir(d.path(),0,&mut programs);for p in ["cargo","rustc","initdb","postgres","pg_isready","createdb","godot"]{assert!(programs.contains(&p.to_owned()),"missing {p}");}}
+    #[test]fn oversized_manifest_is_not_read(){let d=tempfile::tempdir().unwrap();let p=d.path().join("Cargo.toml");std::fs::write(&p,vec![b'x';512*1024+1]).unwrap();assert!(read_small_manifest(&p).is_none());}
 }

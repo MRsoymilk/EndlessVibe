@@ -30,6 +30,7 @@ backend = "bubblewrap"
 acknowledge_unsafe_host_execution = false
 allow_shell = false
 allow_network = false
+auto_discover_toolchains = true
 bubblewrap = "/usr/bin/bwrap"
 path = "/usr/local/bin:/usr/bin:/bin"
 allowed_programs = ["cargo", "rustc", "cmake", "ninja", "make", "ctest", "python3", "git", "rg"]
