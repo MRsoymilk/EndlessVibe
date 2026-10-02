@@ -22,6 +22,7 @@ pub async fn project_states(State(rt):State<Arc<Runtime>>)->Response{let mut pro
 pub async fn reload_config(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_reload_config())}
 pub async fn storage_maintenance(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_storage_maintenance())}
 pub async fn storage_health(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_storage_health(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":crate::error::payload(&error)}))).into_response()}}
+pub async fn sandbox_diagnostics(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_sandbox_diagnostics().await{Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":crate::error::payload(&error)}))).into_response()}}
 #[derive(Deserialize)]pub struct TasksQuery{pub limit:Option<usize>}
 pub async fn tasks(State(rt):State<Arc<Runtime>>,Query(query):Query<TasksQuery>)->Response{let args=crate::tools::types::ListTaskCheckpointsArgs{workspace:None,project:None,task_id:None,limit:query.limit.unwrap_or(100).clamp(1,200)};match crate::tools::tasks::list(&rt.db,args){Ok(value)=>Json(json!({"generated_at":crate::util::now(),"checkpoints":value["checkpoints"]})).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 #[derive(Deserialize)]pub struct OperationsQuery{pub limit:Option<usize>}
