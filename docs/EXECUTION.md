@@ -10,7 +10,7 @@
 ./target/release/endlessvibe --check-sandbox
 ```
 
-该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目代码。它还会在 sandbox 内使用实际的 `execution.path` 逐项解析 `execution.allowed_programs`。成功时会打印每个程序的 sandbox 路径，例如：
+该检查使用与任务相同的基础 bubblewrap 参数和只读系统挂载，但不挂载任何 Project、不运行项目代码。它还会在 sandbox 内使用实际的 `execution.path` 逐项解析 `execution.allowed_programs ∪ execution.required_programs`。`allowed_programs` 控制可被 `run_command` 直接启动的顶层程序；`required_programs` 只表示环境必须存在，不额外授予直接执行权限，适合声明由构建/测试脚本间接调用的 Rust/PostgreSQL 工具。成功时会打印每个程序的 sandbox 路径，例如：
 
 ```text
 sandbox program: cargo -> /opt/rust/bin/cargo
@@ -19,7 +19,7 @@ sandbox program: git -> /usr/bin/git
 bubblewrap sandbox probe: ok (9 configured programs visible)
 ```
 
-只要配置在 `allowed_programs` 中的任意程序不可见，`--check-sandbox` 就失败并明确列出缺失项。这样可在服务承担真实 Job 前发现“宿主机能运行 cargo，但 bubblewrap PATH 看不到 cargo”这类配置错误。
+只要配置在 `allowed_programs` 或 `required_programs` 中的任意程序不可见，`--check-sandbox` 就失败并明确列出缺失项，并额外标记 `required_missing`。这样可在服务承担真实 Job 前发现“宿主机能运行 cargo，但 bubblewrap PATH 看不到 cargo”这类配置错误。
 
 沙箱中 `/workspace` 是选中项目，`/cache` 是该项目独立的私有构建缓存目录。`HOME=/tmp/home`，`CARGO_HOME=/cache/cargo`，默认 PATH `/usr/local/bin:/usr/bin:/bin`。系统可执行/库目录只读。项目源文件可写；`.git` 默认再覆盖为只读。只有 Project 显式设置 `allow_git_mutation=true` 时，项目自身 `.git` 才保持可写，从而允许 `git switch`、`git merge`、`git branch`、`git add`、`git commit` 等本地仓库变更。
 
@@ -61,13 +61,14 @@ readonly_mounts = [{ source = "/home/user/.rustup/toolchains/stable-x86_64-unkno
 ```toml
 [execution]
 path = "/opt/rust/bin:/opt/postgres/bin:/usr/local/bin:/usr/bin:/bin"
+required_programs = ["cargo", "rustc", "initdb", "postgres", "pg_isready", "createdb"]
 readonly_mounts = [
   { source = "/home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu", target = "/opt/rust" },
   { source = "/opt/postgresql-16", target = "/opt/postgres" },
 ]
 ```
 
-挂载后，sandbox 内至少应能解析 `initdb`、`postgres`、`pg_isready`、`createdb`。这些程序不必为了测试脚本的子进程调用而额外加入顶层 `allowed_programs`；但它们必须能从 `execution.path` 找到。修改 service-level execution 配置后需重启 EndlessVibe。
+挂载后，sandbox 内至少应能解析 `initdb`、`postgres`、`pg_isready`、`createdb`。这些程序不必为了测试脚本的子进程调用而额外加入顶层 `allowed_programs`；将它们列入 `required_programs` 即可让 `--check-sandbox` fail-closed 验证，同时不扩大 `run_command` 顶层程序白名单。它们仍必须能从 `execution.path` 找到。修改 service-level execution 配置后需重启 EndlessVibe。
 
 不要只读/读写挂载宿主 PostgreSQL 的数据目录、认证文件、Unix socket 或开发数据库，也不要为了测试挂 `/var/run/docker.sock`。测试应在 `/cache` 或其他 Job 私有可写目录初始化新数据目录，使用随机 loopback 端口，并在 Job 结束时终止数据库进程、删除临时数据。这样即使 `execution.allow_network=false`，Server、Godot/Native 与临时 PostgreSQL 仍可在同一个隔离 Job 内完成真实数据库联测，同时不暴露宿主内网或开发库。
 
