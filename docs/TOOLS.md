@@ -92,7 +92,7 @@ Dashboard 写操作使用相同的 `code / message / retryable / details` JSON�
 `run_command`：
 
 ```json
-{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120,"preflight_programs":["cargo","rustc"],"environment":{},"network":false,"task_id":"combat-refactor","stage":"validate-core"}
+{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120,"preflight_programs":["cargo","rustc"],"task_id":"combat-refactor","stage":"validate-core"}
 ```
 
 `preflight_programs` 是可选的 Job 前置工具链门禁。EndlessVibe 会在创建 Job ID、占用 command slot、获取 Project lock 和写入 Job 记录之前，在实际执行后端验证这些程序可见；缺失时直接返回结构化 `JOB_PREFLIGHT_FAILED`，不会启动长任务。直接执行 `cargo` 时会自动同时要求 `rustc`。如果 Job 自己启动本地 PostgreSQL，联合 Rust + PostgreSQL 验收可使用：
@@ -101,13 +101,24 @@ Dashboard 写操作使用相同的 `code / message / retryable / details` JSON�
 {"preflight_programs":["cargo","rustc","initdb","postgres","pg_isready","createdb"]}
 ```
 
-如果 PostgreSQL、Redis、MySQL 或 HTTP API 已在 Docker/宿主机中运行并通过宿主端口发布，则不需要这些服务端二进制。将本地 `[execution] allow_network = true` 作为管理员授权上限，然后只给需要访问外部服务的 Job 设置 `network=true` 并注入连接环境变量，例如：
+常规开发不需要每次传 `network` 或 `environment`。在 `config.toml` / Dashboard 中把受信 Project 一次性设为：
 
-```json
-{"workspace":"projects","project":"mountain_and_sea","program":"python3","args":["game_mas/tools/verify_v26_trade_godot.py","--external-test-database"],"cwd":".","request_id":"trade-external-db-001","timeout_seconds":120,"preflight_programs":["cargo","rustc","godot"],"environment":{"TEST_DATABASE_URL":"postgres://shanahai_test:shanahai_test@127.0.0.1:19031/shanahai_test"},"network":true}
+```toml
+[[workspaces.projects]]
+id = "mountain_and_sea"
+path = "mountain_and_sea"
+execution_profile = "development"
+# 只有项目长期需要固定变量时才配置；Docker 驱动的测试通常不需要。
+# environment = ["TEST_DATABASE_URL=postgres://user:password@127.0.0.1:19031/test"]
 ```
 
-`environment` 最多 64 项，只注入当前 Job；`HOME`、`PATH`、`CARGO_HOME`、`ENDLESSVIBE_JOB_SUMMARY` 等运行时变量不可覆盖。operation log 保留环境变量名但统一脱敏其值。`network=true` 在 bubblewrap 下只有 `execution.allow_network=true` 时才被接受；否则 Job 在启动前失败。preflight 成功结果会随首次响应返回，并持久化 `detected_programs`、`environment_keys` 与 `network`，后续 `get_job` 仍可查看工具链和执行条件，但不会看到环境变量值。
+之后原有 Docker/Compose 验证脚本可按普通命令运行；EndlessVibe 会自动继承宿主网络，并在 Docker socket 可用时设置 `DOCKER_HOST`。例如无需额外数据库参数：
+
+```json
+{"workspace":"projects","project":"mountain_and_sea","program":"python3","args":["game_mas/tools/verify_v26_trade_godot.py"],"cwd":".","request_id":"trade-001","timeout_seconds":120}
+```
+
+Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job 可用 `network=false` 临时隔离；Project environment 会先继承，再由 Job 同名变量覆盖。`HOME`、`PATH`、`CARGO_HOME`、`ENDLESSVIBE_JOB_SUMMARY` 等运行时变量不可覆盖。摘要和日志只记录环境变量名，不记录值。
 
 每个已接受 Job 还会收到环境变量 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 后端中的值是 Job 专属 `/cache/job-summary-<job_id>.json`；测试/构建脚本可以在退出前写入一个不超过 1 MiB 的 JSON object。EndlessVibe 在进程结束后通过 `O_NOFOLLOW` + owner/link/type/size 检查读取它，对常见 credential/password/token 字段脱敏，然后保存到 Job 的 `summary`；读取状态和临时文件删除结果保存在 `summary_capture`。未写该文件的普通 Job 记录为 `not_reported`，不会因此失败。不要把 secret 放入 summary，即使服务端会执行防御性脱敏。
 
