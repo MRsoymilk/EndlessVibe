@@ -2,7 +2,7 @@
 
 EndlessVibe 是一个使用 Rust 编写的 **self-hosted、single-owner MCP 开发后端**。它让 ChatGPT 等 MCP 客户端在明确授权的本地 Project 中读取和修改文件、搜索代码、运行受限命令，并通过可审查流程创建 Git commit。
 
-当前版本：**v0.3.1**
+当前版本：**v0.3.2**
 
 ## Workspace 与 Project
 
