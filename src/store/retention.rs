@@ -78,8 +78,8 @@ mod tests{
         ).unwrap();
         let tx=c.transaction().unwrap();
         tx.execute("INSERT INTO operation_log(started,tool,workspace,project,status,duration_ms,input_json,output_json,diff,added_lines,removed_lines,error) VALUES(0,'x','w','p','running',0,'{}','{}','',0,0,'')",[]).unwrap();
-        tx.execute("INSERT INTO jobs(id,data) VALUES('run','{"status":"running","created":1}')",[]).unwrap();
-        tx.execute("INSERT INTO jobs(id,data) VALUES('done','{"status":"succeeded","created":0}')",[]).unwrap();
+        tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",params!["run",r#"{"status":"running","created":1}"#]).unwrap();
+        tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",params!["done",r#"{"status":"succeeded","created":0}"#]).unwrap();
         prune_common(&tx,10_000).unwrap();
         prune_jobs(&tx,0).unwrap();
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM operation_log WHERE status='running'",[],|r|r.get::<_,i64>(0)).unwrap(),1);

@@ -1,7 +1,7 @@
 use crate::{runtime::Runtime,util,workspace::Project};
 use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
-use std::{collections::BTreeSet,path::PathBuf};
+use std::{collections::BTreeSet,os::unix::fs::MetadataExt,path::PathBuf};
 use super::repo::{args,good,head,oid,preflight,status,Environment};
 
 pub(super) struct Change{pub(super) path:String,pub(super) bytes:Option<Vec<u8>>,pub(super) mode:String,pub(super) oid:String}
