@@ -5,7 +5,7 @@ use std::{path::Path, sync::Mutex, time::Duration};
 
 mod migrations;
 mod retention;
-pub(crate) use retention::{prune_common,prune_jobs};
+pub(crate) use retention::prune_common;
 
 pub struct Store { connection: Mutex<Connection> }
 impl Store {
