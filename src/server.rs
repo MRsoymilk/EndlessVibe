@@ -3,8 +3,17 @@ use axum::{body::{to_bytes,Body,HttpBody},extract::{DefaultBodyLimit,Request,Sta
 use rmcp::transport::streamable_http_server::{session::local::LocalSessionManager,StreamableHttpServerConfig,StreamableHttpService};
 use std::{sync::Arc,time::Instant};
 
+fn explicit_origin(value:&str)->String{
+    let Ok(url)=url::Url::parse(value)else{return value.to_owned();};
+    if !matches!(url.scheme(),"http"|"https"){return url.origin().ascii_serialization();}
+    let Some(host)=url.host_str()else{return url.origin().ascii_serialization();};
+    let Some(port)=url.port_or_known_default()else{return url.origin().ascii_serialization();};
+    let host=if host.contains(':'){format!("[{host}]")}else{host.to_owned()};
+    format!("{}://{}:{port}",url.scheme(),host)
+}
+
 pub fn create_router(rt:Arc<Runtime>)->Router{
-    let tool_state=rt.clone();let origin=rt.config.public_url().map(|u|u.origin().ascii_serialization()).unwrap_or_else(|_|rt.config.server.public_url.clone());
+    let tool_state=rt.clone();let origin=explicit_origin(&rt.config.server.public_url);
     let transport=StreamableHttpServerConfig::default().with_legacy_session_mode(false).with_json_response(true).with_allowed_hosts(rt.config.hosts()).with_allowed_origins(vec![origin,"https://chatgpt.com:443".into(),"http://localhost:*".into(),"http://127.0.0.1:*".into()]).with_max_request_body_bytes(rt.body_limit()).with_cancellation_token(rt.shutdown.clone());
     let mcp=StreamableHttpService::new(move||Ok(EndlessVibeMcp::new(tool_state.clone())),LocalSessionManager::default().into(),transport);
     let protected:Router<Arc<Runtime>>=Router::new().route_service("/mcp",mcp.clone()).route_service("/mcp/",mcp).route_layer(middleware::from_fn_with_state(rt.clone(),auth::protect));
@@ -92,4 +101,16 @@ async fn headers_and_logging(State(rt):State<Arc<Runtime>>,request:Request,next:
     if let Ok(value)=HeaderValue::from_str(&csp){h.insert(header::CONTENT_SECURITY_POLICY,value);}
     // Do not log queries, headers, tokens, form fields, command arguments or file contents.
     tracing::info!(http_method=%method,path=%path,status=response.status().as_u16(),elapsed_ms=start.elapsed().as_millis() as u64,rx_bytes=request_bytes,tx_bytes=response_bytes,"HTTP request");response
+}
+
+#[cfg(test)]
+mod tests{
+    use super::explicit_origin;
+    #[test]
+    fn allowed_origin_uses_explicit_ports(){
+        assert_eq!(explicit_origin("https://endlessvibe.soymilk.xin"),"https://endlessvibe.soymilk.xin:443");
+        assert_eq!(explicit_origin("http://localhost"),"http://localhost:80");
+        assert_eq!(explicit_origin("https://example.test:8443/path"),"https://example.test:8443");
+        assert_eq!(explicit_origin("http://[::1]"),"http://[::1]:80");
+    }
 }
