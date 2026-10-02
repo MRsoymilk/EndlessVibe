@@ -54,7 +54,7 @@ pub fn record_job(db:&Store,workspace:&str,project:&str,task_id:&str,stage:&str,
 pub fn record_commit(db:&Store,workspace:&str,project:&str,task_id:&str,stage:&str,commit:&str)->Result<()>{
     simple_id("task_id",task_id)?;simple_id("stage",stage)?;
     let mut c=load_stage(db,workspace,project,task_id,stage)?.unwrap_or_else(||base(workspace,project,task_id,stage));
-    c.status=TaskState::Succeeded.to_string();c.last_commit=Some(commit.into());c.updated=util::now();save(db,&c)
+    c.status=TaskState::Committed.to_string();c.last_commit=Some(commit.into());c.updated=util::now();save(db,&c)
 }
 fn query(db:&Store,workspace:Option<&str>,project:Option<&str>,task_id:Option<&str>,limit:usize)->Result<Vec<TaskCheckpoint>>{
     if limit==0||limit>200{bail!("limit must be 1..200");}
