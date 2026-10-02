@@ -23,11 +23,13 @@ bubblewrap sandbox probe: ok (9 configured programs visible)
 
 沙箱中 `/workspace` 是选中项目，`/cache` 是该项目独立的私有构建缓存目录。`HOME=/tmp/home`，`CARGO_HOME=/cache/cargo`，默认 PATH `/usr/local/bin:/usr/bin:/bin`。系统可执行/库目录只读。项目源文件可写；`.git` 默认再覆盖为只读。只有 Project 显式设置 `allow_git_mutation=true` 时，项目自身 `.git` 才保持可写，从而允许 `git switch`、`git merge`、`git branch`、`git add`、`git commit` 等本地仓库变更。
 
-`allow_git_mutation` 需要同时启用 `allow_write=true` 与 `allow_exec=true`，默认关闭。即使开启，`run_command` 仍拒绝 `git push/fetch/pull/clone/ls-remote/remote/submodule` 等网络 Git 子命令；真实 HOME、SSH 凭据和服务状态仍不挂载，sandbox 网络仍由 `execution.allow_network` 独立控制。远端 push 使用单独的 `allow_git_push=true` 和宿主机侧专用 `git_push`，与 bubblewrap 网络权限无关；HTTPS 通过服务账户 Git credential helper，SSH 通过服务账户 HOME/SSH agent。`run_shell` 是显式的广泛执行权限，启用后不能依赖这层 argv 子命令过滤作为安全边界。
+`allow_git_mutation` 需要同时启用 `allow_write=true` 与 `allow_exec=true`，默认关闭。即使开启，`run_command` 仍拒绝 `git push/fetch/pull/clone/ls-remote/remote/submodule` 等网络 Git 子命令；真实 HOME、SSH 凭据和服务状态仍不挂载。bubblewrap 网络采用两级授权：`execution.allow_network=true` 只允许客户端申请网络，具体 Job 还必须显式 `network=true` 才共享宿主网络；未申请的 Job 继续隔离。远端 push 使用单独的 `allow_git_push=true` 和宿主机侧专用 `git_push`，与 bubblewrap 网络权限无关；HTTPS 通过服务账户 Git credential helper，SSH 通过服务账户 HOME/SSH agent。`run_shell` 是显式的广泛执行权限，启用后不能依赖这层 argv 子命令过滤作为安全边界。
 
 默认不暴露真实 HOME、整个 `/etc`、SSH、DBus、Wayland、云凭据或服务状态。需要 UI、GPU、网络、跨项目依赖或其他宿主机资源的命令可能失败；默认不会开放这些资源。文件读写 MCP API 的敏感名称过滤不是 Shell 的文件访问过滤：有执行权限便可以访问沙箱内该项目的全部文件。
 
-网络默认关闭。依赖还未下载时 Cargo/npm 等失败是预期行为：在本机管理独立缓存，或经过风险确认后将 `execution.allow_network=true`。该选项会允许访问网络（包括可能可达的内网），不是单纯允许 crates.io。系统代理环境变量不会自动传给子进程。
+网络默认关闭。依赖还未下载时 Cargo/npm 等失败是预期行为：优先在本机管理独立缓存。经过风险确认后可将 `execution.allow_network=true` 作为服务级网络上限；此后仍只有参数中显式 `network=true` 的 Job 才会使用 `--share-net`。共享宿主网络意味着该 Job 可以访问宿主 loopback、Docker 发布端口以及可能可达的内网，不是单纯允许 crates.io。系统代理和其他宿主环境变量不会自动传给子进程；需要的值应通过 Job 的 `environment` 显式提供。
+
+对于已经运行在 Docker 中并通过宿主端口发布的 PostgreSQL、Redis、MySQL、HTTP API 等外部服务，不要把容器里的服务二进制当成本地工具链要求，也不要挂 `/var/run/docker.sock`。应让容器在宿主 loopback 发布端口，例如 `127.0.0.1:19031:5432`，然后以 `network=true` 启动需要该服务的 Job，并通过 `environment` 注入该项目约定的连接变量，例如 `TEST_DATABASE_URL`。`environment` 只作用于当前 Job，变量名会出现在 preflight 诊断中，但值在 operation log 中统一脱敏。这样同一套机制也适用于其他 Docker 化数据库和开发服务。
 
 ## 工具链自动发现与手工覆盖
 
@@ -80,7 +82,7 @@ readonly_mounts = [
 
 `run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
 
-每个 `run_command` / `run_shell` 还可以提供 `preflight_programs`。这些程序会在 **Job ID 创建、command slot 占用、Project lock 获取、Job 持久化之前**在实际执行后端中做可见性检查；缺失时以 `JOB_PREFLIGHT_FAILED` fail-fast，不启动目标命令。直接运行 `cargo` 会自动把 `rustc` 加入门禁。Rust + PostgreSQL 联合验收应显式传 `cargo,rustc,initdb,postgres,pg_isready,createdb`；成功的 preflight 路径和 toolchain 状态会持久化到 Job 的 `preflight` 字段。该字段只做环境门禁，不绕过 `allowed_programs` 对顶层 `run_command` 的权限控制。
+每个 `run_command` / `run_shell` 还可以提供 `preflight_programs`。这些程序会在 **Job ID 创建、command slot 占用、Project lock 获取、Job 持久化之前**在实际执行后端中做可见性检查；缺失时以 `JOB_PREFLIGHT_FAILED` fail-fast，不启动目标命令。直接运行 `cargo` 会自动把 `rustc` 加入门禁。只有在 Job **自行启动本地 PostgreSQL** 时，才应显式门禁 `initdb,postgres,pg_isready,createdb`；如果 PostgreSQL 已在 Docker/宿主机外部运行并通过 TCP 发布，则不要要求这些本地二进制，而应使用 `network=true` + 连接环境变量。成功的 preflight 路径、`network` 请求和 `environment_keys` 会持久化到 Job 的 `preflight` 字段；环境变量值不会写入该字段。该字段只做环境门禁，不绕过 `allowed_programs` 对顶层 `run_command` 的权限控制。
 
 Job 启动后还会得到 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 下该路径位于当前 Project 的私有 `/cache` 挂载；脚本可以写入 ≤1 MiB JSON object 汇报 database、cleanup、source fingerprint 等验收结果。服务在 Job 终止后读取并脱敏到持久 Job `summary`，记录 `summary_capture` 后删除临时文件；不会把宿主 state 路径返回给客户端，也不会跟随 symlink。
 
