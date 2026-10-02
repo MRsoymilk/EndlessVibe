@@ -82,7 +82,7 @@ impl Jobs{
         let w=rt.project(&a.workspace,&a.project)?;w.exec_allowed()?;
         let project_programs=process::detect_project_programs(&w);
         let mut command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell,&project_programs)?;
-        let mut preflight_programs=explicit_preflight_programs(&a);preflight_programs.extend(process::detect_command_programs(&w,&a.cwd,&a.program,&a.args));preflight_programs.sort();preflight_programs.dedup();let preflight=process::preflight_job(&rt.config,&a.program,&preflight_programs,shell).await?;
+        let preflight_programs=explicit_preflight_programs(&a);let detected_programs=process::detect_command_programs(&w,&a.cwd,&a.program,&a.args);let mut preflight=process::preflight_job(&rt.config,&a.program,&preflight_programs,shell).await?;preflight["detected_programs"]=json!(detected_programs);
         let job_id=util::random_secret()?;let summary_contract=process::job_summary_contract(&rt.config,&w.workspace_id,&w.config.id,&job_id)?;command.env("ENDLESSVIBE_JOB_SUMMARY",&summary_contract.exposed_path);
         let permit=self.slots.clone().try_acquire_owned().map_err(|_|crate::error::coded("COMMAND_SLOTS_BUSY",true,"All command slots are occupied; query existing jobs first"))?;
         let lock=w.lock.clone().try_lock_owned().map_err(|_|crate::error::coded_details("PROJECT_BUSY",true,"another operation is using this project",json!({"workspace":a.workspace.clone(),"project":a.project.clone()})))?;
