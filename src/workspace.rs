@@ -6,16 +6,16 @@ use tokio::sync::Mutex;
 
 pub struct Project{pub workspace_id:String,pub config:ProjectConfig,pub root:Root,pub lock:Arc<Mutex<()>>}
 impl Project{
-    pub fn write_allowed(&self)->Result<()>{if !self.config.allow_write{bail!("Project is read-only");}self.root.unchanged_root()}
-    pub fn exec_allowed(&self)->Result<()>{self.write_allowed()?;if !self.config.allow_exec{bail!("Command execution is disabled for this project");}Ok(())}
-    pub fn commit_allowed(&self)->Result<()>{self.write_allowed()?;if !self.config.allow_git_commit{bail!("Git commits are disabled for this project");}Ok(())}
-    pub fn push_allowed(&self)->Result<()>{if !self.config.allow_git_push{bail!("Git push is disabled for this project");}self.root.unchanged_root()}
+    pub fn write_allowed(&self)->Result<()>{if !self.config.allow_write{return Err(crate::error::coded("PROJECT_READ_ONLY",false,"Project is read-only"));}self.root.unchanged_root()}
+    pub fn exec_allowed(&self)->Result<()>{self.write_allowed()?;if !self.config.allow_exec{return Err(crate::error::coded("PROJECT_EXEC_DISABLED",false,"Command execution is disabled for this project"));}Ok(())}
+    pub fn commit_allowed(&self)->Result<()>{self.write_allowed()?;if !self.config.allow_git_commit{return Err(crate::error::coded("GIT_COMMIT_DISABLED",false,"Git commits are disabled for this project"));}Ok(())}
+    pub fn push_allowed(&self)->Result<()>{if !self.config.allow_git_push{return Err(crate::error::coded("GIT_PUSH_DISABLED",false,"Git push is disabled for this project"));}self.root.unchanged_root()}
     pub fn summary(&self)->Value{json!({"workspace":self.workspace_id,"id":self.config.id,"path":self.root.path,"allow_write":self.config.allow_write,"allow_exec":self.config.allow_exec,"allow_git_commit":self.config.allow_git_commit,"allow_git_mutation":self.config.allow_git_mutation,"allow_git_push":self.config.allow_git_push})}
 }
 pub struct Workspace{pub config:WorkspaceConfig,pub root:Root,pub projects:BTreeMap<String,Arc<Project>>}
 impl Workspace{
     pub fn summary(&self)->Value{json!({"id":self.config.id,"path":self.root.path,"project_count":self.projects.len()})}
-    pub fn project(&self,id:&str)->Result<Arc<Project>>{self.projects.get(id).cloned().with_context(||format!("PROJECT_NOT_AUTHORIZED: workspace {} has no project {id}",self.config.id))}
+    pub fn project(&self,id:&str)->Result<Arc<Project>>{self.projects.get(id).cloned().ok_or_else(||crate::error::coded_details("PROJECT_NOT_AUTHORIZED",false,format!("workspace {} has no project {id}",self.config.id),json!({"workspace":self.config.id,"project":id})))}
     pub fn projects_summary(&self)->Value{json!({"workspace":self.config.id,"projects":self.projects.values().map(|p|p.summary()).collect::<Vec<_>>()})}
 }
 fn same_root(a:&Root,b:&Root)->Result<bool>{use std::os::unix::fs::MetadataExt;let a=a.metadata(".")?;let b=b.metadata(".")?;Ok(a.dev()==b.dev()&&a.ino()==b.ino())}

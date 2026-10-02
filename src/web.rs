@@ -8,6 +8,9 @@ use tokio_stream::{wrappers::BroadcastStream,StreamExt};
 pub async fn home()->impl IntoResponse{Html(include_str!("../web/index.html"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
 pub async fn javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/app.js"))}
+pub async fn javascript_common()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/common.js"))}
+pub async fn javascript_mcp()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/mcp.js"))}
+pub async fn javascript_charts()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/charts.js"))}
 pub async fn uplot_javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.iife.min.js"))}
 pub async fn uplot_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.min.css"))}
 pub async fn favicon()->impl IntoResponse{StatusCode::NO_CONTENT}
@@ -15,6 +18,13 @@ pub async fn status(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.sn
 pub async fn metrics(State(rt):State<Arc<Runtime>>)->impl IntoResponse{match rt.db.dashboard_metrics(3600,60){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn activity(State(rt):State<Arc<Runtime>>)->impl IntoResponse{let audits=rt.db.audits(50);let jobs=rt.jobs.list(crate::tools::types::ListJobsArgs{workspace:None,project:None,task_id:None,limit:30});match(audits,jobs){(Ok(audits),Ok(jobs))=>Json(json!({"generated_at":crate::util::now(),"audits":audits,"jobs":jobs["jobs"]})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn config(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_config(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
+pub async fn project_states(State(rt):State<Arc<Runtime>>)->Response{let mut projects=Vec::new();for(workspace_id,project)in rt.projects_snapshot(){let base=json!({"workspace":workspace_id.clone(),"project":project.config.id});let value=match project.lock.clone().try_lock_owned(){Ok(_guard)=>match crate::tools::git::status(&rt,&project).await{Ok(status)=>{let changes=status["entries"].as_array().map(|v|v.len()).unwrap_or(0);json!({"workspace":workspace_id,"project":project.config.id,"state":"ready","branch":status["branch"],"head":status["head"],"changes":changes,"dirty":changes>0})},Err(error)=>{let message=format!("{error:#}");let state=if message.contains("not a standalone Git repository")||message.contains(".git must be a real directory"){"not_repository"}else{"unavailable"};let mut value=base;value["state"]=json!(state);value}},Err(_)=>{let mut value=base;value["state"]=json!("busy");value}};projects.push(value);}Json(json!({"generated_at":crate::util::now(),"projects":projects})).into_response()}
+pub async fn reload_config(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_reload_config())}
+pub async fn storage_maintenance(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_storage_maintenance())}
+pub async fn storage_health(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_storage_health(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":crate::error::payload(&error)}))).into_response()}}
+pub async fn sandbox_diagnostics(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_sandbox_diagnostics().await{Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":crate::error::payload(&error)}))).into_response()}}
+#[derive(Deserialize)]pub struct TasksQuery{pub limit:Option<usize>}
+pub async fn tasks(State(rt):State<Arc<Runtime>>,Query(query):Query<TasksQuery>)->Response{let args=crate::tools::types::ListTaskCheckpointsArgs{workspace:None,project:None,task_id:None,limit:query.limit.unwrap_or(100).clamp(1,200)};match crate::tools::tasks::list(&rt.db,args){Ok(value)=>Json(json!({"generated_at":crate::util::now(),"checkpoints":value["checkpoints"]})).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 #[derive(Deserialize)]pub struct OperationsQuery{pub limit:Option<usize>}
 pub async fn operations(State(rt):State<Arc<Runtime>>,Query(query):Query<OperationsQuery>)->Response{match rt.db.operations(query.limit.unwrap_or(100)){Ok(items)=>Json(json!({"generated_at":crate::util::now(),"operations":items})).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn operation(State(rt):State<Arc<Runtime>>,AxumPath(seq):AxumPath<i64>)->Response{match rt.db.operation(seq){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::NOT_FOUND,Json(json!({"error":format!("{error:#}")}))).into_response()}}
@@ -27,9 +37,8 @@ fn mutation_response(result:anyhow::Result<Value>)->Response{
     match result{
         Ok(value)=>Json(value).into_response(),
         Err(error)=>{
-            let message=format!("{error:#}");
-            let status=if message.starts_with("CONFIG_CONFLICT:"){StatusCode::CONFLICT}else{StatusCode::BAD_REQUEST};
-            (status,Json(json!({"error":message}))).into_response()
+            let status=match crate::error::code(&error){"CONFIG_CONFLICT"|"FILE_CONFLICT"|"PATCH_CONFLICT"|"GIT_CONFLICT"|"STAGED_CONFLICT"|"PROJECT_BUSY"|"GIT_BUSY"|"IDEMPOTENCY_CONFLICT"|"RELOAD_RESTART_REQUIRED"=>StatusCode::CONFLICT,"PROJECT_READ_ONLY"|"PROJECT_EXEC_DISABLED"|"GIT_COMMIT_DISABLED"|"GIT_PUSH_DISABLED"=>StatusCode::FORBIDDEN,"WORKSPACE_NOT_AUTHORIZED"|"PROJECT_NOT_AUTHORIZED"=>StatusCode::NOT_FOUND,_=>StatusCode::BAD_REQUEST};
+            (status,Json(crate::error::payload(&error))).into_response()
         }
     }
 }

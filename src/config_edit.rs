@@ -32,6 +32,7 @@ pub struct ConfigMutation{
     pub revision:String,
     pub requires_restart:bool,
     pub project:Value,
+    #[serde(skip_serializing_if="Option::is_none")]pub reload_warning:Option<String>,
     #[serde(rename="_operation_diff")]
     pub operation_diff:String,
 }
@@ -42,7 +43,7 @@ pub fn revision(path:&Path)->Result<String>{Ok(util::digest(std::fs::read(path).
 fn read_checked(path:&Path,expected_revision:&str)->Result<(String,Config)>{
     let bytes=std::fs::read(path).with_context(||format!("Read {}",path.display()))?;
     let actual=util::digest(&bytes);
-    if actual!=expected_revision{bail!("CONFIG_CONFLICT: configuration changed since it was loaded; refresh and retry");}
+    if actual!=expected_revision{return Err(crate::error::coded_details("CONFIG_CONFLICT",true,"configuration changed since it was loaded; refresh and retry",json!({"expected_revision":expected_revision,"actual_revision":actual})));}
     let text=String::from_utf8(bytes).context("Config must be UTF-8")?;
     let cfg:Config=toml::from_str(&text).context("Invalid config.toml")?;
     cfg.validate()?;
@@ -132,7 +133,7 @@ pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>
     insert_project_text(&mut text,workspace_index,&project)?;
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
-    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(&request.workspace,&project,&root),operation_diff:config_diff(&original,&text)})
+    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(&request.workspace,&project,&root),reload_warning:None,operation_diff:config_diff(&original,&text)})
 }
 pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:UpdateProjectRequest)->Result<ConfigMutation>{
     validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit,request.allow_git_mutation)?;
@@ -164,7 +165,7 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
     cfg.validate()?;drop(workspace::load(&cfg,path)?);
     let verify:Config=toml::from_str(&text).context("Generated project config is invalid")?;verify.validate()?;drop(workspace::load(&verify,path)?);
     replace_config(path,text.as_bytes())?;
-    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,&project,&root),operation_diff:config_diff(&original,&text)})
+    Ok(ConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,project:project_value(workspace_id,&project,&root),reload_warning:None,operation_diff:config_diff(&original,&text)})
 }
 
 #[cfg(test)]

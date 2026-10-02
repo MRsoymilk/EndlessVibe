@@ -5,6 +5,7 @@ use std::{fs::{File, OpenOptions}, io::Write, os::unix::fs::{MetadataExt, OpenOp
 use subtle::ConstantTimeEq;
 
 pub fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
+pub fn now_millis() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 }
 pub fn digest(bytes: impl AsRef<[u8]>) -> String { format!("{:x}", Sha256::digest(bytes.as_ref())) }
 pub fn random_secret() -> Result<String> { let mut bytes = [0u8; 32]; getrandom::getrandom(&mut bytes).map_err(|e| anyhow::anyhow!("OS randomness unavailable: {e}"))?; Ok(URL_SAFE_NO_PAD.encode(bytes)) }
 pub fn constant_eq(a: &str, b: &str) -> bool { bool::from(Sha256::digest(a.as_bytes()).as_slice().ct_eq(Sha256::digest(b.as_bytes()).as_slice())) }

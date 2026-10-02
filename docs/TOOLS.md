@@ -1,6 +1,6 @@
 # MCP 工具参数与工作流
 
-接口由 `src/tools/types.rs` 的 Rust 类型生成 JSON Schema。所有私有工具都需要有效 OAuth Bearer；Project 的写入、执行和 Git 权限还需由本地配置允许。
+接口由 `src/tools/types.rs` 的 Rust 类型生成 JSON Schema。所有私有工具都需要有效 OAuth Bearer；Project 的写入、执行和 Git 权限还需由本地配置允许。服务维护显式 `tool_schema_revision`；任何工具名、参数 schema、安全 metadata 或语义变化都必须递增该 revision。`hello` 与 `get_service_status` 都会返回 revision 和工具数量，用于识别客户端缓存旧 schema。
 
 ## 定位模型
 
@@ -32,6 +32,16 @@ Project   = Workspace 下的实际操作单元
 ```
 
 Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project 根目录。
+
+## 结构化错误
+
+MCP 工具失败时仍保留人类可读的文本错误，同时 `structuredContent` 返回稳定结构：
+
+```json
+{"code":"FILE_CONFLICT","message":"expected_sha256 does not match current content; read again, do not overwrite","retryable":true,"details":{"expected_sha256":"...","actual_sha256":"..."}}
+```
+
+Dashboard 写操作使用相同的 `code / message / retryable / details` JSON。客户端应根据 `code` 做流程判断，不要解析 `message` 文案。已迁移的稳定 code 包括配置/文件/patch/Git 冲突、Project busy/授权/权限、Job idempotency/slots 以及受控 Git push 的失败类型；未分类错误统一为 `OPERATION_FAILED`。
 
 ## 项目与文件
 
@@ -82,15 +92,25 @@ Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project �
 `run_command`：
 
 ```json
-{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120,"task_id":"combat-refactor","stage":"validate-core"}
+{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120,"preflight_programs":["cargo","rustc"],"task_id":"combat-refactor","stage":"validate-core"}
 ```
 
-任务立即返回 `job_id`。请求去重键是 `workspace + project + request_id`，因此不同 Project 可以使用相同 request_id 而不会互相复用。`task_id` 与 `stage` 必须同时提供或同时省略；提供后 Job 会自动挂到对应阶段 checkpoint。
+`preflight_programs` 是可选的 Job 前置工具链门禁。EndlessVibe 会在创建 Job ID、占用 command slot、获取 Project lock 和写入 Job 记录之前，在实际执行后端验证这些程序可见；缺失时直接返回结构化 `JOB_PREFLIGHT_FAILED`，不会启动长任务。直接执行 `cargo` 时会自动同时要求 `rustc`。联合 Rust + PostgreSQL 验收可使用：
+
+```json
+{"preflight_programs":["cargo","rustc","initdb","postgres","pg_isready","createdb"]}
+```
+
+preflight 成功结果会随首次响应返回，并持久化在 Job 的 `preflight` 字段中，后续 `get_job` 仍可查看实际 toolchain 路径和 Rust/PostgreSQL 可用状态。
+
+每个已接受 Job 还会收到环境变量 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 后端中的值是 Job 专属 `/cache/job-summary-<job_id>.json`；测试/构建脚本可以在退出前写入一个不超过 1 MiB 的 JSON object。EndlessVibe 在进程结束后通过 `O_NOFOLLOW` + owner/link/type/size 检查读取它，对常见 credential/password/token 字段脱敏，然后保存到 Job 的 `summary`；读取状态和临时文件删除结果保存在 `summary_capture`。未写该文件的普通 Job 记录为 `not_reported`，不会因此失败。不要把 secret 放入 summary，即使服务端会执行防御性脱敏。
+
+通过 preflight 后任务立即返回 `job_id`。请求去重键是 `workspace + project + request_id`，因此不同 Project 可以使用相同 request_id 而不会互相复用。`preflight_programs` 属于请求指纹的一部分，同一 request_id 不能用不同门禁条件重试。`task_id` 与 `stage` 必须同时提供或同时省略；提供后 Job 会自动挂到对应阶段 checkpoint。
 
 `run_shell`：
 
 ```json
-{"workspace":"projects","project":"BAfter","script":"printf '%s\n' 'hello'; pwd","cwd":".","request_id":"shell-001","timeout_seconds":10}
+{"workspace":"projects","project":"BAfter","script":"printf '%s\n' 'hello'; pwd","cwd":".","request_id":"shell-001","timeout_seconds":10,"preflight_programs":[]}
 ```
 
 `run_shell` 只有在 `execution.allow_shell=true` 时可用。
@@ -186,10 +206,10 @@ stream 中断或新会话恢复时：
 `git_push`：
 
 ```json
-{"workspace":"projects","project":"BAfter","remote":"origin","branch":"main"}
+{"workspace":"projects","project":"BAfter","remote":"origin","branch":"main","expected_head":"完整本地 branch commit SHA"}
 ```
 
-必须为 Project 显式启用 `allow_git_push=true`。工具只允许把已存在的本地 branch 推送到预配置 remote 的同名 branch；不接收 URL、任意 refspec、`--force` 或其他 Git 参数。`remote.<name>.pushurl`、repo-local `url.*` rewrite、`file://`、`git://`、明文 `http://` 和本地路径 remote 会被拒绝。HTTPS 使用服务账户已有 Git credential helper；SSH 使用服务账户 HOME/SSH agent，但这些凭据不会暴露给普通 `run_command`。`run_command git push` 仍然被禁止。
+必须为 Project 显式启用 `allow_git_push=true`。`expected_head` 必须是完整 40/64 位 Git OID；本地 branch 在调用前或 dry-run 后发生变化都会以 `GIT_CONFLICT` 拒绝，且不会执行真实 push。工具先查询远端同名 branch HEAD，再执行 `git push --dry-run`，通过后才做真实非 force push。成功结果返回 `remote_head_before`、`remote_head_after`、`commit` 和 `preflight=dry_run_passed`。失败会区分 `GIT_PUSH_AUTH_FAILED`、`GIT_PUSH_NETWORK_FAILED`、`GIT_PUSH_NON_FAST_FORWARD`、`GIT_PUSH_REMOTE_REJECTED` 与通用 `GIT_PUSH_FAILED`。工具只允许把已存在的本地 branch 推送到预配置 remote 的同名 branch；不接收 URL、任意 refspec、`--force` 或其他 Git 参数。`remote.<name>.pushurl`、repo-local `url.*` rewrite、`file://`、`git://`、明文 `http://` 和本地路径 remote 会被拒绝。HTTPS 使用服务账户已有 Git credential helper；SSH 使用服务账户 HOME/SSH agent，但这些凭据不会暴露给普通 `run_command`。`run_command git push` 仍然被禁止。
 
 错误恢复见 [GIT_RECOVERY.md](GIT_RECOVERY.md)。
 

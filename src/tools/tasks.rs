@@ -1,11 +1,10 @@
-use crate::{store::Store,tools::types::{ListTaskCheckpointsArgs,TaskArgs},util};
+use crate::{store::Store,task::TaskState,tools::types::{ListTaskCheckpointsArgs,TaskArgs},util};
 use anyhow::{bail,Context,Result};
 use rusqlite::params;
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 
 const NAMESPACE:&str="task_checkpoints";
-const MAX_RECORDS:i64=2000;
 const MAX_JOBS:usize=20;
 
 #[derive(Clone,Debug,Serialize,Deserialize)]
@@ -41,21 +40,21 @@ fn load_stage(db:&Store,workspace:&str,project:&str,task_id:&str,stage:&str)->Re
 fn save(db:&Store,checkpoint:&TaskCheckpoint)->Result<()>{
     db.transaction(|tx|{
         crate::store::put(tx,NAMESPACE,&key(&checkpoint.workspace,&checkpoint.project,&checkpoint.task_id,&checkpoint.stage),checkpoint,0)?;
-        tx.execute("DELETE FROM kv WHERE namespace=?1 AND key IN (SELECT key FROM kv WHERE namespace=?1 ORDER BY CAST(json_extract(value,'$.updated') AS INTEGER) DESC LIMIT -1 OFFSET ?2)",params![NAMESPACE,MAX_RECORDS])?;
+        crate::store::prune_common(tx,util::now())?;
         Ok(())
     })
 }
-fn base(workspace:&str,project:&str,task_id:&str,stage:&str)->TaskCheckpoint{let now=util::now();TaskCheckpoint{task_id:task_id.into(),workspace:workspace.into(),project:project.into(),stage:stage.into(),status:"started".into(),jobs:vec![],last_commit:None,created:now,updated:now}}
+fn base(workspace:&str,project:&str,task_id:&str,stage:&str)->TaskCheckpoint{let now=util::now();TaskCheckpoint{task_id:task_id.into(),workspace:workspace.into(),project:project.into(),stage:stage.into(),status:TaskState::Pending.to_string(),jobs:vec![],last_commit:None,created:now,updated:now}}
 pub fn record_job(db:&Store,workspace:&str,project:&str,task_id:&str,stage:&str,job_id:&str,status:&str)->Result<()>{
     simple_id("task_id",task_id)?;simple_id("stage",stage)?;
     let mut c=load_stage(db,workspace,project,task_id,stage)?.unwrap_or_else(||base(workspace,project,task_id,stage));
     let now=util::now();if let Some(job)=c.jobs.iter_mut().find(|job|job.job_id==job_id){job.status=status.into();job.updated=now;}else{c.jobs.push(TaskJobRef{job_id:job_id.into(),status:status.into(),updated:now});if c.jobs.len()>MAX_JOBS{let drain=c.jobs.len()-MAX_JOBS;c.jobs.drain(..drain);}}
-    c.status=format!("job_{status}");c.updated=now;save(db,&c)
+    c.status=TaskState::from_job(status).unwrap_or(TaskState::Failed).to_string();c.updated=now;save(db,&c)
 }
 pub fn record_commit(db:&Store,workspace:&str,project:&str,task_id:&str,stage:&str,commit:&str)->Result<()>{
     simple_id("task_id",task_id)?;simple_id("stage",stage)?;
     let mut c=load_stage(db,workspace,project,task_id,stage)?.unwrap_or_else(||base(workspace,project,task_id,stage));
-    c.status="committed".into();c.last_commit=Some(commit.into());c.updated=util::now();save(db,&c)
+    c.status=TaskState::Succeeded.to_string();c.last_commit=Some(commit.into());c.updated=util::now();save(db,&c)
 }
 fn query(db:&Store,workspace:Option<&str>,project:Option<&str>,task_id:Option<&str>,limit:usize)->Result<Vec<TaskCheckpoint>>{
     if limit==0||limit>200{bail!("limit must be 1..200");}
