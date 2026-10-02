@@ -76,6 +76,8 @@ readonly_mounts = [
 
 `run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
 
+每个 `run_command` / `run_shell` 还可以提供 `preflight_programs`。这些程序会在 **Job ID 创建、command slot 占用、Project lock 获取、Job 持久化之前**在实际执行后端中做可见性检查；缺失时以 `JOB_PREFLIGHT_FAILED` fail-fast，不启动目标命令。直接运行 `cargo` 会自动把 `rustc` 加入门禁。Rust + PostgreSQL 联合验收应显式传 `cargo,rustc,initdb,postgres,pg_isready,createdb`；成功的 preflight 路径和 toolchain 状态会持久化到 Job summary。该字段只做环境门禁，不绕过 `allowed_programs` 对顶层 `run_command` 的权限控制。
+
 白名单并非安全边界：Python、Cargo build script、Makefile、编译器插件等都能执行其他程序。安全限制主要来自隔离环境与管理员授予的 Project 权限。工具描述/确认提示不是 OS 权限控制。
 
 ## 显式 host 模式
