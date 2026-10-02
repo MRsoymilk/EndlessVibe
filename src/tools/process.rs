@@ -61,10 +61,11 @@ pub async fn probe_bubblewrap(config:&Config)->Result<Vec<(String,String)>>{
     namespace.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","exit 0"]);
     let result=capture(namespace,None,16384,5).await?;
     if result.code!=Some(0){bail!("bubblewrap sandbox probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}
+    let mut programs=config.execution.allowed_programs.clone();programs.extend(config.execution.required_programs.iter().cloned());programs.sort();programs.dedup();
     let mut probe=bubblewrap_base_command(config)?;
-    probe.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","missing=0; for p do if v=$(command -v \"$p\" 2>/dev/null); then printf 'OK\\t%s\\t%s\\n' \"$p\" \"$v\"; else printf 'MISSING\\t%s\\n' \"$p\"; missing=1; fi; done; exit $missing","probe"]);probe.args(&config.execution.allowed_programs);
+    probe.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&config.execution.path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","missing=0; for p do if v=$(command -v \"$p\" 2>/dev/null); then printf 'OK\\t%s\\t%s\\n' \"$p\" \"$v\"; else printf 'MISSING\\t%s\\n' \"$p\"; missing=1; fi; done; exit $missing","probe"]);probe.args(&programs);
     let result=capture(probe,None,262144,10).await?;let stdout=String::from_utf8(result.stdout).context("Sandbox toolchain probe output is not UTF-8")?;let mut visible=Vec::new();let mut missing=Vec::new();for line in stdout.lines(){let mut fields=line.split('\t');match fields.next(){Some("OK")=>{if let (Some(program),Some(path))=(fields.next(),fields.next()){visible.push((program.to_owned(),path.to_owned()));}},Some("MISSING")=>{if let Some(program)=fields.next(){missing.push(program.to_owned());}},_=>{}}}
-    if !missing.is_empty(){bail!("bubblewrap sandbox probe: configured program(s) not visible: {}. execution.path={}. If Cargo/Rustup lives under ~/.rustup, mount only the active toolchain directory read-only to /opt/rust and prepend /opt/rust/bin to execution.path; do not mount HOME or credential directories",missing.join(", "),config.execution.path);}
+    if !missing.is_empty(){let required_missing=missing.iter().filter(|p|config.execution.required_programs.contains(*p)).cloned().collect::<Vec<_>>();bail!("bubblewrap sandbox probe: configured program(s) not visible: {}. required_missing=[{}]. execution.path={}. Mount only minimal toolchain prefixes read-only (for example Rust to /opt/rust and PostgreSQL to /opt/postgres), prepend their bin directories to execution.path, and never mount HOME, database data directories, sockets, Docker socket or credential directories",missing.join(", "),required_missing.join(", "),config.execution.path);}
     if result.code!=Some(0){bail!("bubblewrap program visibility probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}
     Ok(visible)
 }
@@ -115,5 +116,6 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     use super::*;
     #[test]fn bubblewrap_does_not_limit_launcher_nproc(){assert_eq!(pre_exec_nproc_limit("bubblewrap",256),None);}
     #[test]fn host_keeps_configured_nproc_limit(){assert_eq!(pre_exec_nproc_limit("host",256),Some(256));}
+    #[test]fn required_programs_do_not_grant_run_permission(){let mut c=Config::default();c.execution.required_programs=vec!["postgres".into()];assert!(!c.execution.allowed_programs.contains(&"postgres".to_owned()));}
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
 }
