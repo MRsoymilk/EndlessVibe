@@ -58,6 +58,9 @@ allow_exec = true
 allow_git_commit = true
 allow_git_mutation = false
 allow_git_push = false
+execution_profile = "development"
+# Optional one-time Project environment. Values are not shown by Dashboard/API summaries.
+# environment = ["TEST_DATABASE_URL=postgres://user:password@127.0.0.1:19031/test"]
 
 [[workspaces.projects]]
 id = "another-project"
@@ -67,6 +70,7 @@ allow_exec = false
 allow_git_commit = true
 allow_git_mutation = false
 allow_git_push = false
+execution_profile = "isolated"
 
 # Workspace roots are management boundaries. Project paths are relative to their
 # workspace root and are the units used by file, command and Git tools.

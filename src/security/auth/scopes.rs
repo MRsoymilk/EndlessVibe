@@ -8,7 +8,7 @@ pub fn required_scopes(tool:&str)->&'static [&'static str]{
         "list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"=>&["files:read"],
         "write_file"|"apply_patch"|"create_directory"=>&["files:write"],
         "run_command"|"run_shell"=>&["commands:execute","files:write"],
-        "get_job"|"get_job_output"|"cancel_job"|"list_jobs"=>&["commands:execute"],
+        "get_sandbox_diagnostics"|"get_job"|"get_job_output"|"cancel_job"|"list_jobs"=>&["commands:execute"],
         "git_commit"=>&["git:write","files:write"],
         "git_push"=>&["git:write"],
         "hello"|"get_service_status"=>&[],
@@ -31,5 +31,5 @@ pub(super) fn parse(value:Option<&str>)->AResult<Vec<String>>{
 mod tests{
     use super::*;
     #[test]fn scope_escalation_is_not_possible_in_parser(){assert!(parse(Some("files:read root")).is_err());assert_eq!(parse(Some("files:read files:read")).unwrap(),vec!["files:read"]);}
-    #[test]fn command_scopes_include_writes(){assert!(required_scopes("run_command").contains(&"files:write"));assert!(required_scopes("git_commit").contains(&"git:write"));assert_eq!(required_scopes("git_push"),&["git:write"]);}
+    #[test]fn command_scopes_include_writes(){assert!(required_scopes("run_command").contains(&"files:write"));assert_eq!(required_scopes("get_sandbox_diagnostics"),&["commands:execute"]);assert!(required_scopes("git_commit").contains(&"git:write"));assert_eq!(required_scopes("git_push"),&["git:write"]);}
 }
