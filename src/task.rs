@@ -8,6 +8,7 @@ pub enum TaskState{
     Pending,
     Running,
     Succeeded,
+    Committed,
     Failed,
     Cancelled,
     Interrupted,
@@ -23,6 +24,8 @@ impl TaskState{
             (Self::Running,Self::Cancelled)|
             (Self::Running,Self::Interrupted)|
             (Self::Succeeded,Self::Succeeded)|
+            (Self::Succeeded,Self::Committed)|
+            (Self::Committed,Self::Committed)|
             (Self::Failed,Self::Failed)|
             (Self::Cancelled,Self::Cancelled)|
             (Self::Interrupted,Self::Interrupted))

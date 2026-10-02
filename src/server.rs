@@ -8,7 +8,7 @@ fn explicit_origin(value:&str)->String{
     if !matches!(url.scheme(),"http"|"https"){return url.origin().ascii_serialization();}
     let Some(host)=url.host_str()else{return url.origin().ascii_serialization();};
     let Some(port)=url.port_or_known_default()else{return url.origin().ascii_serialization();};
-    let host=if host.contains(':'){format!("[{host}]")}else{host.to_owned()};
+    let host=host.trim_matches(['[',']']);let host=if host.contains(':'){format!("[{host}]")}else{host.to_owned()};
     format!("{}://{}:{port}",url.scheme(),host)
 }
 
