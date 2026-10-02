@@ -35,6 +35,9 @@ pub fn job_summary_contract(config:&Config,workspace:&str,project:&str,job_id:&s
     let exposed_path=match config.execution.backend.as_str(){"bubblewrap"=>format!("/cache/{file}"),"host"=>host_path.to_string_lossy().into_owned(),"disabled"=>bail!("execution backend is disabled"),_=>bail!("Unknown execution backend")};Ok(JobSummaryContract{host_path,exposed_path})
 }
 fn simple_program(program:&str)->bool{!program.is_empty()&&program.len()<=64&&program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b))}
+fn valid_environment_name(name:&str)->bool{let mut bytes=name.bytes();matches!(bytes.next(),Some(b)if b.is_ascii_alphabetic()||b==b'_')&&bytes.all(|b|b.is_ascii_alphanumeric()||b==b'_')}
+fn validate_job_environment(environment:&BTreeMap<String,String>)->Result<()>{if environment.len()>64{bail!("environment accepts at most 64 variables");}let reserved=["HOME","PATH","CARGO_HOME","XDG_CACHE_HOME","LANG","LC_ALL","TERM","ENDLESSVIBE_JOB_SUMMARY"];let mut total=0usize;for(name,value)in environment{if !valid_environment_name(name)||name.len()>128{bail!("environment variable names must match [A-Za-z_][A-Za-z0-9_]* and be at most 128 bytes");}if reserved.contains(&name.as_str()){bail!("environment variable {name} is reserved by EndlessVibe");}if value.contains('\0')||value.len()>65536{bail!("environment variable {name} contains NUL or exceeds 65536 bytes");}total=total.saturating_add(name.len()+value.len());}if total>131072{bail!("environment exceeds 131072 bytes");}Ok(())}
+fn validate_job_network(config:&Config,requested:bool)->Result<()>{if requested&&config.execution.backend=="bubblewrap"&&!config.execution.allow_network{bail!("network=true requires local execution.allow_network=true; this explicitly shares the host network namespace so loopback services published by Docker can be reached");}Ok(())}
 fn add_programs(out:&mut Vec<String>,items:&[&str]){for item in items{if !out.iter().any(|p|p==item){out.push((*item).to_owned());}}}
 fn read_small_manifest(path:&Path)->Option<String>{let meta=std::fs::metadata(path).ok()?;if meta.len()>512*1024{return None;}std::fs::read_to_string(path).ok()}
 fn inspect_project_dir(path:&Path,depth:usize,out:&mut Vec<String>){
@@ -56,11 +59,11 @@ fn inspect_project_dir(path:&Path,depth:usize,out:&mut Vec<String>){
 }
 pub fn detect_project_programs(project:&Project)->Vec<String>{let mut out=Vec::new();inspect_project_dir(&project.root.path,0,&mut out);out.sort();out.dedup();out}
 fn scan_program_mentions(text:&str,out:&mut Vec<String>){
-    const PROGRAMS:[&str;14]=["cargo","rustc","cmake","ninja","make","ctest","python3","node","npm","go","godot","initdb","postgres","pg_isready"];
-    let mut optional=Vec::<String>::new();
-    for line in text.lines(){if let Some(rest)=line.trim().strip_prefix("# endlessvibe-optional-programs:"){for program in rest.split_whitespace(){if simple_program(program)&&!optional.iter().any(|p|p==program){optional.push(program.to_owned());}}}}
-    for program in PROGRAMS{let double=format!("\"{program}\"");let single=format!("'{program}'");if (text.contains(&double)||text.contains(&single))&&!optional.iter().any(|p|p==program){add_programs(out,&[program]);}}
-    if (text.contains("\"createdb\"")||text.contains("'createdb'"))&&!optional.iter().any(|p|p=="createdb"){add_programs(out,&["createdb"]);}
+    const AUTO_PROGRAMS:[&str;11]=["cargo","rustc","cmake","ninja","make","ctest","python3","node","npm","go","godot"];
+    let mut optional=Vec::<String>::new();let mut required=Vec::<String>::new();
+    for line in text.lines(){let line=line.trim();if let Some(rest)=line.strip_prefix("# endlessvibe-optional-programs:"){for program in rest.split_whitespace(){if simple_program(program)&&!optional.iter().any(|p|p==program){optional.push(program.to_owned());}}}if let Some(rest)=line.strip_prefix("# endlessvibe-required-programs:"){for program in rest.split_whitespace(){if simple_program(program)&&!required.iter().any(|p|p==program){required.push(program.to_owned());}}}}
+    for program in AUTO_PROGRAMS{let double=format!("\"{program}\"");let single=format!("'{program}'");if (text.contains(&double)||text.contains(&single))&&!optional.iter().any(|p|p==program){add_programs(out,&[program]);}}
+    for program in required{if !out.iter().any(|p|p==&program){out.push(program);}}
     if out.iter().any(|p|p=="cargo"){add_programs(out,&["rustc"]);}
 }
 fn python_compile_only(args:&[String])->bool{args.windows(2).any(|pair|pair[0]=="-m"&&matches!(pair[1].as_str(),"py_compile"|"compileall"))}
@@ -124,15 +127,15 @@ fn execution_environment(config:&Config,programs:&[String])->(String,Vec<(PathBu
     }
     (path_entries.join(":"),mounts)
 }
-fn bubblewrap_base_command(config:&Config,programs:&[String])->Result<(Command,String)>{
+fn bubblewrap_base_command(config:&Config,programs:&[String],share_network:bool)->Result<(Command,String)>{
     if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
-    let (path,mounts)=execution_environment(config,programs);let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
+    validate_job_network(config,share_network)?;let (path,mounts)=execution_environment(config,programs);let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
     c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
-    if config.execution.allow_network{c.arg("--share-net");}
+    if share_network{c.arg("--share-net");}
     for p in ["/usr","/bin","/sbin","/lib","/lib64"]{let p=Path::new(p);if p.exists(){c.arg("--ro-bind").arg(p).arg(p);}}
     c.args(["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/etc"]);
     for p in ["/etc/ld.so.cache","/etc/ld.so.conf","/etc/ld.so.conf.d","/etc/localtime"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}
-    if config.execution.allow_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
+    if share_network{for p in ["/etc/resolv.conf","/etc/hosts","/etc/ssl/certs"]{if Path::new(p).exists(){c.arg("--ro-bind").arg(p).arg(p);}}}
     for (source,target) in mounts{c.arg("--ro-bind").arg(source).arg(target);}
     Ok((c,path))
 }
@@ -156,13 +159,13 @@ fn mount_suggestion(program:&str,host_path:&str)->Option<Value>{
     Some(json!({"kind":"readonly-mount","source":bin,"target":format!("/opt/{program}"),"path_entry":format!("/opt/{program}"),"reason":"review this minimal executable directory before adding it"}))
 }
 async fn probe_namespace(config:&Config,programs:&[String])->Result<()>{
-    let (mut namespace,path)=bubblewrap_base_command(config,programs)?;
+    let (mut namespace,path)=bubblewrap_base_command(config,programs,false)?;
     namespace.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","exit 0"]);
     let result=capture(namespace,None,16384,5).await?;
     if result.code!=Some(0){bail!("bubblewrap sandbox probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}Ok(())
 }
 async fn sandbox_paths(config:&Config,programs:&[String])->Result<BTreeMap<String,String>>{
-    probe_namespace(config,programs).await?;let (mut probe,path)=bubblewrap_base_command(config,programs)?;
+    probe_namespace(config,programs).await?;let (mut probe,path)=bubblewrap_base_command(config,programs,false)?;
     probe.args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--","/bin/sh","-c","for p do if v=$(command -v \"$p\" 2>/dev/null); then printf 'OK\\t%s\\t%s\\n' \"$p\" \"$v\"; else printf 'MISSING\\t%s\\n' \"$p\"; fi; done","probe"]);probe.args(programs);
     let result=capture(probe,None,262144,10).await?;if result.code!=Some(0){bail!("bubblewrap program visibility probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}let stdout=String::from_utf8(result.stdout).context("Sandbox toolchain probe output is not UTF-8")?;let mut visible=BTreeMap::new();for line in stdout.lines(){let mut fields=line.split('\t');if fields.next()==Some("OK"){if let (Some(program),Some(path))=(fields.next(),fields.next()){visible.insert(program.to_owned(),path.to_owned());}}}Ok(visible)
 }
@@ -185,8 +188,8 @@ pub async fn probe_bubblewrap(config:&Config)->Result<Vec<(String,String)>>{
 }
 
 fn git_network_subcommand(args:&[String])->bool{args.iter().any(|arg|matches!(arg.as_str(),"push"|"fetch"|"pull"|"clone"|"ls-remote"|"remote"|"submodule"))}
-pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool,project_programs:&[String])->Result<Command>{
-    w.exec_allowed()?;
+pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool,project_programs:&[String],environment:&BTreeMap<String,String>,network:bool,summary_path:&str)->Result<Command>{
+    w.exec_allowed()?;validate_job_environment(environment)?;validate_job_network(config,network)?;
     if program=="git"&&git_network_subcommand(args){bail!("Network Git subcommands are disabled in run_command; allow_git_mutation only permits local repository mutations");}
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
     if shell&&!config.execution.allow_shell{bail!("run_shell is disabled; set execution.allow_shell=true locally after reviewing the risks");}
@@ -199,18 +202,19 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
             let executable=if shell{PathBuf::from("/bin/bash")}else{validated_executable(&config.execution.path,program)?};
             let mut c=Command::new(executable);clean_environment(&mut c,&config.execution.path);c.current_dir(host_cwd);
             // Explicit host mode is not a sandbox; no service token/key is inherited.
-            if let Some(home)=std::env::var_os("HOME"){c.env("HOME",home);}c.args(args);c
+            if let Some(home)=std::env::var_os("HOME"){c.env("HOME",home);}c.envs(environment).env("ENDLESSVIBE_JOB_SUMMARY",summary_path);c.args(args);c
         }
         "bubblewrap"=>{
             let cache=config.security.data_dir.join("exec-cache").join(&w.workspace_id).join(&w.config.id);crate::util::private_dir(&cache)?;
-            let mut programs=configured_probe_programs(config);programs.extend(project_programs.iter().cloned());programs.sort();programs.dedup();let (mut c,path)=bubblewrap_base_command(config,&programs)?;
+            let mut programs=configured_probe_programs(config);programs.extend(project_programs.iter().cloned());programs.sort();programs.dedup();let (mut c,path)=bubblewrap_base_command(config,&programs,network)?;
             c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
             if config.execution.auto_discover_toolchains&&needs_cargo_registry(&programs){if let Some(registry)=discover_host_cargo_registry(){let target=cache.join("cargo/registry");crate::util::private_dir(&target)?;c.arg("--ro-bind").arg(registry).arg("/cache/cargo/registry");}}
             // Git metadata is read-only by default. Explicit allow_git_mutation keeps the project's
             // own .git writable while HOME, credentials, service state and network remain isolated.
             let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}if !w.config.allow_git_mutation{c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}}
             let inside=if cwd=="."{PathBuf::from("/workspace")}else{Path::new("/workspace").join(cwd)};
-            c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb"]);
+            c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--setenv","ENDLESSVIBE_JOB_SUMMARY",summary_path]);
+            for(name,value)in environment{c.arg("--setenv").arg(name).arg(value);}
             c.arg("--").arg(if shell{"/bin/bash"}else{program}).args(args);c
         }
         _=>bail!("Unknown execution backend"),
@@ -244,8 +248,11 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
     #[test]fn project_manifest_detection_finds_joint_toolchains(){let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("Cargo.toml"),"[dependencies]\nsqlx = \"1\"\n").unwrap();std::fs::create_dir_all(d.path().join("game")).unwrap();std::fs::write(d.path().join("game/project.godot"),"[application]\n").unwrap();let mut programs=Vec::new();inspect_project_dir(d.path(),0,&mut programs);for p in ["cargo","rustc","initdb","postgres","pg_isready","createdb","godot"]{assert!(programs.contains(&p.to_owned()),"missing {p}");}}
     #[test]fn oversized_manifest_is_not_read(){let d=tempfile::tempdir().unwrap();let p=d.path().join("Cargo.toml");std::fs::write(&p,vec![b'x';512*1024+1]).unwrap();assert!(read_small_manifest(&p).is_none());}
-    #[test]fn script_mentions_require_only_explicit_postgres_tools(){let mut p=Vec::new();scan_program_mentions("subprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);for expected in ["cargo","rustc","initdb","postgres"]{assert!(p.contains(&expected.to_owned()),"missing {expected}");}for unexpected in ["pg_isready","createdb"]{assert!(!p.contains(&unexpected.to_owned()),"unexpected {unexpected}");}}
+    #[test]fn service_program_mentions_are_advisory_without_required_marker(){let mut p=Vec::new();scan_program_mentions("subprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);for expected in ["cargo","rustc"]{assert!(p.contains(&expected.to_owned()),"missing {expected}");}for unexpected in ["initdb","postgres","pg_isready","createdb"]{assert!(!p.contains(&unexpected.to_owned()),"unexpected {unexpected}");}}
+    #[test]fn required_program_marker_can_gate_local_services(){let mut p=Vec::new();scan_program_mentions("# endlessvibe-required-programs: initdb postgres pg_isready createdb\nLOCAL=(\"initdb\", \"postgres\")",&mut p);for expected in ["initdb","postgres","pg_isready","createdb"]{assert!(p.contains(&expected.to_owned()),"missing {expected}");}}
     #[test]fn script_optional_programs_do_not_block_preflight(){let mut p=Vec::new();scan_program_mentions("# endlessvibe-optional-programs: initdb postgres\nsubprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);assert!(p.contains(&"cargo".to_owned()));assert!(p.contains(&"rustc".to_owned()));assert!(!p.contains(&"initdb".to_owned()));assert!(!p.contains(&"postgres".to_owned()));}
     #[test]fn python_compile_modes_skip_runtime_tool_scan(){assert!(python_compile_only(&["-m".into(),"py_compile".into(),"tools/check.py".into()]));assert!(python_compile_only(&["-m".into(),"compileall".into(),"tools".into()]));assert!(!python_compile_only(&["tools/check.py".into()]));}
     #[test]fn gentoo_install_hint_is_search_only(){let hint=install_hint_for_os("gentoo","postgres");assert!(hint.contains("emerge -s postgresql"));assert!(!hint.contains("emerge -av"));}
+    #[test]fn job_environment_accepts_external_service_variables_and_reserves_runtime_keys(){let mut env=BTreeMap::new();env.insert("TEST_DATABASE_URL".into(),"postgres://user:password@127.0.0.1:19031/test".into());assert!(validate_job_environment(&env).is_ok());env.insert("PATH".into(),"/tmp".into());assert!(validate_job_environment(&env).is_err());let mut invalid=BTreeMap::new();invalid.insert("1BAD".into(),"x".into());assert!(validate_job_environment(&invalid).is_err());}
+    #[test]fn bubblewrap_network_is_per_job_and_requires_local_opt_in(){let mut c=Config::default();assert!(validate_job_network(&c,false).is_ok());assert!(validate_job_network(&c,true).is_err());c.execution.allow_network=true;assert!(validate_job_network(&c,true).is_ok());}
 }
