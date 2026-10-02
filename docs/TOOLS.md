@@ -103,6 +103,8 @@ Dashboard 写操作使用相同的 `code / message / retryable / details` JSON�
 
 preflight 成功结果会随首次响应返回，并持久化在 Job 的 `preflight` 字段中，后续 `get_job` 仍可查看实际 toolchain 路径和 Rust/PostgreSQL 可用状态。
 
+每个已接受 Job 还会收到环境变量 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 后端中的值是 Job 专属 `/cache/job-summary-<job_id>.json`；测试/构建脚本可以在退出前写入一个不超过 1 MiB 的 JSON object。EndlessVibe 在进程结束后通过 `O_NOFOLLOW` + owner/link/type/size 检查读取它，对常见 credential/password/token 字段脱敏，然后保存到 Job 的 `summary`；读取状态和临时文件删除结果保存在 `summary_capture`。未写该文件的普通 Job 记录为 `not_reported`，不会因此失败。不要把 secret 放入 summary，即使服务端会执行防御性脱敏。
+
 通过 preflight 后任务立即返回 `job_id`。请求去重键是 `workspace + project + request_id`，因此不同 Project 可以使用相同 request_id 而不会互相复用。`preflight_programs` 属于请求指纹的一部分，同一 request_id 不能用不同门禁条件重试。`task_id` 与 `stage` 必须同时提供或同时省略；提供后 Job 会自动挂到对应阶段 checkpoint。
 
 `run_shell`：

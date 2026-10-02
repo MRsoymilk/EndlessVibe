@@ -28,6 +28,12 @@ pub async fn capture(mut cmd:Command,input:Option<Vec<u8>>,limit:usize,seconds:u
 }
 
 pub fn clean_environment(cmd:&mut Command,path:&str){cmd.env_clear().env("PATH",path).env("LANG","C.UTF-8").env("LC_ALL","C.UTF-8").env("TERM","dumb");}
+#[derive(Clone,Debug)]pub struct JobSummaryContract{pub host_path:PathBuf,pub exposed_path:String}
+pub fn job_summary_host_path(config:&Config,workspace:&str,project:&str,job_id:&str)->Result<PathBuf>{if job_id.is_empty()||job_id.len()>128||!job_id.bytes().all(|b|b.is_ascii_alphanumeric()||b"-_".contains(&b)){bail!("Invalid job ID for summary contract");}let cache=config.security.data_dir.join("exec-cache").join(workspace).join(project);crate::util::private_dir(&cache)?;Ok(cache.join(format!("job-summary-{job_id}.json")))}
+pub fn job_summary_contract(config:&Config,workspace:&str,project:&str,job_id:&str)->Result<JobSummaryContract>{
+    let file=format!("job-summary-{job_id}.json");let host_path=job_summary_host_path(config,workspace,project,job_id)?;if host_path.exists(){bail!("Job summary path already exists; refusing to overwrite");}
+    let exposed_path=match config.execution.backend.as_str(){"bubblewrap"=>format!("/cache/{file}"),"host"=>host_path.to_string_lossy().into_owned(),"disabled"=>bail!("execution backend is disabled"),_=>bail!("Unknown execution backend")};Ok(JobSummaryContract{host_path,exposed_path})
+}
 fn simple_program(program:&str)->bool{!program.is_empty()&&program.len()<=64&&program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b))}
 fn configured_executable(path:&str,program:&str)->Option<PathBuf>{for dir in path.split(':'){let p=Path::new(dir).join(program);if p.is_file(){return Some(p);}}None}
 fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
@@ -140,5 +146,6 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn diagnostics_always_include_joint_gate_tools(){let c=Config::default();let programs=diagnostic_programs(&c);for program in DIAGNOSTIC_PROGRAMS{assert!(programs.contains(&program.to_owned()));}}
     #[test]fn cargo_preflight_also_requires_rustc(){assert_eq!(job_preflight_programs("cargo",&[],false).unwrap(),vec!["cargo".to_owned(),"rustc".to_owned()]);}
     #[test]fn shell_preflight_is_explicit(){assert_eq!(job_preflight_programs("bash",&["postgres".into()],true).unwrap(),vec!["postgres".to_owned()]);}
+    #[test]fn summary_contract_uses_private_cache_path(){let d=tempfile::tempdir().unwrap();let mut c=Config::default();c.security.data_dir=d.path().to_owned();let contract=job_summary_contract(&c,"root","demo","abc-123").unwrap();assert!(contract.host_path.starts_with(d.path().join("exec-cache/root/demo")));assert_eq!(contract.exposed_path,"/cache/job-summary-abc-123.json");}
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
 }
