@@ -28,10 +28,11 @@ pub async fn capture(mut cmd:Command,input:Option<Vec<u8>>,limit:usize,seconds:u
 }
 
 pub fn clean_environment(cmd:&mut Command,path:&str){cmd.env_clear().env("PATH",path).env("LANG","C.UTF-8").env("LC_ALL","C.UTF-8").env("TERM","dumb");}
+fn simple_program(program:&str)->bool{!program.is_empty()&&program.len()<=64&&program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b))}
+fn configured_executable(path:&str,program:&str)->Option<PathBuf>{for dir in path.split(':'){let p=Path::new(dir).join(program);if p.is_file(){return Some(p);}}None}
 fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
-    if program.is_empty()||program.len()>64||!program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){bail!("program must be a simple executable name; use args for arguments");}
-    for dir in path.split(':'){let p=Path::new(dir).join(program);if p.is_file(){return Ok(p);}}
-    bail!("Executable {program} not found in configured PATH")
+    if !simple_program(program){bail!("program must be a simple executable name; use args for arguments");}
+    configured_executable(path,program).with_context(||format!("Executable {program} not found in configured PATH"))
 }
 
 fn pre_exec_nproc_limit(backend:&str,max_processes:u64)->Option<u64>{
@@ -74,6 +75,14 @@ async fn sandbox_paths(config:&Config,programs:&[String])->Result<BTreeMap<Strin
 pub async fn sandbox_diagnostics(config:&Config)->Result<Value>{
     let programs=diagnostic_programs(config);let sandbox=if config.execution.backend=="bubblewrap"{sandbox_paths(config,&programs).await?}else{BTreeMap::new()};let rows=programs.iter().map(|program|{let host_path=host_executable(program);let sandbox_path=sandbox.get(program).cloned();let status=if sandbox_path.is_some(){"available"}else if host_path.is_some(){"host-only"}else{"missing"};json!({"program":program,"status":status,"allowed":config.execution.allowed_programs.contains(program),"required":config.execution.required_programs.contains(program),"host_path":host_path,"sandbox_path":sandbox_path})}).collect::<Vec<_>>();let mounts=config.execution.readonly_mounts.iter().map(|m|json!({"source":m.source,"target":m.target,"source_exists":m.source.exists(),"target_allowed":m.target.starts_with("/opt/")||m.target.starts_with("/cache-readonly/")})).collect::<Vec<_>>();Ok(json!({"backend":config.execution.backend,"path":config.execution.path,"namespace_ok":config.execution.backend=="bubblewrap","programs":rows,"readonly_mounts":mounts,"network":config.execution.allow_network,"shell":config.execution.allow_shell}))
 }
+fn job_preflight_programs(program:&str,requested:&[String],shell:bool)->Result<Vec<String>>{if requested.len()>32{bail!("preflight_programs accepts at most 32 program names");}let mut programs=requested.to_vec();if !shell{programs.push(program.to_owned());if program=="cargo"{programs.push("rustc".into());}}for item in &programs{if !simple_program(item){bail!("preflight_programs must contain simple executable names");}}programs.sort();programs.dedup();Ok(programs)}
+pub async fn preflight_job(config:&Config,program:&str,requested:&[String],shell:bool)->Result<Value>{
+    let programs=job_preflight_programs(program,requested,shell)?;if programs.is_empty(){return Ok(json!({"backend":config.execution.backend,"programs":[],"toolchains":{"rust":{"requested":false,"available":false},"postgresql":{"requested":false,"available":false}}}));}
+    let visible:BTreeMap<String,String>=match config.execution.backend.as_str(){"bubblewrap"=>sandbox_paths(config,&programs).await?,"host"=>programs.iter().filter_map(|p|configured_executable(&config.execution.path,p).map(|path|(p.clone(),path.to_string_lossy().into_owned()))).collect(),"disabled"=>return Err(crate::error::coded("JOB_PREFLIGHT_FAILED",false,"execution backend is disabled")),_=>return Err(crate::error::coded("JOB_PREFLIGHT_FAILED",false,"unknown execution backend"))};
+    let missing=programs.iter().filter(|p|!visible.contains_key(*p)).cloned().collect::<Vec<_>>();if !missing.is_empty(){return Err(crate::error::coded_details("JOB_PREFLIGHT_FAILED",false,format!("required job program(s) are not visible in {}: {}",config.execution.backend,missing.join(", ")),json!({"backend":config.execution.backend,"missing":missing,"path":config.execution.path,"requested":programs})));}
+    let rows=programs.iter().map(|p|json!({"program":p,"path":visible.get(p)})).collect::<Vec<_>>();let rust_requested=programs.iter().any(|p|matches!(p.as_str(),"cargo"|"rustc"));let postgres_names=["initdb","postgres","pg_isready","createdb"];let postgres_requested=programs.iter().any(|p|postgres_names.contains(&p.as_str()));let postgres_paths=postgres_names.iter().map(|p|((*p).to_owned(),visible.get(*p).cloned())).collect::<BTreeMap<_,_>>();Ok(json!({"backend":config.execution.backend,"programs":rows,"toolchains":{"rust":{"requested":rust_requested,"available":rust_requested&&visible.contains_key("cargo")&&visible.contains_key("rustc"),"cargo_path":visible.get("cargo"),"rustc_path":visible.get("rustc")},"postgresql":{"requested":postgres_requested,"available":postgres_requested&&postgres_names.iter().all(|p|visible.contains_key(*p)),"paths":postgres_paths}}}))
+}
+
 pub async fn probe_bubblewrap(config:&Config)->Result<Vec<(String,String)>>{
     if config.execution.backend!="bubblewrap"{bail!("Configured execution backend is not bubblewrap");}
     let programs=configured_probe_programs(config);let visible=sandbox_paths(config,&programs).await?;let missing=programs.iter().filter(|p|!visible.contains_key(*p)).cloned().collect::<Vec<_>>();
@@ -129,5 +138,7 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn host_keeps_configured_nproc_limit(){assert_eq!(pre_exec_nproc_limit("host",256),Some(256));}
     #[test]fn required_programs_do_not_grant_run_permission(){let mut c=Config::default();c.execution.required_programs=vec!["postgres".into()];assert!(!c.execution.allowed_programs.contains(&"postgres".to_owned()));}
     #[test]fn diagnostics_always_include_joint_gate_tools(){let c=Config::default();let programs=diagnostic_programs(&c);for program in DIAGNOSTIC_PROGRAMS{assert!(programs.contains(&program.to_owned()));}}
+    #[test]fn cargo_preflight_also_requires_rustc(){assert_eq!(job_preflight_programs("cargo",&[],false).unwrap(),vec!["cargo".to_owned(),"rustc".to_owned()]);}
+    #[test]fn shell_preflight_is_explicit(){assert_eq!(job_preflight_programs("bash",&["postgres".into()],true).unwrap(),vec!["postgres".to_owned()]);}
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
 }

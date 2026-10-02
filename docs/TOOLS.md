@@ -92,15 +92,23 @@ Dashboard 写操作使用相同的 `code / message / retryable / details` JSON�
 `run_command`：
 
 ```json
-{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120,"task_id":"combat-refactor","stage":"validate-core"}
+{"workspace":"projects","project":"mountain_and_sea","program":"cargo","args":["check"],"cwd":".","request_id":"mas-check-001","timeout_seconds":120,"preflight_programs":["cargo","rustc"],"task_id":"combat-refactor","stage":"validate-core"}
 ```
 
-任务立即返回 `job_id`。请求去重键是 `workspace + project + request_id`，因此不同 Project 可以使用相同 request_id 而不会互相复用。`task_id` 与 `stage` 必须同时提供或同时省略；提供后 Job 会自动挂到对应阶段 checkpoint。
+`preflight_programs` 是可选的 Job 前置工具链门禁。EndlessVibe 会在创建 Job ID、占用 command slot、获取 Project lock 和写入 Job 记录之前，在实际执行后端验证这些程序可见；缺失时直接返回结构化 `JOB_PREFLIGHT_FAILED`，不会启动长任务。直接执行 `cargo` 时会自动同时要求 `rustc`。联合 Rust + PostgreSQL 验收可使用：
+
+```json
+{"preflight_programs":["cargo","rustc","initdb","postgres","pg_isready","createdb"]}
+```
+
+preflight 成功结果会随首次响应返回，并持久化在 Job 的 `preflight` 字段中，后续 `get_job` 仍可查看实际 toolchain 路径和 Rust/PostgreSQL 可用状态。
+
+通过 preflight 后任务立即返回 `job_id`。请求去重键是 `workspace + project + request_id`，因此不同 Project 可以使用相同 request_id 而不会互相复用。`preflight_programs` 属于请求指纹的一部分，同一 request_id 不能用不同门禁条件重试。`task_id` 与 `stage` 必须同时提供或同时省略；提供后 Job 会自动挂到对应阶段 checkpoint。
 
 `run_shell`：
 
 ```json
-{"workspace":"projects","project":"BAfter","script":"printf '%s\n' 'hello'; pwd","cwd":".","request_id":"shell-001","timeout_seconds":10}
+{"workspace":"projects","project":"BAfter","script":"printf '%s\n' 'hello'; pwd","cwd":".","request_id":"shell-001","timeout_seconds":10,"preflight_programs":[]}
 ```
 
 `run_shell` 只有在 `execution.allow_shell=true` 时可用。

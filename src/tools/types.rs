@@ -21,9 +21,9 @@ pub struct MakeDirectoryArgs{pub workspace:String,#[serde(default)] pub project:
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct SearchArgs{pub workspace:String,#[serde(default)] pub project: String,pub query:String,#[serde(default="root_path")]pub path:String,#[serde(default)]pub regex:bool,#[serde(default="yes")]pub case_sensitive:bool,#[serde(default="page_size")]pub max_results:usize}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
-pub struct CommandArgs{pub workspace:String,#[serde(default)] pub project: String,pub program:String,#[serde(default)]pub args:Vec<String>,#[serde(default="root_path")]pub cwd:String,pub request_id:String,pub timeout_seconds:Option<u64>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String>}
+pub struct CommandArgs{pub workspace:String,#[serde(default)] pub project: String,pub program:String,#[serde(default)]pub args:Vec<String>,#[serde(default="root_path")]pub cwd:String,pub request_id:String,pub timeout_seconds:Option<u64>,#[serde(default)]pub preflight_programs:Vec<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String>}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
-pub struct ShellArgs{pub workspace:String,#[serde(default)] pub project: String,pub script:String,#[serde(default="root_path")]pub cwd:String,pub request_id:String,pub timeout_seconds:Option<u64>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String>}
+pub struct ShellArgs{pub workspace:String,#[serde(default)] pub project: String,pub script:String,#[serde(default="root_path")]pub cwd:String,pub request_id:String,pub timeout_seconds:Option<u64>,#[serde(default)]pub preflight_programs:Vec<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String>}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct JobArgs{pub job_id:String}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
