@@ -46,8 +46,9 @@
 </section>
 
 <section class="page" data-page="tasks">
-<div class="page-title"><div><p class="eyebrow">RECOVERABLE WORK</p><h2>Tasks / Checkpoints</h2><p>按 task_id 查看阶段、关联 Job 和持久 Git checkpoint；Job 成功不等于阶段完成，只有 committed 表示已形成恢复点。</p></div><span id="tasks-updated">等待数据</span></div>
-<div id="task-board" class="task-board empty-state">暂无 Task checkpoint</div>
+<div class="page-title task-page-title"><div><p class="eyebrow">TASK PROGRESS</p><h2>Tasks</h2><p>查看长期任务的阶段进度、关联 Job 和 Git 恢复点。Job Passed 表示本次执行通过；Checkpointed 表示该阶段已提交 Git，可作为恢复点。</p></div><span id="tasks-updated">等待数据</span></div>
+<div class="task-overview" aria-label="Task summary"><article><span>Tasks</span><strong id="task-count">0</strong></article><article><span>Active</span><strong id="task-active">0</strong></article><article><span>Checkpoints</span><strong id="task-checkpoints">0</strong></article><article><span>Attention</span><strong id="task-attention">0</strong></article></div>
+<div id="task-board" class="task-board empty-state"><strong>暂无可恢复任务</strong><span>只有带 task_id + stage 的 Job 才会记录在这里；普通 Job 仍可在 Activity / Operations 中查看。</span></div>
 </section>
 
 <section class="page" data-page="activity">
@@ -102,6 +103,7 @@
 <section class="config-card"><div class="config-heading"><h3>Server / Dashboard</h3><span>NETWORK</span></div><dl id="config-server" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Security</h3><span>AUTH</span></div><dl id="config-security" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Execution</h3><span>SANDBOX</span></div><dl id="config-execution" class="config-list"></dl></section>
+<section class="config-card full"><div class="config-heading"><h3>Readonly Mounts</h3><span>RESTART REQUIRED</span></div><p class="config-note">直接编辑 <code>[execution].readonly_mounts</code>。Source 必须是宿主机已存在的绝对路径；Target 必须位于 <code>/opt/...</code> 或 <code>/cache-readonly/...</code>。保存只写入配置，不会热重载，重启 EndlessVibe 后生效。</p><div id="readonly-mount-list" class="mount-editor-list"></div><div class="mount-editor-actions"><button type="button" id="readonly-mount-add">Add mount</button><button type="button" id="readonly-mount-save">Save readonly mounts</button><span id="readonly-mount-status" class="write-status" role="status" aria-live="polite"></span></div></section>
 <section class="config-card full"><div class="config-heading"><h3>Sandbox Diagnostics</h3><span id="sandbox-updated">NOT CHECKED</span></div><p class="config-note">只探测基础 bubblewrap namespace 和程序可见性，不挂载 Project、不运行项目代码。</p><div class="config-reload-actions"><button type="button" id="sandbox-check">Check Sandbox</button><span id="sandbox-check-status" class="write-status" role="status" aria-live="polite"></span></div><dl id="config-sandbox-summary" class="config-list"></dl><div id="sandbox-program-list" class="activity-list empty-state">尚未执行 sandbox diagnostics</div></section>
 <section class="config-card"><div class="config-heading"><h3>Limits</h3><span>LIMITS</span></div><dl id="config-limits" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Git</h3><span>IDENTITY</span></div><dl id="config-git" class="config-list"></dl></section>
