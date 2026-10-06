@@ -148,7 +148,7 @@ Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job �
 {"job_id":"真实 Job ID","offset":0,"limit":8192}
 ```
 
-默认每页 8 KiB，单次最多 32 KiB。`get_job` 的终态结果已经包含一个最多 4 KiB 的 output tail；只有排错需要更多上下文时才继续按 `next_offset` 分页读取。完整 ring buffer 仍保存在 EndlessVibe，MCP 分页只是限制单次返回体。
+默认每页 8 KiB，单次最多 32 KiB。成功的终态 `get_job` 会返回 `result_summary`，对 Cargo/Rust 风格的 `test result:` 自动汇总 suite 数、passed/failed/ignored/measured/filtered_out，并不再附带原始 tail；失败/超时/中断仍附带最多 4 KiB 的小 tail。只有诊断确实需要原始日志时才继续按 `next_offset` 分页读取。完整 ring buffer 仍保存在 EndlessVibe，MCP 分页只是限制单次返回体。
 
 `list_jobs` 可以按 Workspace、Project、`task_id` 过滤：
 
