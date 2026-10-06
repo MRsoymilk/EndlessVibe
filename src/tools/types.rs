@@ -45,5 +45,7 @@ pub struct PushArgs{pub workspace:String,#[serde(default)]pub project:String,pub
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct TaskArgs{pub workspace:String,#[serde(default)]pub project:String,pub task_id:String}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
+pub struct ContinueTaskArgs{pub workspace:String,#[serde(default)]pub project:String,#[serde(default)]pub task_id:Option<String>}
+#[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct ListTaskCheckpointsArgs{pub workspace:Option<String>,pub project:Option<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default="twenty")]pub limit:usize}
 fn root_path()->String{".".into()}fn page_size()->usize{200}fn search_page_size()->usize{50}fn first_line()->usize{1}fn one()->usize{1}fn yes()->bool{true}fn twenty()->usize{20}fn output_limit()->usize{8192}fn diff_limit()->usize{16384}

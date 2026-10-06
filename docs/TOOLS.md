@@ -182,7 +182,13 @@ checkpoint 会保留最近 Job ID 及其状态。一个 stage 可以有多个 Jo
 
 阶段完成时，`git_commit` 继续传入相同的 `task_id + stage`。只有 commit 成功后，该阶段才进入 `committed`，并记录 `last_commit`。因此 `job_succeeded` 只表示校验命令完成，不表示整个阶段已经落盘。
 
-stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得当前阶段、最近 Job、最后 durable Git checkpoint 和下一步建议；它只读，不会自动执行或重试：
+stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得当前阶段、最近 Job、最后 durable Git checkpoint 和下一步建议；它只读，不会自动执行或重试。知道 task_id 时可显式指定；只说“继续”时可省略 task_id，让 EndlessVibe 自动选择该 Project 最近更新的 Task：
+
+```json
+{"workspace":"projects","project":"BAfter"}
+```
+
+或：
 
 ```json
 {"workspace":"projects","project":"BAfter","task_id":"release-031"}
