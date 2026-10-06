@@ -182,9 +182,13 @@ checkpoint 会保留最近 Job ID 及其状态。一个 stage 可以有多个 Jo
 
 阶段完成时，`git_commit` 继续传入相同的 `task_id + stage`。只有 commit 成功后，该阶段才进入 `committed`，并记录 `last_commit`。因此 `job_succeeded` 只表示校验命令完成，不表示整个阶段已经落盘。
 
-stream 中断或新会话恢复时：
+stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得当前阶段、最近 Job、最后 durable Git checkpoint 和下一步建议；它只读，不会自动执行或重试：
 
-`get_task_checkpoint`：
+```json
+{"workspace":"projects","project":"BAfter","task_id":"release-031"}
+```
+
+典型 `recommended_action.kind`：`poll_job`、`checkpoint_stage`、`inspect_and_retry`、`start_next_stage`。需要完整阶段历史时再调用 `get_task_checkpoint`：
 
 ```json
 {"workspace":"projects","project":"BAfter","task_id":"release-031"}
@@ -238,7 +242,7 @@ stream 中断或新会话恢复时：
 
 | 工具 | OAuth scopes |
 |---|---|
-| `list_workspaces` / `list_projects` / `inspect_project` / task checkpoint 查询 | `projects:read` |
+| `list_workspaces` / `list_projects` / `inspect_project` / `continue_task` / task checkpoint 查询 | `projects:read` |
 | 文件读取/搜索/目录、Git 查询 | `files:read` |
 | 文件写入/patch/创建目录 | `files:write` |
 | 命令/Shell | `commands:execute` + `files:write` |
