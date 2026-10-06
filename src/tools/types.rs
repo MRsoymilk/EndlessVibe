@@ -20,7 +20,7 @@ pub struct PatchArgs{pub workspace:String,#[serde(default)] pub project: String,
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct MakeDirectoryArgs{pub workspace:String,#[serde(default)] pub project: String,pub path:String}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
-pub struct SearchArgs{pub workspace:String,#[serde(default)] pub project: String,pub query:String,#[serde(default="root_path")]pub path:String,#[serde(default)]pub regex:bool,#[serde(default="yes")]pub case_sensitive:bool,#[serde(default="page_size")]pub max_results:usize}
+pub struct SearchArgs{pub workspace:String,#[serde(default)] pub project: String,pub query:String,#[serde(default="root_path")]pub path:String,#[serde(default)]pub regex:bool,#[serde(default="yes")]pub case_sensitive:bool,#[serde(default="search_page_size")]pub max_results:usize}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct CommandArgs{pub workspace:String,#[serde(default)] pub project: String,pub program:String,#[serde(default)]pub args:Vec<String>,#[serde(default="root_path")]pub cwd:String,pub request_id:String,pub timeout_seconds:Option<u64>,#[serde(default)]pub preflight_programs:Vec<String>,#[serde(default)]pub environment:BTreeMap<String,String>,#[serde(default)]pub network:Option<bool>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String>}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
@@ -32,7 +32,7 @@ pub struct OutputArgs{pub job_id:String,#[serde(default)]pub offset:u64,#[serde(
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct ListJobsArgs{pub workspace:Option<String>,pub project:Option<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default="twenty")]pub limit:usize}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
-pub struct DiffArgs{pub workspace:String,#[serde(default)] pub project: String,#[serde(default)]pub paths:Vec<String>}
+pub struct DiffArgs{pub workspace:String,#[serde(default)] pub project: String,#[serde(default)]pub paths:Vec<String>,#[serde(default)]pub offset:u64,#[serde(default="diff_limit")]pub limit:usize}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct LogArgs{pub workspace:String,#[serde(default)] pub project: String,#[serde(default="twenty")]pub limit:usize}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
@@ -46,4 +46,4 @@ pub struct PushArgs{pub workspace:String,#[serde(default)]pub project:String,pub
 pub struct TaskArgs{pub workspace:String,#[serde(default)]pub project:String,pub task_id:String}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct ListTaskCheckpointsArgs{pub workspace:Option<String>,pub project:Option<String>,#[serde(default)]pub task_id:Option<String>,#[serde(default="twenty")]pub limit:usize}
-fn root_path()->String{".".into()}fn page_size()->usize{200}fn first_line()->usize{1}fn one()->usize{1}fn yes()->bool{true}fn twenty()->usize{20}fn output_limit()->usize{65536}
+fn root_path()->String{".".into()}fn page_size()->usize{200}fn search_page_size()->usize{50}fn first_line()->usize{1}fn one()->usize{1}fn yes()->bool{true}fn twenty()->usize{20}fn output_limit()->usize{8192}fn diff_limit()->usize{16384}

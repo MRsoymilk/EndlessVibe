@@ -88,7 +88,11 @@ readonly_mounts = [
 
 每个 `run_command` / `run_shell` 还可以提供 `preflight_programs`。这些程序会在 **Job ID 创建、command slot 占用、Project lock 获取、Job 持久化之前**在实际执行后端中做可见性检查；缺失时以 `JOB_PREFLIGHT_FAILED` fail-fast，不启动目标命令。直接运行 `cargo` 会自动把 `rustc` 加入门禁。只有在 Job **自行启动本地 PostgreSQL 二进制** 时，才应显式门禁 `initdb,postgres,pg_isready,createdb`。如果数据库由 Docker/宿主开发环境提供，`development` profile 会继承所需的宿主网络/Docker 能力，不应把容器里的服务端二进制误判为 sandbox 本地依赖。成功的 preflight 会记录 `execution_profile`、最终 `network`、`network_source`、工具链路径和 `environment_keys`；环境变量值不会写入该字段。该字段只做环境门禁，不绕过 `allowed_programs` 对顶层 `run_command` 的权限控制。
 
-Job 启动后还会得到 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 下该路径位于当前 Project 的私有 `/cache` 挂载；脚本可以写入 ≤1 MiB JSON object 汇报 database、cleanup、source fingerprint 等验收结果。服务在 Job 终止后读取并脱敏到持久 Job `summary`，记录 `summary_capture` 后删除临时文件；不会把宿主 state 路径返回给客户端，也不会跟随 symlink。
+Job 启动后还会得到 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 下该路径位于当前 Project 的私有 `/cache` 挂载；脚本可以写入 ≤1 MiB JSON object 汇报 database、cleanup、source fingerprint 等验收结果。服务在 Job 终止后读取并脱敏到持久 Job `summary`，记录 `summary_capture` 后删除临时文件；不会把宿主 state 路径返回给客户端，也不会跟随 symlink。持久 summary 可以较大，但默认 MCP `get_job` 只内联至 16 KiB；更大的 summary 返回大小与顶层 keys，避免把长结构重复注入聊天上下文。
+
+## 长会话输出预算
+
+EndlessVibe 的服务端保留量与 MCP 单次返回量分离：Job ring buffer 仍受 `limits.max_output_bytes` 控制，而 `get_job_output` 默认每页 8 KiB、单页最大 32 KiB；`git_diff` 默认 16 KiB、单页最大 32 KiB；`read_file/search_code/git_status` 也有独立的小响应上限。MCP structured result 是事实来源，文本 content 对大结果只返回 ≤2 KiB 的索引摘要，不再重复整份 JSON。长工作应使用稳定 `task_id + stage`，每个阶段完成后形成 Git checkpoint，再继续下一阶段，避免单个 ChatGPT response 连续消费无界工具输出。
 
 白名单并非安全边界：Python、Cargo build script、Makefile、编译器插件等都能执行其他程序。安全限制主要来自隔离环境与管理员授予的 Project 权限。工具描述/确认提示不是 OS 权限控制。
 

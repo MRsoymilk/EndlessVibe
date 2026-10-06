@@ -5,17 +5,17 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 
 pub fn list(w: &Project, a: DirectoryArgs) -> Result<Value> {
-    if a.limit == 0 || a.limit > 1000 { bail!("limit must be 1..1000"); }
+    if a.limit == 0 || a.limit > 200 { bail!("limit must be 1..200"); }
     let entries=w.root.entries(&a.path)?; let total=entries.len();
     let selected=entries.into_iter().skip(a.offset).take(a.limit).map(|e|json!({"name":e.name,"type":e.kind,"bytes":e.bytes})).collect::<Vec<_>>();
     Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"path":a.path,"entries":selected,"total":total,"next_offset":if a.offset.saturating_add(a.limit)<total {Some(a.offset+a.limit)} else {None}}))
 }
 pub fn read(rt: &Runtime, w: &Project, a: ReadArgs) -> Result<Value> {
-    if a.start_line == 0 || a.max_lines == 0 || a.max_lines>5000 { bail!("start_line >= 1 and max_lines 1..5000 are required"); }
+    if a.start_line == 0 || a.max_lines == 0 || a.max_lines>1000 { bail!("start_line >= 1 and max_lines 1..1000 are required"); }
     let bytes=w.root.read(&a.path,rt.config.limits.max_file_bytes)?;
     let content=std::str::from_utf8(&bytes).context("File is not UTF-8 text")?; if content.contains('\0') { bail!("Binary files are not returned as text"); }
-    let lines=content.split_inclusive('\n').collect::<Vec<_>>(); let mut selected=String::new(); let mut count=0;
-    for line in lines.iter().skip(a.start_line-1).take(a.max_lines) { if selected.len()+line.len()>rt.config.limits.max_read_bytes { if count==0 { bail!("A single line exceeds max_read_bytes; increase the configured limit locally"); } break; } selected.push_str(line); count+=1; }
+    let lines=content.split_inclusive('\n').collect::<Vec<_>>(); let mut selected=String::new(); let mut count=0;let response_limit=rt.config.limits.max_read_bytes.min(64*1024);
+    for line in lines.iter().skip(a.start_line-1).take(a.max_lines) { if selected.len()+line.len()>response_limit { if count==0 { bail!("A single line exceeds the 64 KiB MCP read page; split or transform the file locally"); } break; } selected.push_str(line); count+=1; }
     let end=(a.start_line-1).saturating_add(count);
     Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"path":a.path,"sha256":util::digest(&bytes),"size_bytes":bytes.len(),"total_lines":lines.len(),"start_line":a.start_line,"lines_returned":count,"content":selected,"next_line":if end<lines.len(){Some(end+1)}else{None}}))
 }
@@ -55,10 +55,10 @@ pub fn patch(rt: &Runtime, w: &Project, a: PatchArgs) -> Result<Value> {
 }
 pub fn mkdir(w:&Project,a:MakeDirectoryArgs)->Result<Value>{w.write_allowed()?;w.root.create_directory(&a.path)?;Ok(json!({"path":a.path,"created_or_exists":true}))}
 pub fn search(rt:&Runtime,w:&Project,a:SearchArgs)->Result<Value>{
-    if a.query.is_empty() || a.query.len()>4096 || a.max_results==0 || a.max_results>1000 {bail!("query must be 1..4096 bytes and max_results 1..1000");}
+    if a.query.is_empty() || a.query.len()>4096 || a.max_results==0 || a.max_results>200 {bail!("query must be 1..4096 bytes and max_results 1..200");}
     let pattern=if a.regex{a.query.clone()}else{regex::escape(&a.query)};
     let expression=RegexBuilder::new(&pattern).case_insensitive(!a.case_sensitive).size_limit(2*1024*1024).build().context("Invalid or oversized regex")?;
-    let mut queue=VecDeque::from([(a.path,0usize)]);let mut results=Vec::new();let mut visited=0;let mut bytes:usize=0;let mut skipped=0;let mut truncated=false;let mut result_bytes:usize=0;
+    let mut queue=VecDeque::from([(a.path,0usize)]);let mut results=Vec::new();let mut visited=0;let mut bytes:usize=0;let mut skipped=0;let mut truncated=false;let mut result_bytes:usize=0;let response_limit=rt.config.limits.max_output_bytes.min(64*1024);
     'outer:while let Some((directory,depth))=queue.pop_front(){
         if depth>32{truncated=true;continue;}
         for entry in w.root.entries(&directory)?{
@@ -69,7 +69,7 @@ pub fn search(rt:&Runtime,w:&Project,a:SearchArgs)->Result<Value>{
             visited+=1;if visited>rt.config.limits.search_max_files||bytes>=rt.config.limits.search_max_bytes{truncated=true;break 'outer;}
             let data=match w.root.read(&path,rt.config.limits.max_file_bytes){Ok(v)=>v,Err(_)=>{skipped+=1;continue;}};if bytes.saturating_add(data.len())>rt.config.limits.search_max_bytes{truncated=true;break 'outer;}bytes+=data.len();
             let text=match std::str::from_utf8(&data){Ok(s) if !s.contains('\0')=>s,_=>{skipped+=1;continue;}};
-            for (line,content) in text.lines().enumerate(){if expression.is_match(content){let hit=json!({"path":path,"line":line+1,"text":util::bounded_text(content,2048)});let hit_bytes=hit.to_string().len();if result_bytes+hit_bytes>rt.config.limits.max_output_bytes{truncated=true;break 'outer;}result_bytes+=hit_bytes;results.push(hit);if results.len()>=a.max_results{truncated=true;break 'outer;}}}
+            for (line,content) in text.lines().enumerate(){if expression.is_match(content){let hit=json!({"path":path,"line":line+1,"text":util::bounded_text(content,2048)});let hit_bytes=hit.to_string().len();if result_bytes+hit_bytes>response_limit{truncated=true;break 'outer;}result_bytes+=hit_bytes;results.push(hit);if results.len()>=a.max_results{truncated=true;break 'outer;}}}
         }
     }
     Ok(json!({"matches":results,"files_examined":visited,"bytes_examined":bytes,"skipped":skipped,"truncated":truncated}))

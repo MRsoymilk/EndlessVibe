@@ -145,8 +145,10 @@ Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job �
 `get_job_output`：
 
 ```json
-{"job_id":"真实 Job ID","offset":0,"limit":65536}
+{"job_id":"真实 Job ID","offset":0,"limit":8192}
 ```
+
+默认每页 8 KiB，单次最多 32 KiB。`get_job` 的终态结果已经包含一个最多 4 KiB 的 output tail；只有排错需要更多上下文时才继续按 `next_offset` 分页读取。完整 ring buffer 仍保存在 EndlessVibe，MCP 分页只是限制单次返回体。
 
 `list_jobs` 可以按 Workspace、Project、`task_id` 过滤：
 
@@ -155,6 +157,8 @@ Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job �
 ```
 
 终态包括 `succeeded`、`failed`、`timed_out`、`cancelled`、`interrupted`。
+
+为降低长会话发生 stream/input 错误的概率，MCP 大结果采用“小响应、服务端保留完整数据”的模型：成功结果不再把完整 JSON 同时复制到 text content；`read_file` 单页最多 64 KiB / 1000 行，`search_code` 默认 50 条且单响应最多 200 条 / 64 KiB，`git_status` 最多返回 200 个变更项并给出 `total_entries/truncated`。需要更多内容时使用分页或更窄查询，而不是一次取完整日志、diff 或搜索结果。
 
 ## 长任务 Checkpoint
 
@@ -207,10 +211,10 @@ stream 中断或新会话恢复时：
 `git_diff`：
 
 ```json
-{"workspace":"projects","project":"BAfter","paths":["src/example.cpp","README.md"]}
+{"workspace":"projects","project":"BAfter","paths":["src/example.cpp","README.md"],"offset":0,"limit":16384}
 ```
 
-返回 `head`、明确的 `paths`、`diff` 和 `diff_sha256`。
+返回 `head`、明确的 `paths`、稳定 `diff_sha256`、`added_lines/removed_lines`、`total_bytes`、当前 `diff` 分页以及 `next_offset/has_more`。默认 16 KiB、单页最多 32 KiB；`has_more=true` 时应继续分页审查，所有页面共享同一个 review token，然后再 `git_commit`。
 
 `git_commit`：
 
