@@ -168,7 +168,9 @@ Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job �
 {"workspace":"projects","project":"BAfter","task_id":"bafter-fft-improvements","stage":"inspect"}
 ```
 
-之后所有文件读写、搜索、Git 查询、Job 提交与 Git commit 均可带相同的 `task_id + stage`，EndlessVibe 会记录相关 Operation ID、状态和 Job ID（每个 Stage 最近最多 40 个 Operation / 20 个 Job）。不传上下文的普通读取仍只出现在 Activity / Operations，不会误关联到别的聊天任务。`start_task` 只创建元数据、不运行代码、不创建 Git checkpoint。
+之后所有文件读写、搜索、Git 查询、Job 提交与 Git commit 均可带相同的 `task_id + stage`，EndlessVibe 会记录相关 Operation ID、状态和 Job ID（每个 Stage 最近最多 40 个 Operation / 20 个 Job）。不传上下文的普通读取仍只出现在 Activity / Operations，不会误关联到别的聊天任务。`start_task` 只创建元数据、不运行代码、不创建 Git checkpoint。Stage 状态在 SQLite 事务中更新；成功提交后即使有迟到的 Job 回报，也不会抹掉已有的 committed 恢复点。
+
+Dashboard 的 `/api/tasks?limit=120&auto_limit=20` 独立分页两类记录：优先返回最多 120 个显式多阶段 Stage，再附上最近 20 个独立 Auto Job；返回 `total_explicit_tasks`、`total_explicit_stages`、`total_auto_jobs` 和截断标志，不再让大量 Auto Job 挤掉真正的 Task。Auto Job 的名称来自保留 Job 的 `program / request_id`，完整 Activity / Job 记录不因此被改写。
 
 跨轮次的工作使用稳定 `task_id`，每个可独立审查的小阶段使用独立 `stage`：
 
