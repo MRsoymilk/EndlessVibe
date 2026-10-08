@@ -178,6 +178,8 @@ release-031
 {"task_id":"release-031","stage":"validate"}
 ```
 
+如果 `run_command/run_shell` 未提供 `task_id + stage`，EndlessVibe 会为该 Job 生成唯一的 `auto-job-<job_id>` Task（stage `execute`），让 Tasks 页面显示独立执行而不把不同聊天的 Job 错误合并。服务重启时，仍在保留期内且没有 Task 的旧 Job 也会按原始时间回填；原有 Activity 不修改。此类自动 Job 即使 succeeded 也不会视为 Git checkpoint，`continue_task` 会给出 `job_complete` 提示。真正的多阶段工作仍应显式使用同一个 task_id。
+
 checkpoint 会保留最近 Job ID 及其状态。一个 stage 可以有多个 Job，默认最多保留该阶段最近 20 个 Job 引用。
 
 阶段完成时，`git_commit` 继续传入相同的 `task_id + stage`。只有 commit 成功后，该阶段才进入 `committed`，并记录 `last_commit`。因此 `job_succeeded` 只表示校验命令完成，不表示整个阶段已经落盘。
