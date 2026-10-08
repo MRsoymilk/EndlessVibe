@@ -24,6 +24,8 @@ pub async fn update_readonly_mounts(State(rt):State<Arc<Runtime>>,Json(request):
 pub async fn update_git(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateGitRequest>)->Response{mutation_response(rt.dashboard_update_git(request))}
 pub async fn update_limits(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateLimitsRequest>)->Response{mutation_response(rt.dashboard_update_limits(request))}
 pub async fn storage_maintenance(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_storage_maintenance())}
+pub async fn storage_cache_cleanup(State(rt):State<Arc<Runtime>>,Json(request):Json<crate::storage::CleanupRequest>)->Response{mutation_response(rt.dashboard_storage_cache_cleanup(request).await)}
+pub async fn storage_compact(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_storage_compact().await)}
 pub async fn storage_health(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_storage_health(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":crate::error::payload(&error)}))).into_response()}}
 pub async fn sandbox_diagnostics(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_sandbox_diagnostics().await{Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":crate::error::payload(&error)}))).into_response()}}
 #[derive(Deserialize)]pub struct TasksQuery{pub limit:Option<usize>,pub auto_limit:Option<usize>}
@@ -40,7 +42,7 @@ fn mutation_response(result:anyhow::Result<Value>)->Response{
     match result{
         Ok(value)=>Json(value).into_response(),
         Err(error)=>{
-            let status=match crate::error::code(&error){"CONFIG_CONFLICT"|"FILE_CONFLICT"|"PATCH_CONFLICT"|"GIT_CONFLICT"|"STAGED_CONFLICT"|"PROJECT_BUSY"|"GIT_BUSY"|"IDEMPOTENCY_CONFLICT"|"RELOAD_RESTART_REQUIRED"=>StatusCode::CONFLICT,"PROJECT_READ_ONLY"|"PROJECT_EXEC_DISABLED"|"GIT_COMMIT_DISABLED"|"GIT_PUSH_DISABLED"=>StatusCode::FORBIDDEN,"WORKSPACE_NOT_AUTHORIZED"|"PROJECT_NOT_AUTHORIZED"=>StatusCode::NOT_FOUND,_=>StatusCode::BAD_REQUEST};
+            let status=match crate::error::code(&error){"CONFIG_CONFLICT"|"FILE_CONFLICT"|"PATCH_CONFLICT"|"GIT_CONFLICT"|"STAGED_CONFLICT"|"PROJECT_BUSY"|"GIT_BUSY"|"CACHE_BUSY"|"IDEMPOTENCY_CONFLICT"|"RELOAD_RESTART_REQUIRED"=>StatusCode::CONFLICT,"PROJECT_READ_ONLY"|"PROJECT_EXEC_DISABLED"|"GIT_COMMIT_DISABLED"|"GIT_PUSH_DISABLED"=>StatusCode::FORBIDDEN,"WORKSPACE_NOT_AUTHORIZED"|"PROJECT_NOT_AUTHORIZED"=>StatusCode::NOT_FOUND,_=>StatusCode::BAD_REQUEST};
             (status,Json(crate::error::payload(&error))).into_response()
         }
     }

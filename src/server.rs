@@ -49,6 +49,8 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/storage",get(web::storage_health))
         .route("/api/sandbox",get(web::sandbox_diagnostics))
         .route("/api/storage/maintenance",post(web::storage_maintenance))
+        .route("/api/storage/cleanup",post(web::storage_cache_cleanup))
+        .route("/api/storage/compact",post(web::storage_compact))
         .route("/api/projects/status",get(web::project_states))
         .route("/api/tasks",get(web::tasks))
         .route("/api/operations",get(web::operations))

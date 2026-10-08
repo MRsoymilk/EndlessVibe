@@ -109,6 +109,12 @@ allow_shell = false
 
 初次初始化的 `--unsafe-host-exec` 是等价的显式危险选项，默认不启用。服务禁止 root；不要为排错自行删除这个检查。需要面对不可信代码时使用独立用户/VM/经审计的容器执行器，而非本模式。
 
+## Dashboard 在线 Git / Limits 与 Storage Health
+
+Config 页面支持在线编辑 `[git]`（executable、author_name、author_email）和 `[limits]`（文件、输出、Job、超时、搜索与保留上限）。两者使用完整配置校验、`expected_revision` 乐观锁和原子替换 `config.toml`，尽量保留 TOML 注释。保存成功标记 `requires_restart=true`，只修改持久配置，不会在运行中修改已创建的 Job/Git 环境。对应本地 PUT 接口为 `/api/config/git` 和 `/api/config/limits`。
+
+Storage Health 将 SQLite / Backups / exec-cache 分开展示。`/api/storage/maintenance` 只清理过期记录；`/api/storage/compact` 先清理记录，再通过 WAL checkpoint + SQLite VACUUM 回收数据库闲置页面。`/api/storage/cleanup` 只接受 `scope=exec_cache` 和明确的确认口令，由 Dashboard 二次确认后发送，清理的唯一根目录是服务自有状态目录中的 `exec-cache`。不会删除 Backups、配置、Git、项目源码或 SQLite；清理后 Cargo、CMake 等缓存需要重新构建。清理只对无正在执行/提交中 Job 的服务开放，缓存读写门闩阻止清理过程中提交新 Job；运行时检测到冲突返回 `CACHE_BUSY` (409)。目录根拒绝符号链接，清理目录时不跟随符号链接。容量扫描最多 20,000 个节点；扫描截断时只是已扫描部分的下限，清理后应重新读取 `/api/storage`。
+
 ## 配置热重载
 
 Dashboard 的 Project 新增与权限修改在写入并完整验证 `config.toml` 后，会立即重建 Workspace/Project 授权表并原子替换 Runtime 中的新操作视图，无需重启服务。手工编辑配置后也可以在 Config 页面执行 `Reload project config`，对应本地 `POST /api/config/reload`。
