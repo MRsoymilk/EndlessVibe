@@ -162,7 +162,15 @@ Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job �
 
 ## 长任务 Checkpoint
 
-对可能跨多轮 ChatGPT stream 的工作，使用一个稳定 `task_id`，每个可独立审查的小阶段使用一个 `stage`：
+对可能跨多轮 ChatGPT stream 的工作，先调用 `start_task` 创建或复用明确归属的 Task Stage（同一 task_id/stage 重复调用不会重置已完成阶段）：
+
+```json
+{"workspace":"projects","project":"BAfter","task_id":"bafter-fft-improvements","stage":"inspect"}
+```
+
+之后所有文件读写、搜索、Git 查询、Job 提交与 Git commit 均可带相同的 `task_id + stage`，EndlessVibe 会记录相关 Operation ID、状态和 Job ID（每个 Stage 最近最多 40 个 Operation / 20 个 Job）。不传上下文的普通读取仍只出现在 Activity / Operations，不会误关联到别的聊天任务。`start_task` 只创建元数据、不运行代码、不创建 Git checkpoint。
+
+跨轮次的工作使用稳定 `task_id`，每个可独立审查的小阶段使用独立 `stage`：
 
 ```text
 release-031
@@ -184,7 +192,7 @@ checkpoint 会保留最近 Job ID 及其状态。一个 stage 可以有多个 Jo
 
 阶段完成时，`git_commit` 继续传入相同的 `task_id + stage`。只有 commit 成功后，该阶段才进入 `committed`，并记录 `last_commit`。因此 `job_succeeded` 只表示校验命令完成，不表示整个阶段已经落盘。
 
-stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得当前阶段、最近 Job、最后 durable Git checkpoint 和下一步建议；它只读，不会自动执行或重试。知道 task_id 时可显式指定；只说“继续”时可省略 task_id，让 EndlessVibe 自动选择该 Project 最近更新的 Task：
+stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得当前阶段、最近 Job、最后 durable Git checkpoint 和下一步建议；它只读，不会自动执行或重试。知道 task_id 时可显式指定；只说“继续”时可省略 task_id，优先恢复 Project 最近的显式多阶段 Task，若没有才选择最新 Auto Job：
 
 ```json
 {"workspace":"projects","project":"BAfter"}
@@ -253,6 +261,7 @@ stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得
 | `list_workspaces` / `list_projects` / `inspect_project` / `continue_task` / task checkpoint 查询 | `projects:read` |
 | 文件读取/搜索/目录、Git 查询 | `files:read` |
 | 文件写入/patch/创建目录 | `files:write` |
+| `start_task` | `commands:execute` |
 | 命令/Shell | `commands:execute` + `files:write` |
 | Job 查询/取消 | `commands:execute` |
 | Git commit | `git:write` + `files:write` |

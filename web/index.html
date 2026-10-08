@@ -46,9 +46,9 @@
 </section>
 
 <section class="page" data-page="tasks">
-<div class="page-title task-page-title"><div><p class="eyebrow">TASK PROGRESS</p><h2>Tasks</h2><p>查看长期任务的阶段进度、关联 Job 和 Git 恢复点。Job Passed 表示本次执行通过；Checkpointed 表示该阶段已提交 Git，可作为恢复点。</p></div><span id="tasks-updated">等待数据</span></div>
-<div class="task-overview" aria-label="Task summary"><article><span>Tasks</span><strong id="task-count">0</strong></article><article><span>Active</span><strong id="task-active">0</strong></article><article><span>Checkpoints</span><strong id="task-checkpoints">0</strong></article><article><span>Attention</span><strong id="task-attention">0</strong></article></div>
-<div id="task-board" class="task-board empty-state"><strong>暂无可恢复任务</strong><span>只有带 task_id + stage 的 Job 才会记录在这里；普通 Job 仍可在 Activity / Operations 中查看。</span></div>
+<div class="page-title task-page-title"><div><p class="eyebrow">TASK PROGRESS</p><h2>Tasks</h2><p>多阶段 Task 关联 Jobs、Operations 和 Git 恢复点。未归属的执行自动记录为独立 Auto Job，不会自动混入其他会话的 Task；只有 Checkpointed 代表可恢复的 Git 提交。</p></div><span id="tasks-updated">等待数据</span></div>
+<div class="task-overview" aria-label="Task summary"><article><span>Tasks</span><strong id="task-count">0</strong></article><article><span>Active</span><strong id="task-active">0</strong></article><article><span>Auto Jobs</span><strong id="task-autojobs">0</strong></article><article><span>Checkpoints</span><strong id="task-checkpoints">0</strong></article><article><span>Attention</span><strong id="task-attention">0</strong></article></div>
+<div id="task-board" class="task-board empty-state"><strong>暂无 Task 或 Job</strong><span>首次运行或尚未执行 Job。使用 start_task 建立多阶段任务；没有关联信息的 Job 会自动创建独立 Task。</span></div>
 </section>
 
 <section class="page" data-page="activity">
