@@ -24,7 +24,11 @@ pub fn prune_common(tx:&Transaction<'_>,now:u64)->Result<RetentionStats>{
     let task_checkpoints=tx.execute(
         "DELETE FROM kv WHERE namespace='task_checkpoints' AND key IN (
             SELECT key FROM kv WHERE namespace='task_checkpoints'
-            ORDER BY CAST(json_extract(value,'$.updated') AS INTEGER) DESC, rowid DESC
+            ORDER BY CASE
+                WHEN COALESCE(json_extract(value,'$.origin'),'explicit')!='auto_job' THEN 0
+                WHEN json_extract(value,'$.status') IN ('pending','running') THEN 1
+                ELSE 2 END,
+                CAST(json_extract(value,'$.updated') AS INTEGER) DESC, rowid DESC
             LIMIT -1 OFFSET ?1
         )",
         [MAX_TASK_CHECKPOINTS],
@@ -66,6 +70,19 @@ pub fn prune_jobs(tx:&Transaction<'_>,retained_jobs:usize)->Result<usize>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn retention_prioritizes_explicit_and_running_stages_over_auto_job_history(){
+        let mut c=rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE kv(namespace TEXT,key TEXT,value TEXT,expires INTEGER,PRIMARY KEY(namespace,key));CREATE TABLE jobs(id TEXT PRIMARY KEY,data TEXT,output BLOB DEFAULT X'',output_offset INTEGER DEFAULT 0);CREATE TABLE audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,time INTEGER,tool TEXT,workspace TEXT,outcome TEXT,note TEXT);CREATE TABLE traffic(bucket INTEGER PRIMARY KEY,requests INTEGER,rx_bytes INTEGER,tx_bytes INTEGER);CREATE TABLE operation_log(seq INTEGER PRIMARY KEY AUTOINCREMENT,started INTEGER,finished INTEGER,tool TEXT,workspace TEXT,project TEXT,status TEXT,duration_ms INTEGER,input_json TEXT,output_json TEXT,diff TEXT,added_lines INTEGER,removed_lines INTEGER,error TEXT);").unwrap();
+        let tx=c.transaction().unwrap();
+        tx.execute("INSERT INTO kv(namespace,key,value,expires) VALUES('task_checkpoints','durable',?1,0)",[serde_json::json!({"origin":"explicit","status":"committed","updated":1}).to_string()]).unwrap();
+        tx.execute("INSERT INTO kv(namespace,key,value,expires) VALUES('task_checkpoints','active-auto',?1,0)",[serde_json::json!({"origin":"auto_job","status":"running","updated":1}).to_string()]).unwrap();
+        for n in 0..MAX_TASK_CHECKPOINTS+5{tx.execute("INSERT INTO kv(namespace,key,value,expires) VALUES('task_checkpoints',?1,?2,0)",params![format!("auto-{n}"),serde_json::json!({"origin":"auto_job","status":"succeeded","updated":n+10}).to_string()]).unwrap();}
+        let stat=prune_common(&tx,MAX_TASK_CHECKPOINTS as u64+20).unwrap();assert_eq!(stat.task_checkpoints,7);
+        let remaining:i64=tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='task_checkpoints'",[],|r|r.get(0)).unwrap();assert_eq!(remaining,MAX_TASK_CHECKPOINTS);
+        for key in ["durable","active-auto"]{assert_eq!(tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='task_checkpoints' AND key=?1",[key],|r|r.get::<_,i64>(0)).unwrap(),1);}
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='task_checkpoints' AND key='auto-0'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
     #[test]
     fn retention_preserves_running_operations_and_jobs(){
         let mut c=rusqlite::Connection::open_in_memory().unwrap();
