@@ -71,6 +71,7 @@ impl Config {
         if !(60..=86400).contains(&self.security.access_token_seconds) || !(3600..=90 * 86400).contains(&self.security.refresh_token_seconds) { bail!("Invalid OAuth token lifetime"); }
         if !(1..=16).contains(&self.limits.max_jobs) || !(1..=1000).contains(&self.limits.retained_jobs) || !(1..=3600).contains(&self.limits.command_timeout_seconds) { bail!("Invalid job/timeout limits"); }
         if !(4096..=16 * 1024 * 1024).contains(&self.limits.max_file_bytes) || self.limits.max_read_bytes == 0 || self.limits.max_read_bytes > self.limits.max_file_bytes || !(4096..=8 * 1024 * 1024).contains(&self.limits.max_output_bytes) { bail!("Invalid file/output limits"); }
+        if !(1..=100_000).contains(&self.limits.search_max_files) || !(4096..=1024 * 1024 * 1024).contains(&self.limits.search_max_bytes){bail!("search limits must be 1..100000 files and 4096..1073741824 bytes");}
         if !matches!(self.execution.backend.as_str(), "bubblewrap" | "host" | "disabled") { bail!("execution.backend must be bubblewrap, host, or disabled"); }
         if self.execution.backend == "host" && !self.execution.acknowledge_unsafe_host_execution { bail!("Host execution requires acknowledge_unsafe_host_execution=true; it has all permissions of the service account"); }
         if self.execution.path.split(':').any(|p| p.is_empty() || !Path::new(p).is_absolute()) { bail!("execution.path must contain only absolute PATH entries"); }
@@ -101,6 +102,7 @@ impl Config {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]fn search_resource_limits_are_bounded(){let mut c=Config::default();assert!(c.validate().is_ok());c.limits.search_max_files=0;assert!(c.validate().is_err());c.limits.search_max_files=100001;assert!(c.validate().is_err());c.limits.search_max_files=5000;c.limits.search_max_bytes=1024*1024*1024+1;assert!(c.validate().is_err());}
     #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, "bubblewrap"); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }

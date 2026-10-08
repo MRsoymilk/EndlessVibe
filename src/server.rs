@@ -44,6 +44,8 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/config",get(web::config))
         .route("/api/config/reload",post(web::reload_config))
         .route("/api/config/execution/readonly-mounts",put(web::update_readonly_mounts))
+        .route("/api/config/git",put(web::update_git))
+        .route("/api/config/limits",put(web::update_limits))
         .route("/api/storage",get(web::storage_health))
         .route("/api/sandbox",get(web::sandbox_diagnostics))
         .route("/api/storage/maintenance",post(web::storage_maintenance))
