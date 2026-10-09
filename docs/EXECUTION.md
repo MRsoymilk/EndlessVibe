@@ -31,9 +31,30 @@ bubblewrap sandbox probe: ok (9 configured programs visible)
 
 每个两层 Project 可设置 `execution_profile = "isolated" | "development"`。`isolated` 是兼容旧行为的默认值：bubblewrap 使用独立网络 namespace，只有管理员全局开启 `execution.allow_network=true` 后，单个 Job 才能用 `network=true` 覆盖。`development` 面向本人控制的受信开发仓库：Job 未指定 `network` 时默认共享宿主网络，因此 `127.0.0.1`、Docker 发布端口和本机开发服务可直接访问；Job 仍可显式 `network=false` 临时收紧。
 
-`development` 还会在宿主机存在 Docker Unix socket 且本次 Job 使用网络时，将该 socket 映射为 `/run/endlessvibe/docker.sock` 并自动设置 `DOCKER_HOST`。这样项目原有的 `docker` / Compose 驱动测试可直接工作，不需要每次把数据库 URL、Docker socket 或网络参数写进 MCP 调用。**Docker socket 基本等价于该 Docker daemon 的控制权限**，因此只能给完全信任的开发 Project 使用；不可信代码必须保持 `isolated`。
+Docker socket 不再因为 `development` profile 而自动暴露。默认 `docker.allow_project_socket=false`，普通 Job 不会挂载 Docker socket 或注入 `DOCKER_HOST`。如需让完全信任的测试脚本直接操作 Docker，可在 Docker 配置中单独启用 `allow_project_socket=true`；这会允许该类 Job 通过任意程序/脚本绕开 Docker MCP 的容器白名单，应视为宿主级高权限授权，不建议开启。默认使用下文专用 Docker MCP 工具。
 
 Project 还可配置一次性的 `environment = ["NAME=value", ...]`；这些变量会自动注入每个 Job，Job 的 `environment` 只作为同名覆盖。Project/API/Dashboard 摘要只显示变量名，operation input 和 config diff 都不记录变量值。对于 Docker 中的 PostgreSQL、Redis、MySQL、HTTP API 等，如果项目自己的验证脚本已经负责创建/发现容器，通常只需 `development` profile；若服务由外部单独管理，再把连接 URL 放到 Project environment，而不是每次调用重复传入。
+
+## Docker MCP 专用工具（不依赖 Docker CLI）
+
+Docker Engine 通过 Unix socket HTTP API 访问，不需要在 `execution.allowed_programs` 添加 `docker`。默认全部关闭，先在本地 `http://127.0.0.1:20001/config` 的 Docker MCP 卡片保存设置，并**重启服务**；或在 `config.toml` 中加入：
+
+```toml
+[docker]
+enabled = true
+socket = "/var/run/docker.sock"
+allowed_containers = ["endlessvibe"]
+allow_start = false
+allow_stop = false
+allow_restart = true
+allow_project_socket = false
+```
+
+将 `allowed_containers` 替换成实际 Docker 容器的**完整精确名称**；不支持通配符、路径、任意容器 ID 或用户输入的 Docker API URL。读取能力：`docker_list`、`docker_inspect`、`docker_logs`、`docker_stats`、`docker_compose`（只读、按白名单过滤的 Compose 项目列表）；修改能力：`docker_start`、`docker_stop`、`docker_restart`，分别由配置标志单独控制，并要求该调用的 `confirm=true`。没有创建、删除、运行任意命令或任意 Docker API 路由。
+
+独立 OAuth scope 为 `docker:read` 和 `docker:write`；需要 ChatGPT 重新授权新 scope（客户端若缓存旧 schema，需重新连接插件）。容器详情只返回非敏感字段，环境变量、容器标签原文、宿主挂载源路径和其他特权信息会过滤；日志默认最近 200 行、最多 1000 行且结果限 64 KiB，可能包含敏感信息，**Docker 日志正文不会保存进操作日志数据库**。HTTP 响应受大小及超时限制。Docker Engine socket 本身依然可能具备宿主机管理权限；以上是 MCP 服务级的操作约束，不能代替 Docker daemon 或 OS 级授权。
+
+若 EndlessVibe 自身运行在待重启容器内，通过同一 MCP 连接重启自身可能使连接中断；检测到容器 ID 与当前容器 `HOSTNAME` 匹配时将拒绝这种操作。请通过独立 supervisor/其他容器或宿主机管理服务重启自身，不应向调用方虚报成功。
 
 ## 工具链自动发现与手工覆盖
 

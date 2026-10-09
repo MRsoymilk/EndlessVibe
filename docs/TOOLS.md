@@ -33,6 +33,22 @@ Project   = Workspace 下的实际操作单元
 
 Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project 根目录。
 
+## Docker Engine（管理员白名单）
+
+独立 Docker MCP 工具需要显式 `[docker]` 配置以及对应 OAuth scope；它们不使用 Project 定位，也不通过 `run_command`/Shell 转发 Docker 命令。只读工具：`docker_list`（可选 `limit`）、`docker_inspect`（`container`）、`docker_logs`（`container`、`tail` 默认 200 / 最大 1000、`timestamps`）、`docker_stats`（`container`）、`docker_compose`（`project`、可选 `limit`）。例如：
+
+```json
+{"container":"endlessvibe","tail":100,"timestamps":true}
+```
+
+变更工具：`docker_start`、`docker_stop`、`docker_restart`。必须给出精确的、列在 `docker.allowed_containers` 中的容器名称，并显式确认：
+
+```json
+{"container":"endlessvibe","confirm":true}
+```
+
+只有对应的配置 `allow_start/allow_stop/allow_restart=true` 才会执行。`docker:read` 与 `docker:write` OAuth scopes 独立；容器白名单由服务器在操作前检查。Docker socket 基本等价于宿主管理员权限，默认禁用 MCP 与 Project 直连 socket。实现见 `docs/EXECUTION.md`。
+
 ## 结构化错误
 
 MCP 工具失败时仍保留人类可读的文本错误，同时 `structuredContent` 返回稳定结构：
@@ -264,6 +280,8 @@ stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得
 | 文件读取/搜索/目录、Git 查询 | `files:read` |
 | 文件写入/patch/创建目录 | `files:write` |
 | `start_task` | `commands:execute` |
+| Docker 状态/日志/统计/Compose 只读 | `docker:read` |
+| Docker start/stop/restart | `docker:write` + 容器白名单 + 显式确认 |
 | 命令/Shell | `commands:execute` + `files:write` |
 | Job 查询/取消 | `commands:execute` |
 | Git commit | `git:write` + `files:write` |

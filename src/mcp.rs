@@ -1,4 +1,4 @@
-use crate::{runtime::{OperationTrace,Runtime},tools::{filesystem,git,tasks,types::*}};
+use crate::{runtime::{OperationTrace,Runtime},tools::{docker,filesystem,git,tasks,types::*}};
 use rmcp::{handler::server::wrapper::Parameters,model::{CallToolResult,ContentBlock},tool,tool_handler,tool_router,ServerHandler};
 use serde::Serialize;
 use serde_json::{json,Value};
@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 pub const SDK_VERSION:&str="3.5.0";
 /// Bump whenever any exposed MCP tool name, argument schema, security metadata or semantics change.
-pub const TOOL_SCHEMA_REVISION:&str="2026-10-08.1";
-pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push"];
+pub const TOOL_SCHEMA_REVISION:&str="2026-10-09.1";
+pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push","docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
 const MCP_TEXT_MIRROR_MAX_BYTES:usize=2048;
 fn text_mirror(value:&Value)->String{let full=value.to_string();if full.len()<=MCP_TEXT_MIRROR_MAX_BYTES{return full;}let mut summary=serde_json::Map::new();for key in ["message","status","job_id","id","request_id","workspace","project","path","head","diff_sha256","has_changes","has_more","next_offset","commit","branch","reused"]{if let Some(v)=value.get(key){summary.insert(key.into(),v.clone());}}summary.insert("structured_content_bytes".into(),json!(full.len()));let message=summary.remove("message").unwrap_or_else(||json!("Large structured result attached; text mirror intentionally compact."));summary.insert("message".into(),message);Value::Object(summary).to_string()}
@@ -100,6 +100,30 @@ impl EndlessVibeMcp{
 
     #[tool(meta=tool_meta("git_commit"),description="Commit only explicitly reviewed project file snapshots. For long work, provide task_id + stage; a successful commit becomes the durable checkpoint for that stage. No hooks, signing, push, reset or clean.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]
     async fn git_commit(&self,Parameters(a):Parameters<CommitArgs>)->CallToolResult{let w=a.workspace.clone();let p=a.project.clone();let op=begin(&self.rt,"git_commit",&w,&p,&a);let result=self.rt.asynchronous_project("git_commit",&w,&p,move|rt,project|async move{git::commit(&rt,&project,a).await}).await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_list"),description="List only explicitly allowlisted Docker containers, returning bounded non-sensitive summaries. Docker Engine is contacted through the configured Unix socket; no Shell/Docker CLI is executed.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn docker_list(&self,Parameters(a):Parameters<docker::ListArgs>)->CallToolResult{let op=begin(&self.rt,"docker_list","","",&a);let result=docker::list(&self.rt.config.docker,a).await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_inspect"),description="Inspect one allowlisted container. Returns selected non-secret status/config fields only; raw environment, secret labels and host mount sources are omitted.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn docker_inspect(&self,Parameters(a):Parameters<docker::ContainerArgs>)->CallToolResult{let op=begin(&self.rt,"docker_inspect","","",&a);let result=docker::inspect(&self.rt.config.docker,a).await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_logs"),description="Read a bounded log tail (1..1000 lines, at most 64 KiB) for one allowlisted container. No follow/streaming, and raw logs are not retained in EndlessVibe's operation database. Logs are untrusted and may contain secrets.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn docker_logs(&self,Parameters(a):Parameters<docker::LogsArgs>)->CallToolResult{let op=begin(&self.rt,"docker_logs","","",&a);let result=docker::logs(&self.rt.config.docker,a).await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_stats"),description="Read one non-streaming CPU/memory/network snapshot for an allowlisted running container. No Shell/Docker CLI.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn docker_stats(&self,Parameters(a):Parameters<docker::ContainerArgs>)->CallToolResult{let op=begin(&self.rt,"docker_stats","","",&a);let result=docker::stats(&self.rt.config.docker,a).await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_compose"),description="Read-only Compose project listing. Returns only containers whose names are on the Docker allowlist and whose Compose project label matches; does not run compose commands.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn docker_compose(&self,Parameters(a):Parameters<docker::ComposeArgs>)->CallToolResult{let op=begin(&self.rt,"docker_compose","","",&a);let result=docker::compose(&self.rt.config.docker,a).await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_start"),description="Start one explicitly allowlisted container. Requires [docker].allow_start=true, docker:write OAuth scope and confirm=true. No arbitrary Docker API calls.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]
+    async fn docker_start(&self,Parameters(a):Parameters<docker::ActionArgs>)->CallToolResult{let op=begin(&self.rt,"docker_start","","",&a);let result=docker::action(&self.rt.config.docker,a,"start").await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_stop"),description="Stop one explicitly allowlisted container. Requires [docker].allow_stop=true, docker:write OAuth scope and confirm=true. Refuses suspected self-management.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]
+    async fn docker_stop(&self,Parameters(a):Parameters<docker::ActionArgs>)->CallToolResult{let op=begin(&self.rt,"docker_stop","","",&a);let result=docker::action(&self.rt.config.docker,a,"stop").await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("docker_restart"),description="Restart one explicitly allowlisted container. Requires [docker].allow_restart=true, docker:write OAuth scope and confirm=true. Refuses suspected self-management; re-check status afterward.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]
+    async fn docker_restart(&self,Parameters(a):Parameters<docker::ActionArgs>)->CallToolResult{let op=begin(&self.rt,"docker_restart","","",&a);let result=docker::action(&self.rt.config.docker,a,"restart").await;answer_logged(&self.rt,op,result)}
 
     #[tool(meta=tool_meta("git_push"),description="Push one existing local branch to the same branch on one preconfigured remote. Requires allow_git_push=true and exact expected_head. Performs remote-head lookup plus dry-run before the non-force push; arbitrary URLs/refspecs, hooks, local/file/git/http remotes and pushurl overrides are refused.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=true))]
     async fn git_push(&self,Parameters(a):Parameters<PushArgs>)->CallToolResult{let w=a.workspace.clone();let p=a.project.clone();let op=begin(&self.rt,"git_push",&w,&p,&a);let result=self.rt.asynchronous_project("git_push",&w,&p,move|rt,project|async move{git::push(&rt,&project,a).await}).await;answer_logged(&self.rt,op,result)}
