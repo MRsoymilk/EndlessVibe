@@ -1,5 +1,5 @@
 use crate::{mcp::EndlessVibeMcp,runtime::Runtime,security::auth,web};
-use axum::{body::{to_bytes,Body,HttpBody},extract::{DefaultBodyLimit,Request,State},http::{header,HeaderValue,Method,StatusCode},middleware::{self,Next},response::{IntoResponse,Response},routing::{get,patch,post},Router};
+use axum::{body::{to_bytes,Body,HttpBody},extract::{DefaultBodyLimit,Request,State},http::{header,HeaderValue,Method,StatusCode},middleware::{self,Next},response::{IntoResponse,Response},routing::{get,patch,post,put},Router};
 use rmcp::transport::streamable_http_server::{session::local::LocalSessionManager,StreamableHttpServerConfig,StreamableHttpService};
 use std::{sync::Arc,time::Instant};
 
@@ -43,9 +43,15 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/activity",get(web::activity))
         .route("/api/config",get(web::config))
         .route("/api/config/reload",post(web::reload_config))
+        .route("/api/config/execution/readonly-mounts",put(web::update_readonly_mounts))
+        .route("/api/config/git",put(web::update_git))
+        .route("/api/config/docker",put(web::update_docker))
+        .route("/api/config/limits",put(web::update_limits))
         .route("/api/storage",get(web::storage_health))
         .route("/api/sandbox",get(web::sandbox_diagnostics))
         .route("/api/storage/maintenance",post(web::storage_maintenance))
+        .route("/api/storage/cleanup",post(web::storage_cache_cleanup))
+        .route("/api/storage/compact",post(web::storage_compact))
         .route("/api/projects/status",get(web::project_states))
         .route("/api/tasks",get(web::tasks))
         .route("/api/operations",get(web::operations))

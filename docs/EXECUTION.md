@@ -31,9 +31,30 @@ bubblewrap sandbox probe: ok (9 configured programs visible)
 
 每个两层 Project 可设置 `execution_profile = "isolated" | "development"`。`isolated` 是兼容旧行为的默认值：bubblewrap 使用独立网络 namespace，只有管理员全局开启 `execution.allow_network=true` 后，单个 Job 才能用 `network=true` 覆盖。`development` 面向本人控制的受信开发仓库：Job 未指定 `network` 时默认共享宿主网络，因此 `127.0.0.1`、Docker 发布端口和本机开发服务可直接访问；Job 仍可显式 `network=false` 临时收紧。
 
-`development` 还会在宿主机存在 Docker Unix socket 且本次 Job 使用网络时，将该 socket 映射为 `/run/endlessvibe/docker.sock` 并自动设置 `DOCKER_HOST`。这样项目原有的 `docker` / Compose 驱动测试可直接工作，不需要每次把数据库 URL、Docker socket 或网络参数写进 MCP 调用。**Docker socket 基本等价于该 Docker daemon 的控制权限**，因此只能给完全信任的开发 Project 使用；不可信代码必须保持 `isolated`。
+Docker socket 不再因为 `development` profile 而自动暴露。默认 `docker.allow_project_socket=false`，普通 Job 不会挂载 Docker socket 或注入 `DOCKER_HOST`。如需让完全信任的测试脚本直接操作 Docker，可在 Docker 配置中单独启用 `allow_project_socket=true`；这会允许该类 Job 通过任意程序/脚本绕开 Docker MCP 的容器白名单，应视为宿主级高权限授权，不建议开启。默认使用下文专用 Docker MCP 工具。
 
 Project 还可配置一次性的 `environment = ["NAME=value", ...]`；这些变量会自动注入每个 Job，Job 的 `environment` 只作为同名覆盖。Project/API/Dashboard 摘要只显示变量名，operation input 和 config diff 都不记录变量值。对于 Docker 中的 PostgreSQL、Redis、MySQL、HTTP API 等，如果项目自己的验证脚本已经负责创建/发现容器，通常只需 `development` profile；若服务由外部单独管理，再把连接 URL 放到 Project environment，而不是每次调用重复传入。
+
+## Docker MCP 专用工具（不依赖 Docker CLI）
+
+Docker Engine 通过 Unix socket HTTP API 访问，不需要在 `execution.allowed_programs` 添加 `docker`。默认全部关闭，先在本地 `http://127.0.0.1:20001/config` 的 Docker MCP 卡片保存设置，并**重启服务**；或在 `config.toml` 中加入：
+
+```toml
+[docker]
+enabled = true
+socket = "/var/run/docker.sock"
+allowed_containers = ["endlessvibe"]
+allow_start = false
+allow_stop = false
+allow_restart = true
+allow_project_socket = false
+```
+
+将 `allowed_containers` 替换成实际 Docker 容器的**完整精确名称**；不支持通配符、路径、任意容器 ID 或用户输入的 Docker API URL。读取能力：`docker_list`、`docker_inspect`、`docker_logs`、`docker_stats`、`docker_compose`（只读、按白名单过滤的 Compose 项目列表）；修改能力：`docker_start`、`docker_stop`、`docker_restart`，分别由配置标志单独控制，并要求该调用的 `confirm=true`。没有创建、删除、运行任意命令或任意 Docker API 路由。
+
+独立 OAuth scope 为 `docker:read` 和 `docker:write`；需要 ChatGPT 重新授权新 scope（客户端若缓存旧 schema，需重新连接插件）。容器详情只返回非敏感字段，环境变量、容器标签原文、宿主挂载源路径和其他特权信息会过滤；日志默认最近 200 行、最多 1000 行且结果限 64 KiB，可能包含敏感信息，**Docker 日志正文不会保存进操作日志数据库**。HTTP 响应受大小及超时限制。Docker Engine socket 本身依然可能具备宿主机管理权限；以上是 MCP 服务级的操作约束，不能代替 Docker daemon 或 OS 级授权。
+
+若 EndlessVibe 自身运行在待重启容器内，通过同一 MCP 连接重启自身可能使连接中断；检测到容器 ID 与当前容器 `HOSTNAME` 匹配时将拒绝这种操作。请通过独立 supervisor/其他容器或宿主机管理服务重启自身，不应向调用方虚报成功。
 
 ## 工具链自动发现与手工覆盖
 
@@ -88,7 +109,11 @@ readonly_mounts = [
 
 每个 `run_command` / `run_shell` 还可以提供 `preflight_programs`。这些程序会在 **Job ID 创建、command slot 占用、Project lock 获取、Job 持久化之前**在实际执行后端中做可见性检查；缺失时以 `JOB_PREFLIGHT_FAILED` fail-fast，不启动目标命令。直接运行 `cargo` 会自动把 `rustc` 加入门禁。只有在 Job **自行启动本地 PostgreSQL 二进制** 时，才应显式门禁 `initdb,postgres,pg_isready,createdb`。如果数据库由 Docker/宿主开发环境提供，`development` profile 会继承所需的宿主网络/Docker 能力，不应把容器里的服务端二进制误判为 sandbox 本地依赖。成功的 preflight 会记录 `execution_profile`、最终 `network`、`network_source`、工具链路径和 `environment_keys`；环境变量值不会写入该字段。该字段只做环境门禁，不绕过 `allowed_programs` 对顶层 `run_command` 的权限控制。
 
-Job 启动后还会得到 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 下该路径位于当前 Project 的私有 `/cache` 挂载；脚本可以写入 ≤1 MiB JSON object 汇报 database、cleanup、source fingerprint 等验收结果。服务在 Job 终止后读取并脱敏到持久 Job `summary`，记录 `summary_capture` 后删除临时文件；不会把宿主 state 路径返回给客户端，也不会跟随 symlink。
+Job 启动后还会得到 `ENDLESSVIBE_JOB_SUMMARY`。bubblewrap 下该路径位于当前 Project 的私有 `/cache` 挂载；脚本可以写入 ≤1 MiB JSON object 汇报 database、cleanup、source fingerprint 等验收结果。服务在 Job 终止后读取并脱敏到持久 Job `summary`，记录 `summary_capture` 后删除临时文件；不会把宿主 state 路径返回给客户端，也不会跟随 symlink。持久 summary 可以较大，但默认 MCP `get_job` 只内联至 16 KiB；更大的 summary 返回大小与顶层 keys，避免把长结构重复注入聊天上下文。
+
+## 长会话输出预算
+
+EndlessVibe 的服务端保留量与 MCP 单次返回量分离：Job ring buffer 仍受 `limits.max_output_bytes` 控制，而 `get_job_output` 默认每页 8 KiB、单页最大 32 KiB；`git_diff` 默认 16 KiB、单页最大 32 KiB；`read_file/search_code/git_status` 也有独立的小响应上限。MCP structured result 是事实来源，文本 content 对大结果只返回 ≤2 KiB 的索引摘要，不再重复整份 JSON。长工作应使用稳定 `task_id + stage`，每个阶段完成后形成 Git checkpoint，再继续下一阶段，避免单个 ChatGPT response 连续消费无界工具输出。
 
 白名单并非安全边界：Python、Cargo build script、Makefile、编译器插件等都能执行其他程序。安全限制主要来自隔离环境与管理员授予的 Project 权限。工具描述/确认提示不是 OS 权限控制。
 
@@ -104,6 +129,12 @@ allow_shell = false
 仅在你明确需要并接受宿主机用户权限时使用。虽然环境变量会清理、程序 argv 分离、进程组受管理，但它仍能访问该 UID 可访问的文件、其他项目、Token 状态和网络，也能自行运行 Git push/删除等命令；**文件工具权限与专用 push 权限无法约束已授权的任意宿主机代码执行**。`allow_network` 只配置 bubblewrap 的网络 namespace，不会给 host 模式加网络隔离。
 
 初次初始化的 `--unsafe-host-exec` 是等价的显式危险选项，默认不启用。服务禁止 root；不要为排错自行删除这个检查。需要面对不可信代码时使用独立用户/VM/经审计的容器执行器，而非本模式。
+
+## Dashboard 在线 Git / Limits 与 Storage Health
+
+Config 页面支持在线编辑 `[git]`（executable、author_name、author_email）和 `[limits]`（文件、输出、Job、超时、搜索与保留上限）。两者使用完整配置校验、`expected_revision` 乐观锁和原子替换 `config.toml`，尽量保留 TOML 注释。保存成功标记 `requires_restart=true`，只修改持久配置，不会在运行中修改已创建的 Job/Git 环境。对应本地 PUT 接口为 `/api/config/git` 和 `/api/config/limits`。
+
+Storage Health 将 SQLite / Backups / exec-cache 分开展示。`/api/storage/maintenance` 只清理过期记录；`/api/storage/compact` 先清理记录，再通过 WAL checkpoint + SQLite VACUUM 回收数据库闲置页面。`/api/storage/cleanup` 只接受 `scope=exec_cache` 和明确的确认口令，由 Dashboard 二次确认后发送，清理的唯一根目录是服务自有状态目录中的 `exec-cache`。不会删除 Backups、配置、Git、项目源码或 SQLite；清理后 Cargo、CMake 等缓存需要重新构建。清理只对无正在执行/提交中 Job 的服务开放，缓存读写门闩阻止清理过程中提交新 Job；运行时检测到冲突返回 `CACHE_BUSY` (409)。目录根拒绝符号链接，清理目录时不跟随符号链接。容量扫描最多 20,000 个节点；扫描截断时只是已扫描部分的下限，清理后应重新读取 `/api/storage`。
 
 ## 配置热重载
 

@@ -190,6 +190,8 @@ pub async fn probe_bubblewrap(config:&Config)->Result<Vec<(String,String)>>{
 }
 
 fn git_network_subcommand(args:&[String])->bool{args.iter().any(|arg|matches!(arg.as_str(),"push"|"fetch"|"pull"|"clone"|"ls-remote"|"remote"|"submodule"))}
+fn git_identity(config:&Config)->[(&'static str,&str);4]{[("GIT_AUTHOR_NAME",&config.git.author_name),("GIT_AUTHOR_EMAIL",&config.git.author_email),("GIT_COMMITTER_NAME",&config.git.author_name),("GIT_COMMITTER_EMAIL",&config.git.author_email)]}
+fn sandbox_git_identity(command:&mut Command,config:&Config){for(name,value)in git_identity(config){command.args(["--setenv",name,value]);}}
 pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool,project_programs:&[String],environment:&BTreeMap<String,String>,network:bool,summary_path:&str)->Result<Command>{
     w.exec_allowed()?;validate_job_environment(environment)?;validate_job_network(config,w.config.development(),network)?;
     if program=="git"&&git_network_subcommand(args){bail!("Network Git subcommands are disabled in run_command; allow_git_mutation only permits local repository mutations");}
@@ -210,19 +212,25 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
             let cache=config.security.data_dir.join("exec-cache").join(&w.workspace_id).join(&w.config.id);crate::util::private_dir(&cache)?;
             let mut programs=configured_probe_programs(config);programs.extend(project_programs.iter().cloned());programs.sort();programs.dedup();let (mut c,path)=bubblewrap_base_command(config,&programs,network)?;
             c.arg("--bind").arg(&w.root.path).arg("/workspace").arg("--bind").arg(&cache).arg("/cache");
-            let docker_socket=if w.config.development()&&network&&!environment.contains_key("DOCKER_HOST"){discover_docker_socket()}else{None};if let Some(socket)=&docker_socket{c.args(["--dir","/run","--dir","/run/endlessvibe"]).arg("--bind").arg(socket).arg("/run/endlessvibe/docker.sock");}
+            let docker_socket=if config.docker.allow_project_socket&&w.config.development()&&network&&!environment.contains_key("DOCKER_HOST"){discover_docker_socket()}else{None};if let Some(socket)=&docker_socket{c.args(["--dir","/run","--dir","/run/endlessvibe"]).arg("--bind").arg(socket).arg("/run/endlessvibe/docker.sock");}
             if config.execution.auto_discover_toolchains&&needs_cargo_registry(&programs){if let Some(registry)=discover_host_cargo_registry(){let target=cache.join("cargo/registry");crate::util::private_dir(&target)?;c.arg("--ro-bind").arg(registry).arg("/cache/cargo/registry");}}
             // Git metadata is read-only by default. Explicit allow_git_mutation keeps the project's
             // own .git writable while HOME, credentials, service state and network remain isolated.
             let git_metadata=w.root.path.join(".git");if git_metadata.exists(){if std::fs::symlink_metadata(&git_metadata)?.file_type().is_symlink(){bail!("Sandbox refuses symlinked Git metadata");}if !w.config.allow_git_mutation{c.arg("--ro-bind").arg(&git_metadata).arg("/workspace/.git");}}
             let inside=if cwd=="."{PathBuf::from("/workspace")}else{Path::new("/workspace").join(cwd)};
             c.arg("--chdir").arg(inside).args(["--setenv","HOME","/tmp/home","--setenv","PATH",&path,"--setenv","CARGO_HOME","/cache/cargo","--setenv","XDG_CACHE_HOME","/cache/xdg","--setenv","LANG","C.UTF-8","--setenv","LC_ALL","C.UTF-8","--setenv","TERM","dumb","--setenv","ENDLESSVIBE_JOB_SUMMARY",summary_path]);
-            for(name,value)in environment{c.arg("--setenv").arg(name).arg(value);}if docker_socket.is_some(){c.args(["--setenv","DOCKER_HOST","unix:///run/endlessvibe/docker.sock"]);}
+            for(name,value)in environment{c.arg("--setenv").arg(name).arg(value);}
+            // Bubblewrap clears the launcher environment: inject the configured Git identity inside the sandbox.
+            // Apply it to all jobs so nested Git commands (for example, from Python or build scripts) agree with git_commit.
+            sandbox_git_identity(&mut c,config);
+            if !shell&&program=="git"{c.args(["--setenv","GIT_MERGE_AUTOEDIT","no","--setenv","GIT_EDITOR","true"]);}
+            if docker_socket.is_some(){c.args(["--setenv","DOCKER_HOST","unix:///run/endlessvibe/docker.sock"]);}
             c.arg("--").arg(if shell{"/bin/bash"}else{program}).args(args);c
         }
         _=>bail!("Unknown execution backend"),
     };
-    if !shell&&program=="git"{command.env("GIT_AUTHOR_NAME",&config.git.author_name).env("GIT_AUTHOR_EMAIL",&config.git.author_email).env("GIT_COMMITTER_NAME",&config.git.author_name).env("GIT_COMMITTER_EMAIL",&config.git.author_email).env("GIT_MERGE_AUTOEDIT","no").env("GIT_EDITOR","true");}
+    if config.execution.backend=="host"{for(name,value)in git_identity(config){command.env(name,value);}}
+    if !shell&&program=="git"&&config.execution.backend=="host"{command.env("GIT_MERGE_AUTOEDIT","no").env("GIT_EDITOR","true");}
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
     let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=pre_exec_nproc_limit(&config.execution.backend,config.execution.max_processes);let cpu=config.limits.command_timeout_seconds+5;
     // SAFETY: only async-signal-safe Linux syscalls are used in this pre_exec closure.
@@ -249,6 +257,7 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn shell_preflight_is_explicit(){assert_eq!(job_preflight_programs("bash",&["postgres".into()],true).unwrap(),vec!["postgres".to_owned()]);}
     #[test]fn summary_contract_uses_private_cache_path(){let d=tempfile::tempdir().unwrap();let mut c=Config::default();c.security.data_dir=d.path().to_owned();let contract=job_summary_contract(&c,"root","demo","abc-123").unwrap();assert!(contract.host_path.starts_with(d.path().join("exec-cache/root/demo")));assert_eq!(contract.exposed_path,"/cache/job-summary-abc-123.json");}
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
+    #[test]fn configured_git_identity_is_injected_into_sandbox(){let mut cfg=Config::default();cfg.git.author_name="MRsoymilk".into();cfg.git.author_email="codermrsoymilk@gmail.com".into();let mut command=Command::new("/usr/bin/bwrap");sandbox_git_identity(&mut command,&cfg);let args=command.as_std().get_args().map(|v|v.to_string_lossy().into_owned()).collect::<Vec<_>>();assert_eq!(args,vec!["--setenv","GIT_AUTHOR_NAME","MRsoymilk","--setenv","GIT_AUTHOR_EMAIL","codermrsoymilk@gmail.com","--setenv","GIT_COMMITTER_NAME","MRsoymilk","--setenv","GIT_COMMITTER_EMAIL","codermrsoymilk@gmail.com"]);}
     #[test]fn project_manifest_detection_finds_joint_toolchains(){let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("Cargo.toml"),"[dependencies]\nsqlx = \"1\"\n").unwrap();std::fs::create_dir_all(d.path().join("game")).unwrap();std::fs::write(d.path().join("game/project.godot"),"[application]\n").unwrap();let mut programs=Vec::new();inspect_project_dir(d.path(),0,&mut programs);for p in ["cargo","rustc","initdb","postgres","pg_isready","createdb","godot"]{assert!(programs.contains(&p.to_owned()),"missing {p}");}}
     #[test]fn oversized_manifest_is_not_read(){let d=tempfile::tempdir().unwrap();let p=d.path().join("Cargo.toml");std::fs::write(&p,vec![b'x';512*1024+1]).unwrap();assert!(read_small_manifest(&p).is_none());}
     #[test]fn service_program_mentions_are_advisory_without_required_marker(){let mut p=Vec::new();scan_program_mentions("subprocess.run([\"cargo\"]); LOCAL=(\"initdb\", \"postgres\")",&mut p);for expected in ["cargo","rustc"]{assert!(p.contains(&expected.to_owned()),"missing {expected}");}for unexpected in ["initdb","postgres","pg_isready","createdb"]{assert!(!p.contains(&unexpected.to_owned()),"unexpected {unexpected}");}}
@@ -258,5 +267,6 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn gentoo_install_hint_is_search_only(){let hint=install_hint_for_os("gentoo","postgres");assert!(hint.contains("emerge -s postgresql"));assert!(!hint.contains("emerge -av"));}
     #[test]fn job_environment_accepts_external_service_variables_and_reserves_runtime_keys(){let mut env=BTreeMap::new();env.insert("TEST_DATABASE_URL".into(),"postgres://user:password@127.0.0.1:19031/test".into());assert!(validate_job_environment(&env).is_ok());env.insert("PATH".into(),"/tmp".into());assert!(validate_job_environment(&env).is_err());let mut invalid=BTreeMap::new();invalid.insert("1BAD".into(),"x".into());assert!(validate_job_environment(&invalid).is_err());}
     #[test]fn bubblewrap_network_is_per_job_and_project_profile(){let mut c=Config::default();assert!(validate_job_network(&c,false,false).is_ok());assert!(validate_job_network(&c,false,true).is_err());assert!(validate_job_network(&c,true,true).is_ok());c.execution.allow_network=true;assert!(validate_job_network(&c,false,true).is_ok());}
+    #[test]fn project_docker_socket_access_requires_separate_opt_in(){let c=Config::default();assert!(!c.docker.allow_project_socket);assert!(!c.docker.enabled);let mut d=c.clone();d.docker.enabled=true;d.docker.allowed_containers.push("endlessvibe".into());assert!(!d.docker.allow_project_socket);assert!(d.validate().is_ok());}
     #[test]fn docker_socket_detection_rejects_regular_files(){let d=tempfile::tempdir().unwrap();let regular=d.path().join("docker.sock");std::fs::write(&regular,b"not a socket").unwrap();assert!(existing_unix_socket(&regular).is_none());let socket=d.path().join("real.sock");let _listener=std::os::unix::net::UnixListener::bind(&socket).unwrap();assert_eq!(existing_unix_socket(&socket),Some(socket));}
 }

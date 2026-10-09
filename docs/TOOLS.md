@@ -33,6 +33,22 @@ Project   = Workspace 下的实际操作单元
 
 Project 路径来自本机配置，所有 `path` / `cwd` 都相对于 Project 根目录。
 
+## Docker Engine（管理员白名单）
+
+独立 Docker MCP 工具需要显式 `[docker]` 配置以及对应 OAuth scope；它们不使用 Project 定位，也不通过 `run_command`/Shell 转发 Docker 命令。只读工具：`docker_list`（可选 `limit`）、`docker_inspect`（`container`）、`docker_logs`（`container`、`tail` 默认 200 / 最大 1000、`timestamps`）、`docker_stats`（`container`）、`docker_compose`（`project`、可选 `limit`）。例如：
+
+```json
+{"container":"endlessvibe","tail":100,"timestamps":true}
+```
+
+变更工具：`docker_start`、`docker_stop`、`docker_restart`。必须给出精确的、列在 `docker.allowed_containers` 中的容器名称，并显式确认：
+
+```json
+{"container":"endlessvibe","confirm":true}
+```
+
+只有对应的配置 `allow_start/allow_stop/allow_restart=true` 才会执行。`docker:read` 与 `docker:write` OAuth scopes 独立；容器白名单由服务器在操作前检查。Docker socket 基本等价于宿主管理员权限，默认禁用 MCP 与 Project 直连 socket。实现见 `docs/EXECUTION.md`。
+
 ## 结构化错误
 
 MCP 工具失败时仍保留人类可读的文本错误，同时 `structuredContent` 返回稳定结构：
@@ -145,8 +161,10 @@ Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job �
 `get_job_output`：
 
 ```json
-{"job_id":"真实 Job ID","offset":0,"limit":65536}
+{"job_id":"真实 Job ID","offset":0,"limit":8192}
 ```
+
+默认每页 8 KiB，单次最多 32 KiB。成功的终态 `get_job` 会返回 `result_summary`，对 Cargo/Rust 风格的 `test result:` 自动汇总 suite 数、passed/failed/ignored/measured/filtered_out，并不再附带原始 tail；失败/超时/中断仍附带最多 4 KiB 的小 tail。只有诊断确实需要原始日志时才继续按 `next_offset` 分页读取。完整 ring buffer 仍保存在 EndlessVibe，MCP 分页只是限制单次返回体。
 
 `list_jobs` 可以按 Workspace、Project、`task_id` 过滤：
 
@@ -156,9 +174,21 @@ Job 级 `network` / `environment` 仍保留为覆盖能力：`development` Job �
 
 终态包括 `succeeded`、`failed`、`timed_out`、`cancelled`、`interrupted`。
 
+为降低长会话发生 stream/input 错误的概率，MCP 大结果采用“小响应、服务端保留完整数据”的模型：成功结果不再把完整 JSON 同时复制到 text content；`read_file` 单页最多 64 KiB / 1000 行，`search_code` 默认 50 条且单响应最多 200 条 / 64 KiB，`git_status` 最多返回 200 个变更项并给出 `total_entries/truncated`。需要更多内容时使用分页或更窄查询，而不是一次取完整日志、diff 或搜索结果。
+
 ## 长任务 Checkpoint
 
-对可能跨多轮 ChatGPT stream 的工作，使用一个稳定 `task_id`，每个可独立审查的小阶段使用一个 `stage`：
+对可能跨多轮 ChatGPT stream 的工作，先调用 `start_task` 创建或复用明确归属的 Task Stage（同一 task_id/stage 重复调用不会重置已完成阶段）：
+
+```json
+{"workspace":"projects","project":"BAfter","task_id":"bafter-fft-improvements","stage":"inspect"}
+```
+
+之后所有文件读写、搜索、Git 查询、Job 提交与 Git commit 均可带相同的 `task_id + stage`，EndlessVibe 会记录相关 Operation ID、状态和 Job ID（每个 Stage 最近最多 40 个 Operation / 20 个 Job）。不传上下文的普通读取仍只出现在 Activity / Operations，不会误关联到别的聊天任务。`start_task` 只创建元数据、不运行代码、不创建 Git checkpoint。Stage 状态在 SQLite 事务中更新；成功提交后即使有迟到的 Job 回报，也不会抹掉已有的 committed 恢复点。
+
+Dashboard 的 `/api/tasks?limit=120&auto_limit=20` 独立分页两类记录：优先返回最多 120 个显式多阶段 Stage，再附上最近 20 个独立 Auto Job；返回 `total_explicit_tasks`、`total_explicit_stages`、`total_auto_jobs` 和截断标志，不再让大量 Auto Job 挤掉真正的 Task。Auto Job 的名称来自保留 Job 的 `program / request_id`，完整 Activity / Job 记录不因此被改写。
+
+跨轮次的工作使用稳定 `task_id`，每个可独立审查的小阶段使用独立 `stage`：
 
 ```text
 release-031
@@ -174,13 +204,25 @@ release-031
 {"task_id":"release-031","stage":"validate"}
 ```
 
+如果 `run_command/run_shell` 未提供 `task_id + stage`，EndlessVibe 会为该 Job 生成唯一的 `auto-job-<job_id>` Task（stage `execute`），让 Tasks 页面显示独立执行而不把不同聊天的 Job 错误合并。服务重启时，仍在保留期内且没有 Task 的旧 Job 也会按原始时间回填；原有 Activity 不修改。此类自动 Job 即使 succeeded 也不会视为 Git checkpoint，`continue_task` 会给出 `job_complete` 提示。真正的多阶段工作仍应显式使用同一个 task_id。
+
 checkpoint 会保留最近 Job ID 及其状态。一个 stage 可以有多个 Job，默认最多保留该阶段最近 20 个 Job 引用。
 
 阶段完成时，`git_commit` 继续传入相同的 `task_id + stage`。只有 commit 成功后，该阶段才进入 `committed`，并记录 `last_commit`。因此 `job_succeeded` 只表示校验命令完成，不表示整个阶段已经落盘。
 
-stream 中断或新会话恢复时：
+stream 中断或新会话恢复时，优先调用 `continue_task`，一次获得当前阶段、最近 Job、最后 durable Git checkpoint 和下一步建议；它只读，不会自动执行或重试。知道 task_id 时可显式指定；只说“继续”时可省略 task_id，优先恢复 Project 最近的显式多阶段 Task，若没有才选择最新 Auto Job：
 
-`get_task_checkpoint`：
+```json
+{"workspace":"projects","project":"BAfter"}
+```
+
+或：
+
+```json
+{"workspace":"projects","project":"BAfter","task_id":"release-031"}
+```
+
+典型 `recommended_action.kind`：`poll_job`、`checkpoint_stage`、`inspect_and_retry`、`start_next_stage`。需要完整阶段历史时再调用 `get_task_checkpoint`：
 
 ```json
 {"workspace":"projects","project":"BAfter","task_id":"release-031"}
@@ -207,10 +249,10 @@ stream 中断或新会话恢复时：
 `git_diff`：
 
 ```json
-{"workspace":"projects","project":"BAfter","paths":["src/example.cpp","README.md"]}
+{"workspace":"projects","project":"BAfter","paths":["src/example.cpp","README.md"],"offset":0,"limit":16384}
 ```
 
-返回 `head`、明确的 `paths`、`diff` 和 `diff_sha256`。
+返回 `head`、明确的 `paths`、稳定 `diff_sha256`、`added_lines/removed_lines`、`total_bytes`、当前 `diff` 分页以及 `next_offset/has_more`。默认 16 KiB、单页最多 32 KiB；`has_more=true` 时应继续分页审查，所有页面共享同一个 review token，然后再 `git_commit`。
 
 `git_commit`：
 
@@ -234,9 +276,12 @@ stream 中断或新会话恢复时：
 
 | 工具 | OAuth scopes |
 |---|---|
-| `list_workspaces` / `list_projects` / `inspect_project` / task checkpoint 查询 | `projects:read` |
+| `list_workspaces` / `list_projects` / `inspect_project` / `continue_task` / task checkpoint 查询 | `projects:read` |
 | 文件读取/搜索/目录、Git 查询 | `files:read` |
 | 文件写入/patch/创建目录 | `files:write` |
+| `start_task` | `commands:execute` |
+| Docker 状态/日志/统计/Compose 只读 | `docker:read` |
+| Docker start/stop/restart | `docker:write` + 容器白名单 + 显式确认 |
 | 命令/Shell | `commands:execute` + `files:write` |
 | Job 查询/取消 | `commands:execute` |
 | Git commit | `git:write` + `files:write` |
