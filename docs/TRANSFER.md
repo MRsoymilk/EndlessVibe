@@ -2,7 +2,7 @@
 
 ## Phase 1 — LAN Discovery
 
-`[transfer]` is disabled by default. Enabling it starts an independent UDP multicast discovery service on `239.255.77.77:20003`, announcing only the stable node ID, display name and declared transfer port. These packets are **not authenticated**; discovery results are **never authorization**. The node ID is generated once and persisted in the private SQLite store. Offline peers are identified by stale `last_seen` timestamps. A local-only `GET /api/nodes` endpoint exposes the discovered nodes. Cross-subnet/isolated-Wi-Fi installations require a later manual-address option. The actual encrypted transfer listener is added in Phase 2; announcing a port does not make a peer trusted.
+`[transfer]` is disabled by default. Enabling it starts an independent UDP multicast discovery service on `239.255.77.77:20003`, announcing only the stable node ID, display name and declared transfer port. These packets are **not authenticated**; discovery results are **never authorization**. The node ID is generated once and persisted in the private SQLite store. Offline peers are identified by stale `last_seen` timestamps. A local-only `GET /api/nodes` endpoint exposes the discovered nodes. Cross-subnet/isolated-Wi-Fi installations require a later manual-address option. A separate TLS 1.3 listener uses the configured `transfer.listen` endpoint; multicast discovery is only an unauthenticated location hint, never an identity.
 
 ```toml
 [transfer]
@@ -12,6 +12,14 @@ advertise = true
 discover = true
 display_name = "EndlessVibe"
 ```
+
+## Phase 2 — TLS Pairing and Authorization
+
+The independent TLS 1.3 listener uses a persistent, self-signed per-node certificate stored in the service's private SQLite state. The parent starts pairing by POSTing `{"address":"192.168.1.20:20002"}` to its local `/api/nodes/pair`. The parent receives the child's TLS certificate fingerprint and an out-of-band six-digit verification code. The child gets a pending pairing request under `/api/nodes/pending`. Operators MUST compare the **same code in both local dashboards** and approve separately; encrypted transport by itself does not trust the discovered node. Only RFC1918/loopback/link-local IP endpoints are permitted; public internet addresses are refused.
+
+The child approves with local `POST /api/nodes/approve`, specifying the exact Project grant (`workspace`, `project`, `read`, `write`, `execute`, `git`). Parent approval stores the child certificate fingerprint and a random 256-bit bearer token; child approval stores only the token digest and exact grants. The child refuses a second distinct parent until the first is revoked. Peer records survive service restarts, and `DELETE /api/nodes/peers/{node_id}` revokes local access. The parent cannot elevate privileges above the child's own Project permissions. Pairing requests expire in 5 minutes. The browser-facing APIs are loopback-only, not part of the public MCP endpoint.
+
+**Trust model:** During first pairing the TLS server certificate has no pre-existing trust anchor; the human comparison of the short code is therefore mandatory to rule out a local active MITM. After approval the parent pins the server certificate fingerprint and refuses unexpected key changes. An approved child accepts remote operations only with the matching parent ID and token plus its per-project grant. Protect the local Dashboard (e.g. do not expose 20001 to LAN) and use verified SAS comparison. Do not mistake multicast advertisements for cryptographic identity.
 
 ## Planned authorization and routing invariants
 

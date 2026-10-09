@@ -14,6 +14,9 @@ getrandom = "0.2"
 libc = "0.2"
 regex = "1"
 rmcp = { version = "=3.5.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+rcgen = "0.13"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
 rusqlite = { version = "0.32", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
