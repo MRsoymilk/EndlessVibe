@@ -5,7 +5,7 @@ use url::Url;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Config { pub server: Server, pub security: Security, pub limits: Limits, pub execution: Execution, pub git: Git, pub docker: Docker, pub workspaces: Vec<WorkspaceConfig> }
+pub struct Config { pub server: Server, pub security: Security, pub limits: Limits, pub execution: Execution, pub git: Git, pub docker: Docker, pub transfer:Transfer, pub workspaces: Vec<WorkspaceConfig> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Server { pub bind: SocketAddr, pub public_url: String, pub allowed_hosts: Vec<String> }
@@ -33,6 +33,10 @@ impl Default for Git { fn default() -> Self { Self { executable: "/usr/bin/git".
 #[serde(default, deny_unknown_fields)]
 pub struct Docker { pub enabled:bool, pub socket:PathBuf, pub allowed_containers:Vec<String>, pub allow_start:bool, pub allow_stop:bool, pub allow_restart:bool, pub allow_project_socket:bool }
 impl Default for Docker { fn default()->Self{Self{enabled:false,socket:"/var/run/docker.sock".into(),allowed_containers:vec![],allow_start:false,allow_stop:false,allow_restart:false,allow_project_socket:false}} }
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct Transfer{pub enabled:bool,pub listen:SocketAddr,pub advertise:bool,pub discover:bool,pub display_name:String}
+impl Default for Transfer{fn default()->Self{Self{enabled:false,listen:"0.0.0.0:20002".parse().unwrap(),advertise:true,discover:true,display_name:"EndlessVibe".into()}}}
 pub fn valid_docker_container(s:&str)->bool{!s.is_empty()&&s.len()<=128&&s.bytes().next().is_some_and(|b|b.is_ascii_alphanumeric())&&s.bytes().all(|b|b.is_ascii_alphanumeric()||b"_.-".contains(&b))}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +89,7 @@ impl Config {
         let mut required=HashSet::new();for program in &self.execution.required_programs{if !valid_program(program)||!required.insert(program){bail!("execution.required_programs must contain unique simple executable names");}}
         if self.execution.memory_limit_mb < 64 || self.execution.max_processes < 8 { bail!("Execution resource limits too small"); }
         if self.execution.readonly_mounts.len()>64{bail!("execution.readonly_mounts accepts at most 64 entries");}let mut mount_targets=HashSet::new();for m in &self.execution.readonly_mounts { if !m.source.is_absolute() || !m.source.exists() || !(m.target.starts_with("/opt/") || m.target.starts_with("/cache-readonly/")) || m.target.components().any(|p| matches!(p, std::path::Component::ParentDir)) { bail!("Read-only mounts require an existing absolute source and a /opt/... or /cache-readonly/... destination"); }if !mount_targets.insert(m.target.clone()){bail!("execution.readonly_mounts target paths must be unique");} }
+        if self.transfer.listen.port()==0||self.transfer.display_name.trim().is_empty()||self.transfer.display_name.len()>64||self.transfer.display_name.contains(['\n','\r','\0']){bail!("Transfer listener requires a nonzero port and a short safe display name");}
         if !self.docker.socket.is_absolute()||self.docker.socket.components().any(|c|matches!(c,std::path::Component::ParentDir))||self.docker.allowed_containers.len()>64||self.docker.allowed_containers.iter().any(|name|!valid_docker_container(name)) { bail!("Docker socket must be an absolute path without '..'; allowlist supports at most 64 exact, simple container names"); }
         let mut docker_names=HashSet::new();if self.docker.allowed_containers.iter().any(|name|!docker_names.insert(name)){bail!("Docker allowed_containers must be unique");}
         if self.docker.enabled&&self.docker.allowed_containers.is_empty(){bail!("Docker MCP requires at least one explicitly allowed container name");}
@@ -111,6 +116,7 @@ impl Config {
 #[cfg(test)] mod tests {
     use super::*;
     #[test]fn search_resource_limits_are_bounded(){let mut c=Config::default();assert!(c.validate().is_ok());c.limits.search_max_files=0;assert!(c.validate().is_err());c.limits.search_max_files=100001;assert!(c.validate().is_err());c.limits.search_max_files=5000;c.limits.search_max_bytes=1024*1024*1024+1;assert!(c.validate().is_err());}
+    #[test]fn transfer_is_disabled_by_default(){let mut c=Config::default();assert!(!c.transfer.enabled);assert_eq!(c.transfer.listen.port(),20002);c.transfer.display_name.clear();assert!(c.validate().is_err());}
     #[test]fn docker_requires_exact_allowlist_and_is_disabled_by_default(){let mut c=Config::default();assert!(!c.docker.enabled);assert!(!c.docker.allow_project_socket);c.docker.enabled=true;assert!(c.validate().is_err());c.docker.allowed_containers=vec!["endlessvibe".into()];assert!(c.validate().is_ok());c.docker.allowed_containers.push("../other".into());assert!(c.validate().is_err());c.docker.allowed_containers.pop();c.docker.allowed_containers.push("endlessvibe".into());assert!(c.validate().is_err());}
     #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, "bubblewrap"); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
