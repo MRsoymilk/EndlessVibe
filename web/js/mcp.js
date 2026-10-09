@@ -5,8 +5,9 @@ const toolGroups=[
   ["Workspace / Project",["list_workspaces","list_projects","inspect_project"]],
   ["文件",["list_directory","read_file","write_file","apply_patch","create_directory","search_code"]],
   ["命令",["run_command","run_shell"]],
-  ["任务",["get_job","get_job_output","cancel_job","list_jobs","get_task_checkpoint","list_task_checkpoints"]],
-  ["Git",["git_status","git_diff","git_log","git_commit","git_push"]]
+  ["任务",["get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","list_task_checkpoints"]],
+  ["Git",["git_status","git_diff","git_log","git_commit","git_push"]],
+  ["Docker",["docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart"]]
 ];
 
 export function renderToolTree(id,tools){
