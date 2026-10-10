@@ -29,7 +29,7 @@ bubblewrap sandbox probe: ok (9 configured programs visible)
 
 ## Project execution profile
 
-每个两层 Project 可设置 `execution_profile = "isolated" | "development"`。`isolated` 是兼容旧行为的默认值：bubblewrap 使用独立网络 namespace，只有管理员全局开启 `execution.allow_network=true` 后，单个 Job 才能用 `network=true` 覆盖。`development` 面向本人控制的受信开发仓库：Job 未指定 `network` 时默认共享宿主网络，因此 `127.0.0.1`、Docker 发布端口和本机开发服务可直接访问；Job 仍可显式 `network=false` 临时收紧。
+每个两层 Project 可设置 `execution_profile = "isolated" | "development" | "trusted_host"`；第三种是仅在显式确认全局 host 后端时可用的高风险本地工具模式，详见下文。`isolated` 是兼容旧行为的默认值：bubblewrap 使用独立网络 namespace，只有管理员全局开启 `execution.allow_network=true` 后，单个 Job 才能用 `network=true` 覆盖。`development` 面向本人控制的受信开发仓库：Job 未指定 `network` 时默认共享宿主网络，因此 `127.0.0.1`、Docker 发布端口和本机开发服务可直接访问；Job 仍可显式 `network=false` 临时收紧。
 
 Docker socket 不再因为 `development` profile 而自动暴露。默认 `docker.allow_project_socket=false`，普通 Job 不会挂载 Docker socket 或注入 `DOCKER_HOST`。如需让完全信任的测试脚本直接操作 Docker，可在 Docker 配置中单独启用 `allow_project_socket=true`；这会允许该类 Job 通过任意程序/脚本绕开 Docker MCP 的容器白名单，应视为宿主级高权限授权，不建议开启。默认使用下文专用 Docker MCP 工具。
 
@@ -182,7 +182,7 @@ assume availability simply because the trusted mode bypasses a whitelist.
 
 ## Shell 与白名单
 
-`run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
+`run_command` 接受程序名+参数，不默认使用 `sh -c`。除显式 `trusted_host` Profile 外，程序名必须属于 `allowed_programs` 或获项目工具链自动发现授权。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
 
 每个 `run_command` / `run_shell` 还可以提供 `preflight_programs`。这些程序会在 **Job ID 创建、command slot 占用、Project lock 获取、Job 持久化之前**在实际执行后端中做可见性检查；缺失时以 `JOB_PREFLIGHT_FAILED` fail-fast，不启动目标命令。直接运行 `cargo` 会自动把 `rustc` 加入门禁。只有在 Job **自行启动本地 PostgreSQL 二进制** 时，才应显式门禁 `initdb,postgres,pg_isready,createdb`。如果数据库由 Docker/宿主开发环境提供，`development` profile 会继承所需的宿主网络/Docker 能力，不应把容器里的服务端二进制误判为 sandbox 本地依赖。成功的 preflight 会记录 `execution_profile`、最终 `network`、`network_source`、工具链路径和 `environment_keys`；环境变量值不会写入该字段。该字段只做环境门禁，不绕过 `allowed_programs` 对顶层 `run_command` 的权限控制。
 
