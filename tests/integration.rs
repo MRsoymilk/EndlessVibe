@@ -20,7 +20,11 @@ parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id,gr
 let node=child.rt.transfer.node_id.clone();let w=json!({"workspace":"demo","project":"demo","path":"src/main.rs"});
 let original=parent.rt.transfer.call_node(&node,"read_file",w.clone()).await.unwrap();
 let h=original["sha256"].as_str().unwrap();
-let written=parent.rt.transfer.call_node(&node,"apply_patch",json!({"workspace":"demo","project":"demo","path":"src/main.rs","expected_sha256":h,"edits":[{"old_text":"hello","new_text":"transferred","expected_occurrences":1}]})).await.unwrap();
+let patch=json!({"workspace":"demo","project":"demo","path":"src/main.rs","expected_sha256":h,"edits":[{"old_text":"hello","new_text":"transferred","expected_occurrences":1}]});
+let written=parent.rt.transfer.call_node_with_request_id(&node,"apply_patch",patch.clone(),Some("integration-patch")).await.unwrap();
+let state=parent.rt.transfer.call_node(&node,"request_status",json!({"workspace":"demo","project":"demo","request_id":"integration-patch"})).await.unwrap();assert_eq!(state["state"],"completed");
+assert_eq!(parent.rt.transfer.call_node_with_request_id(&node,"apply_patch",patch,Some("integration-patch")).await.unwrap()["changed"],true);
+assert!(parent.rt.transfer.call_node(&node,"request_status",json!({"workspace":"demo","project":"other","request_id":"integration-patch"})).await.is_err());
 assert_eq!(written["changed"],true);assert!(parent.rt.transfer.call_node(&node,"read_file",w.clone()).await.unwrap()["content"].as_str().unwrap().contains("transferred"));
 assert!(parent.rt.transfer.call_node(&node,"apply_patch",json!({"workspace":"demo","project":"demo","path":"src/main.rs","expected_sha256":h,"edits":[{"old_text":"hello","new_text":"stale"}]})).await.is_err());
 let job=parent.rt.transfer.call_node(&node,"run_command",json!({"workspace":"demo","project":"demo","program":"git","args":["--version"],"request_id":"transfer-test-version","timeout_seconds":20})).await.unwrap();
