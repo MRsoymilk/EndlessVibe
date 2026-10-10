@@ -5,7 +5,7 @@ use std::{path::Path, sync::Mutex, time::Duration};
 
 mod migrations;
 mod retention;
-pub(crate) use retention::prune_common;
+pub(crate) use retention::{prune_common,TRANSFER_RESULT_CACHE_SECONDS};
 
 pub struct Store { connection: Mutex<Connection> }
 impl Store {
@@ -23,6 +23,8 @@ impl Store {
         migrations::migrate(&mut c)?;
         c.execute("UPDATE operation_log SET status='interrupted',finished=?1,error=CASE WHEN error='' THEN 'Service restarted before operation completed' ELSE error END WHERE status='running'",[crate::util::now()])?;
         c.execute("UPDATE kv SET value=json_set(value,'$.state','interrupted','$.updated',?1) WHERE namespace='transfer_requests' AND json_extract(value,'$.state')='started'",[crate::util::now()])?;
+        // Bound startup work; keep durable request tombstones even after cached outputs age out.
+        let tx=c.transaction()?;retention::compact_transfer_results(&tx,crate::util::now())?;tx.commit()?;
         Ok(Self { connection: Mutex::new(c) })
     }
     pub fn transaction<T>(&self, op: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
@@ -97,6 +99,7 @@ impl Store {
             let operations:u64=tx.query_row("SELECT COUNT(*) FROM operation_log",[],|r|r.get(0))?;
             let traffic:u64=tx.query_row("SELECT COUNT(*) FROM traffic",[],|r|r.get(0))?;
             let task_checkpoints:u64=tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='task_checkpoints'",[],|r|r.get(0))?;
+            let transfer_requests:u64=tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='transfer_requests'",[],|r|r.get(0))?;
             Ok(serde_json::json!({
                 "schema_version":schema_version,
                 "schema_current":migrations::CURRENT_SCHEMA_VERSION,
@@ -104,8 +107,8 @@ impl Store {
                 "page_size":page_size,
                 "logical_bytes":page_count.saturating_mul(page_size),
                 "free_bytes":freelist_count.saturating_mul(page_size),
-                "rows":{"jobs":jobs,"audit":audit,"operations":operations,"traffic":traffic,"task_checkpoints":task_checkpoints},
-                "retention":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS}
+                "rows":{"jobs":jobs,"audit":audit,"operations":operations,"traffic":traffic,"task_checkpoints":task_checkpoints,"transfer_requests":transfer_requests},
+                "retention":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS,"transfer_response_cache_seconds":retention::TRANSFER_RESULT_CACHE_SECONDS,"transfer_response_compact_batch":retention::TRANSFER_RESULTS_PER_PASS,"request_tombstones":"retained_indefinitely"}
             }))
         })
     }
@@ -114,11 +117,13 @@ impl Store {
         self.transaction(|tx|{
             let mut stats=retention::prune_common(tx,now)?;
             stats.jobs=retention::prune_jobs(tx,retained_jobs)?;
+            stats.transfer_results_compacted+=retention::compact_transfer_results(tx,now)?;
             Ok(serde_json::json!({
                 "checked_at":now,
                 "deleted":{"expired_kv":stats.expired_kv,"task_checkpoints":stats.task_checkpoints,"audit":stats.audit,"operations":stats.operations,"traffic":stats.traffic,"jobs":stats.jobs,"total":stats.total()},
-                "policy":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS},
-                "safety":{"running_jobs_preserved":true,"running_operations_preserved":true,"vacuum_performed":false}
+                "policy":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS,"transfer_response_cache_seconds":retention::TRANSFER_RESULT_CACHE_SECONDS,"transfer_response_compact_batch":retention::TRANSFER_RESULTS_PER_PASS,"request_tombstones":"retained_indefinitely"},
+                "compacted":{"transfer_response_bodies":stats.transfer_results_compacted},
+                "safety":{"running_jobs_preserved":true,"running_operations_preserved":true,"transfer_request_tombstones_preserved":true,"vacuum_performed":false}
             }))
         })
     }

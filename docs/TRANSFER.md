@@ -43,6 +43,18 @@ The child TLS identity, pairing token digest, Project grants and Job database su
 
 The local Nodes Dashboard now has a guarded `POST /api/nodes/write` path and an advanced Project-operation panel. It requires an explicit confirmation, exact selected Workspace/Project, and accepts only the same write whitelist as `node_write`. The parent records a request digest rather than file contents. Remote shell, arbitrary Docker tools, push and nested forwarding remain disabled.
 
+## Phase 6 — Durable Request History and Safe Retention
+
+The parent can use read-only Transfer operations with exact child Workspace/Project selectors:
+
+- `request_status` with `request_id` returns the child-owned durable state, related Job ID/status when available, and a recovery recommendation. `completed` means the request was accepted and its response saved; for `run_command`, check `job_status` separately. An `interrupted` or `failed` mutation does **not** prove its side effects were rolled back.
+- `request_history` accepts `limit` (1–50, default 20) and an optional opaque `cursor`. Follow `next_cursor` until it is null; the cursor is bound to the authenticated parent and Project and rejected outside that scope. Pages use immutable insertion ordering and include only bounded metadata, not file content, command output, raw args or saved result bodies. Records predating the history index still require exact-ID lookup.
+- The local Nodes page offers Request status and Request history with a Load older requests control. Status badges distinguish a submitted command from its child Job's actual outcome.
+
+Request IDs are permanent deduplication keys, not disposable log entries. To bound private SQLite growth without permitting replay, after **30 days** successful cached response bodies are converted into **permanent result-expired tombstones**. The fingerprint, node/Project scope, request ID, Job reference and non-replayable state remain. A duplicate request with an expired response is rejected, **never executed again**. Failed, interrupted and uncertain requests remain non-replayable and are not deleted. Compaction is limited to **200 responses per pass** on startup, periodic retention maintenance or explicit storage maintenance; it is not a destructive request-ID garbage collection. The storage metadata exposes the cache policy and number of durable request records.
+
+Do not use a new request ID to "fix" an uncertain remote mutation without first checking the target Project, Git state or Job. A server restart does not automatically resume or replay unfinished filesystem/Git actions.
+
 ## Planned authorization and routing invariants
 
 - Pairing must use an encrypted authenticated protocol. The discovery name and IP are untrusted hints, not identities.

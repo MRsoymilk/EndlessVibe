@@ -20,7 +20,7 @@ pub fn claim(db:&Store,peer:&str,id:&str,tool:&str,args:&Value)->Result<Claim>{
  db.transaction(|tx|{
   if let Some(previous)=crate::store::get::<Record>(tx,NS,&key)?{
    if previous.fingerprint!=fingerprint{bail!("Transfer request_id reused with different arguments");}
-   return match previous.result{Some(value)=>Ok(Claim::Cached(value)),None=>bail!("Transfer request already started; result uncertain, inspect the target before retrying")};
+   return match previous.result{Some(value)=>Ok(Claim::Cached(value)),None if previous.state=="result_expired"=>bail!("Transfer request completed but cached response expired; inspect the target, do not replay"),None=>bail!("Transfer request already started; result uncertain, inspect the target before retrying")};
   }
   crate::store::put(tx,NS,&key,&Record{fingerprint,state:"started".into(),result:None,workspace:workspace.into(),project:project.into(),tool:tool.into(),error:None,job_id:None,request_id:id.into(),peer_node_id:peer.into(),created:now,updated:now},0)?;
   Ok(Claim::New)
@@ -30,7 +30,7 @@ pub fn status(db:&Store,peer:&str,id:&str,workspace:&str,project:&str)->Result<V
  if id.is_empty()||id.len()>128{return Err(anyhow::anyhow!("Invalid Transfer request_id"));}
  let record:Record=db.get(NS,&key(peer,id))?.ok_or_else(||anyhow::anyhow!("Transfer request not found"))?;
  if record.workspace!=workspace||record.project!=project{bail!("Transfer request not found in authorized Project");}
- Ok(serde_json::json!({"request_id":id,"workspace":workspace,"project":project,"tool":record.tool,"state":if record.result.is_some(){"completed"}else if record.state=="failed"{"failed"}else if record.state=="interrupted"{"interrupted"}else{"uncertain"},"has_result":record.result.is_some(),"safe_to_replay":false,"error":record.error,"job_id":record.job_id,"recovery_action":if record.result.is_some(){"inspect_recorded_result"}else if record.job_id.is_some(){"inspect_job"}else{"inspect_project_before_new_request"}}))
+ Ok(serde_json::json!({"request_id":id,"workspace":workspace,"project":project,"tool":record.tool,"state":if record.result.is_some(){"completed"}else if record.state=="failed"{"failed"}else if record.state=="interrupted"{"interrupted"}else if record.state=="result_expired"{"result_expired"}else{"uncertain"},"has_result":record.result.is_some(),"safe_to_replay":false,"error":record.error,"job_id":record.job_id,"recovery_action":if record.result.is_some(){"inspect_recorded_result"}else if record.job_id.is_some(){"inspect_job"}else{"inspect_project_before_new_request"}}))
 }
 /// A cursor is scoped to the authenticated parent and one Project. It is not authorization.
 #[derive(Serialize, Deserialize)]
@@ -92,7 +92,7 @@ pub fn history(db: &Store, peer: &str, workspace: &str, project: &str,
             requests.push(json!({
                 "request_id":r.request_id, "tool":r.tool,
                 "state":if r.result.is_some() {"completed"} else if r.state=="failed" {"failed"}
-                    else if r.state=="interrupted" {"interrupted"} else {"uncertain"},
+                    else if r.state=="interrupted" {"interrupted"} else if r.state=="result_expired" {"result_expired"} else {"uncertain"},
                 "job_id":r.job_id, "created":r.created, "updated":r.updated,
                 "has_result":r.result.is_some(), "safe_to_replay":false,
                 "recovery_action":if r.result.is_some() {"inspect_recorded_result"}
@@ -184,6 +184,45 @@ pub fn complete(db:&Store,peer:&str,id:&str,result:&Value)->Result<()>{
     assert_eq!(seen.len(),31);
     assert!(history(&db,"peer","w","p",7,Some("not-base64!")).is_err());
     assert!(history(&db,"peer","w","p",7,Some(&"a".repeat(513))).is_err());
+ }
+ #[test]
+ fn expired_responses_keep_non_replayable_tombstones() {
+    let temp=tempfile::tempdir().unwrap();
+    let path=temp.path().join("db");
+    let args=json!({"workspace":"w","project":"p"});
+    {
+        let db=Store::open(&path).unwrap();
+        claim(&db,"peer","old-response","write_file",&args).unwrap();
+        complete(&db,"peer","old-response",&json!({"content":"SENSITIVE_CACHED_RESULT","job_id":"job-42"})).unwrap();
+        claim(&db,"peer","recent-response","write_file",&args).unwrap();
+        complete(&db,"peer","recent-response",&json!({"changed":true})).unwrap();
+        claim(&db,"peer","uncertain-response","write_file",&args).unwrap();
+        let cutoff=util::now().saturating_sub(crate::store::TRANSFER_RESULT_CACHE_SECONDS+3);
+        db.transaction(|tx|{
+            tx.execute(
+                "UPDATE kv SET value=json_set(value,'$.updated',?1) WHERE namespace=?2 AND key=?3",
+                params![cutoff,NS,key("peer","old-response")],
+            )?;
+            Ok(())
+        }).unwrap();
+        let maintenance=db.maintain(100).unwrap();
+        assert_eq!(maintenance["safety"]["transfer_request_tombstones_preserved"],true);
+        assert_eq!(maintenance["compacted"]["transfer_response_bodies"],1);
+        let tombstone:Value=db.get(NS,&key("peer","old-response")).unwrap().unwrap();
+        assert!(tombstone["result"].is_null());
+        assert!(!tombstone.to_string().contains("SENSITIVE_CACHED_RESULT"));
+        let state=status(&db,"peer","old-response","w","p").unwrap();
+        assert_eq!(state["state"],"result_expired");
+        assert_eq!(state["job_id"],"job-42");
+        assert_eq!(state["safe_to_replay"],false);
+        assert_eq!(status(&db,"peer","uncertain-response","w","p").unwrap()["state"],"uncertain");
+        assert!(matches!(claim(&db,"peer","recent-response","write_file",&args).unwrap(),Claim::Cached(_)));
+        assert!(claim(&db,"peer","old-response","write_file",&args).is_err());
+        assert!(claim(&db,"peer","old-response","write_file",&json!({"workspace":"w","project":"other"})).is_err());
+    }
+    let reopened=Store::open(&path).unwrap();
+    assert_eq!(status(&reopened,"peer","old-response","w","p").unwrap()["state"],"result_expired");
+    assert!(claim(&reopened,"peer","old-response","write_file",&args).is_err());
  }
  #[test]fn failures_persist_without_allowing_replay(){let t=tempfile::tempdir().unwrap();let db=Store::open(&t.path().join("db")).unwrap();let a=serde_json::json!({"workspace":"w","project":"p"});claim(&db,"peer","failed","apply_patch",&a).unwrap();fail(&db,"peer","failed").unwrap();assert_eq!(status(&db,"peer","failed","w","p").unwrap()["state"],"failed");assert!(claim(&db,"peer","failed","apply_patch",&a).is_err());}
 }
