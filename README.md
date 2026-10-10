@@ -94,12 +94,12 @@ Workspace: projects                  /home/user/projects
 
 ### Requirements
 
-- Linux 5.6+（包含安全文件路径操作所需的内核支持）
+- **Linux 5.6+、macOS、Windows 10/11**（macOS / Windows 为新增适配平台，需要在对应系统验证后正式发布）
 - Rust / Cargo **1.88+**
-- Git、C/C++ 编译工具链
-- Bubblewrap 与可用的非特权 User Namespace（默认执行后端）
+- Git、C/C++ 编译工具链（需安装于目标操作系统）
+- Linux 默认需要 Bubblewrap 与可用的非特权 User Namespace；macOS / Windows 默认禁用命令执行，必须由管理员确认后才可启用 host backend
 
-EndlessVibe **拒绝以 root 身份启动**。目前主要面向 Linux 本机部署。
+Linux 下仍拒绝以 root 身份启动。跨平台文件操作采用目录句柄边界检查；**Bubblewrap 只在 Linux 可用，Windows 没有 Docker Unix Socket 接口，不能将两者视为跨平台已实现的功能**。详见 [跨平台支持与安全限制](docs/PORTABILITY.md)。
 
 ### 1. Build
 
@@ -110,7 +110,7 @@ cargo build --release
 cargo test --locked
 ```
 
-可选：检查 Bubblewrap 环境是否具备所需工具链。
+Linux 可选：检查 Bubblewrap 环境是否具备所需工具链（macOS / Windows 不运行此命令）。
 
 ```bash
 ./target/release/endlessvibe --check-sandbox
@@ -291,6 +291,7 @@ cargo build --release
 | --- | --- |
 | [Tools](docs/TOOLS.md) | MCP 工具及参数 |
 | [Execution](docs/EXECUTION.md) | Bubblewrap、Host、Toolchain、Job 与预检 |
+| [Platform Support](docs/PORTABILITY.md) | Linux、Windows、macOS 的移植状态与平台限制 |
 | [Security](docs/SECURITY.md) | 权限、安全边界与部署注意事项 |
 | [OAuth](docs/OAUTH.md) | OAuth 2.0、PKCE 与客户端接入 |
 | [Git Recovery](docs/GIT_RECOVERY.md) | Git 审查、提交与恢复 |

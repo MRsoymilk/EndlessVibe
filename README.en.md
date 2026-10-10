@@ -94,12 +94,12 @@ Different Projects can run independent operations concurrently. File changes, co
 
 ### Requirements
 
-- Linux 5.6+ for secure path handling
+- **Linux 5.6+, macOS, or Windows 10/11** (macOS and Windows are newly adapted targets; native builds and tests are required before calling them release-ready)
 - Rust / Cargo **1.88+**
-- Git and a C/C++ compiler toolchain
-- Bubblewrap and unprivileged user namespaces for the default execution backend
+- Git and a C/C++ compiler toolchain installed on the target operating system
+- Linux requires Bubblewrap and unprivileged user namespaces by default; on macOS and Windows, command execution is disabled by default until an administrator explicitly acknowledges the unsandboxed host backend
 
-EndlessVibe **refuses to run as root**. It is primarily intended for self-hosted Linux environments.
+Linux refuses to run as root. Capability-based filesystem access applies to all supported builds; **Bubblewrap is Linux-only, and the Docker Unix Socket transport is not implemented on Windows**. See [Cross-Platform Support and Limitations](docs/PORTABILITY.md).
 
 ### 1. Build
 
@@ -110,7 +110,7 @@ cargo build --release
 cargo test --locked
 ```
 
-Optionally check whether the configured Bubblewrap sandbox can see the required toolchains:
+Optional on Linux only: verify that Bubblewrap can access the configured toolchains:
 
 ```bash
 ./target/release/endlessvibe --check-sandbox
@@ -291,6 +291,7 @@ Keep changes focused, review diffs, and run relevant tests before proposing a co
 | --- | --- |
 | [MCP Tools](docs/TOOLS.md) | Exposed tools, arguments, and behavior |
 | [Execution](docs/EXECUTION.md) | Bubblewrap, Host, toolchains, jobs, preflight |
+| [Platform Support](docs/PORTABILITY.md) | Portability status and OS-specific limitations |
 | [Security](docs/SECURITY.md) | Authorization, trust boundaries, deployment |
 | [OAuth](docs/OAUTH.md) | OAuth 2.0, PKCE, client integration |
 | [Git Recovery](docs/GIT_RECOVERY.md) | Review tokens, Git commit, recovery |
