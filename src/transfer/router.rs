@@ -36,8 +36,8 @@ async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&st
  "git_status"=>{read_grant(&peer,w,p)?;rt.project_exact(w,p)?;rt.asynchronous_project("transfer_git_status",w,p,move|rt,project|async move{git::status(&rt,&project).await}).await}
  "git_diff"=>{read_grant(&peer,w,p)?;let a:DiffArgs=args(&v)?;rt.project_exact(w,p)?;rt.asynchronous_project("transfer_git_diff",w,p,move|rt,project|async move{git::diff(&rt,&project,a).await}).await}
  "git_log"=>{read_grant(&peer,w,p)?;let a:LogArgs=args(&v)?;rt.project_exact(w,p)?;rt.asynchronous_project("transfer_git_log",w,p,move|rt,project|async move{git::log(&rt,&project,a).await}).await}
- "get_task_checkpoint"=>{let a:TaskArgs=args(&v)?;tasks::get(&rt.db,a)}
- "continue_task"=>{let a:ContinueTaskArgs=args(&v)?;tasks::continue_recovery(&rt.db,a)}
+ "get_task_checkpoint"=>{let a:TaskArgs=args(&v)?;if a.workspace!=w||a.project!=p{bail!("Remote checkpoint request must use exact authorized Project");}tasks::get(&rt.db,a)}
+ "continue_task"=>{let a:ContinueTaskArgs=args(&v)?;if a.workspace!=w||a.project!=p{bail!("Remote recovery request must use exact authorized Project");}tasks::continue_recovery(&rt.db,a)}
  "list_task_checkpoints"=>{let query:ListTaskCheckpointsArgs=args(&v)?;if query.workspace.as_deref()!=Some(w)||query.project.as_deref()!=Some(p){bail!("Remote checkpoint query must use exact authorized Project");}tasks::list(&rt.db,query)}
  "write_file"=>{let a:WriteArgs=args(&v)?;rt.sync_project("transfer_write_file",w,p,move|rt,project|filesystem::write(&rt,&project,a)).await}
  "apply_patch"=>{let a:PatchArgs=args(&v)?;rt.sync_project("transfer_apply_patch",w,p,move|rt,project|filesystem::patch(&rt,&project,a)).await}
