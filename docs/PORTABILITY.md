@@ -56,6 +56,22 @@ Job Objects do not restrict file access, registry, network or user security
 tokens: this is a resource-containment stage, NOT a Windows AppContainer
 sandbox. Host mode still requires explicit unsafe-host authorization.
 
+### Versioned isolated-worker protocol
+
+src/tools/sandbox_protocol.rs defines a size-bounded, strict JSON request
+and receipt protocol. Version 1 currently permits only a single built-in
+hash_input operation on an explicitly staged inputs/... relative path,
+not an arbitrary program, command line, script or shell. Requests are at
+most 4 KiB, paths reject Windows ADS syntax and directory traversal, and
+input files are limited to 2 MiB. Receipts are at most 4 KiB; the privileged
+broker must recompute the input SHA-256 using independently opened files
+before it accepts the receipt. Unknown fields, versions and operations
+fail closed.
+
+This protocol is a security boundary prerequisite for a future AppContainer
+worker, not a production command-execution backend. Passing a receipt does
+not imply that cargo or another external executable can run.
+
 ### Windows AppContainer identity verification
 
 The Windows-only AppContainer prototype creates an unpredictable one-time
