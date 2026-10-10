@@ -8,8 +8,8 @@ use url::Url;
 pub struct Config { pub server: Server, pub security: Security, pub limits: Limits, pub execution: Execution, pub git: Git, pub docker: Docker, pub transfer:Transfer, pub workspaces: Vec<WorkspaceConfig> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Server { pub bind: SocketAddr, pub public_url: String, pub allowed_hosts: Vec<String> }
-impl Default for Server { fn default() -> Self { Self { bind: "0.0.0.0:20000".parse().unwrap(), public_url: "https://endlessvibe.soymilk.xin".into(), allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "host.docker.internal".into(), "endlessvibe".into()] } } }
+pub struct Server { pub bind: SocketAddr, pub public_url: String, pub allowed_hosts: Vec<String>, pub lan_only: bool }
+impl Default for Server { fn default() -> Self { Self { bind: "0.0.0.0:20000".parse().unwrap(), public_url: "https://endlessvibe.soymilk.xin".into(), lan_only: false, allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "host.docker.internal".into(), "endlessvibe".into()] } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Security { pub data_dir: PathBuf, pub allow_http_loopback: bool, pub extra_redirect_uris: Vec<String>, pub access_token_seconds: u64, pub refresh_token_seconds: u64 }
@@ -82,10 +82,29 @@ impl Config {
         c.server.public_url = c.server.public_url.trim_end_matches('/').to_owned();
         c.validate()?; Ok(c)
     }
+    /// Configure encrypted LAN node communication without a public MCP endpoint.
+    /// OAuth still needs an internal, loopback-only canonical resource URL.
+    pub fn enable_lan_only(&mut self) {
+        self.server.lan_only = true;
+        self.server.bind = "127.0.0.1:20000".parse().unwrap();
+        self.server.public_url = "http://127.0.0.1:20000".into();
+        self.security.allow_http_loopback = true;
+        self.transfer.enabled = true;
+        self.transfer.advertise = true;
+        self.transfer.discover = true;
+    }
     pub fn public_url(&self) -> Result<Url> { Ok(Url::parse(&self.server.public_url)?) }
     pub fn resource(&self) -> String { format!("{}/mcp", self.server.public_url) }
     pub fn hosts(&self) -> Vec<String> { let mut h = self.server.allowed_hosts.clone(); if let Ok(u) = self.public_url() { if let Some(host) = u.host_str() { h.push(host.to_owned()); } } h.sort(); h.dedup(); h }
     pub fn validate(&self) -> Result<()> {
+        if self.server.lan_only {
+            if self.server.bind != "127.0.0.1:20000".parse::<SocketAddr>().unwrap()
+                || self.server.public_url != "http://127.0.0.1:20000"
+                || !self.security.allow_http_loopback || !self.transfer.enabled
+                || self.transfer.listen.port() == 20000 {
+                bail!("LAN-only mode requires a loopback MCP endpoint, enabled Transfer and the internal local OAuth origin; do not expose MCP on the LAN");
+            }
+        }
         let url = self.public_url()?;
         let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]" | "::1"));
         if url.scheme() != "https" && !(self.security.allow_http_loopback && url.scheme() == "http" && loopback) { bail!("server.public_url must use HTTPS (HTTP loopback is opt-in for local tests)"); }
@@ -143,6 +162,48 @@ impl Config {
 #[cfg(test)] mod tests {
     use super::*;
     #[test]fn search_resource_limits_are_bounded(){let mut c=Config::default();assert!(c.validate().is_ok());c.limits.search_max_files=0;assert!(c.validate().is_err());c.limits.search_max_files=100001;assert!(c.validate().is_err());c.limits.search_max_files=5000;c.limits.search_max_bytes=1024*1024*1024+1;assert!(c.validate().is_err());}
+    #[test]
+    fn lan_only_uses_loopback_mcp_and_encrypted_transfer_nodes() {
+        let mut c = Config::default();
+        c.enable_lan_only();
+        assert!(c.server.lan_only);
+        assert_eq!(c.server.bind.to_string(), "127.0.0.1:20000");
+        assert_eq!(c.server.public_url, "http://127.0.0.1:20000");
+        assert!(c.security.allow_http_loopback);
+        assert!(c.transfer.enabled && c.transfer.advertise && c.transfer.discover);
+        assert_eq!(c.transfer.listen.port(), 20002);
+        c.validate().unwrap();
+        let encoded = toml::to_string_pretty(&c).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+        assert!(decoded.server.lan_only);
+        decoded.validate().unwrap();
+
+        let mut bad = c.clone();
+        bad.server.bind = "0.0.0.0:20000".parse().unwrap();
+        assert!(bad.validate().is_err(), "MCP must never bind a LAN interface");
+        bad = c.clone();
+        bad.server.public_url = "http://192.168.1.12:20000".into();
+        assert!(bad.validate().is_err(), "LAN HTTP must not carry OAuth tokens");
+        bad = c.clone();
+        bad.transfer.enabled = false;
+        assert!(bad.validate().is_err(), "LAN mode requires TLS Transfer");
+        bad = c.clone();
+        bad.security.allow_http_loopback = false;
+        assert!(bad.validate().is_err(), "Internal OAuth origin must be valid");
+        bad = c.clone();
+        bad.transfer.listen = "0.0.0.0:20000".parse().unwrap();
+        assert!(bad.validate().is_err(), "Transfer must not reuse the MCP port");
+    }
+    #[test]
+    fn existing_configs_default_to_normal_mode() {
+        let c = Config::default();
+        assert!(!c.server.lan_only);
+        let mut doc: toml::Value = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        doc["server"].as_table_mut().unwrap().remove("lan_only");
+        let old: Config = doc.try_into().unwrap();
+        assert!(!old.server.lan_only);
+        old.validate().unwrap();
+    }
     #[test]fn transfer_is_disabled_by_default(){let mut c=Config::default();assert!(!c.transfer.enabled);assert_eq!(c.transfer.listen.port(),20002);c.transfer.display_name.clear();assert!(c.validate().is_err());}
     #[test]fn docker_requires_exact_allowlist_and_is_disabled_by_default(){
         let mut c=Config::default();

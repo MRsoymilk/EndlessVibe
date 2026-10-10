@@ -383,6 +383,24 @@ async fn oauth_login(f:&Fixture,app:&Router,scope:&str)->(String,Value){
     let origin=f.rt.config.public_url().unwrap().origin().ascii_serialization();let response=consent_http(app,form(&[("transaction",transaction),("owner_key",&f.owner),("decision","approve")]),Some(&cookie),&origin).await;assert_eq!(response.status(),StatusCode::SEE_OTHER);let redirect=url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();let code=redirect.query_pairs().find(|(k,_)|k=="code").unwrap().1.to_string();let iss=redirect.query_pairs().find(|(k,_)|k=="iss").unwrap().1.to_string();assert_eq!(iss,f.rt.config.server.public_url);
     let request=form(&[("grant_type","authorization_code"),("client_id",&client),("redirect_uri","https://chatgpt.com/connector_platform_oauth_redirect"),("code",&code),("code_verifier",&verifier),("resource",&resource)]);let response=http(app,"POST","/oauth/token",Body::from(request.clone()),Some("application/x-www-form-urlencoded"),None,None).await;assert_eq!(response.status(),StatusCode::OK);let tokens=json_body(response).await;assert_eq!(http(app,"POST","/oauth/token",Body::from(request),Some("application/x-www-form-urlencoded"),None,None).await.status(),StatusCode::BAD_REQUEST);(client,tokens)
 }
+#[tokio::test]
+async fn lan_only_exposes_oauth_locally_and_requires_pairing_for_lan_nodes(){
+    let f=fixture(|config|config.enable_lan_only());
+    assert_eq!(f.rt.config.server.bind.to_string(),"127.0.0.1:20000");
+    assert!(f.rt.config.server.lan_only && f.rt.transfer.config.enabled);
+    let mcp=server::create_router(f.rt.clone());
+    let metadata=json_body(http(&mcp,"GET","/.well-known/oauth-protected-resource",Body::empty(),None,None,None).await).await;
+    assert_eq!(metadata["resource"],"http://127.0.0.1:20000/mcp");
+    assert_eq!(metadata["authorization_servers"][0],"http://127.0.0.1:20000");
+    assert_eq!(http(&mcp,"POST","/mcp",Body::from("{}"),Some("application/json"),None,None).await.status(),StatusCode::UNAUTHORIZED);
+    let unauthorized_host=Request::builder().uri("/health").header(header::HOST,"192.168.1.10").body(Body::empty()).unwrap();
+    assert_eq!(mcp.clone().oneshot(unauthorized_host).await.unwrap().status(),StatusCode::FORBIDDEN);
+    let local=server::create_dashboard_router(f.rt.clone());
+    assert_eq!(http(&local,"GET","/nodes",Body::empty(),None,None,None).await.status(),StatusCode::OK);
+    let lan_dashboard=Request::builder().uri("/nodes").header(header::HOST,"192.168.1.10").body(Body::empty()).unwrap();
+    assert_eq!(local.oneshot(lan_dashboard).await.unwrap().status(),StatusCode::FORBIDDEN);
+    assert!(f.rt.transfer.peers().unwrap()["peers"].as_array().unwrap().is_empty());
+}
 #[tokio::test]async fn dashboard_renders_docker_config_and_tool_group(){let f=fixture(|_|{});let app=server::create_dashboard_router(f.rt.clone());for (path,expected) in [("/config","id=\"docker-editor\""),("/assets/app.js","handleDockerSave"),("/assets/js/mcp.js","docker_restart")]{let response=http(&app,"GET",path,Body::empty(),None,None,None).await;assert_eq!(response.status(),StatusCode::OK);let bytes=to_bytes(response.into_body(),2*1024*1024).await.unwrap();let html=String::from_utf8(bytes.to_vec()).unwrap();assert!(html.contains(expected),"Missing {expected} at {path}");}}
 #[tokio::test]async fn public_health_does_not_expose_paths_or_secrets(){let f=fixture(|_|{});let app=server::create_router(f.rt.clone());let response=http(&app,"GET","/health",Body::empty(),None,None,None).await;assert_eq!(response.status(),StatusCode::OK);let data=json_body(response).await.to_string();assert!(!data.contains(&f.owner));assert!(!data.contains(&f.rt.config.security.data_dir.to_string_lossy().to_string()));assert_eq!(http(&app,"POST","/mcp",Body::from("{}"),Some("application/json"),None,None).await.status(),StatusCode::UNAUTHORIZED);}
 #[tokio::test]async fn cache_maintenance_lock_blocks_new_jobs_without_execution(){let f=fixture(|_|{});let guard=f.rt.jobs.begin_cache_cleanup().unwrap();let a=CommandArgs{workspace:"demo".into(),project:"demo".into(),program:"git".into(),args:vec!["--version".into()],cwd:".".into(),request_id:"cache-race-guard".into(),timeout_seconds:Some(3),preflight_programs:vec![],environment:Default::default(),network:Some(false),task_id:None,stage:None};let error=f.rt.jobs.submit(f.rt.clone(),a.clone(),false).await.unwrap_err();assert_eq!(endlessvibe::error::code(&error),"CACHE_BUSY");assert_eq!(f.rt.jobs.active_count(),0);drop(guard);let job=f.rt.jobs.submit(f.rt.clone(),a,false).await.unwrap();assert_eq!(wait_job(&f.rt,job["job_id"].as_str().unwrap()).await["status"],"succeeded");}
