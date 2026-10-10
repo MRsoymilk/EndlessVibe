@@ -47,6 +47,22 @@ child.rt.transfer.revoke_pair(&parent.rt.transfer.node_id).unwrap();assert!(pare
 resume.cancel();running.await.unwrap().unwrap();
 }
 #[test]fn transfer_operation_audit_never_persists_remote_output_or_diff(){let f=fixture(|_|{});for tool in ["node_read","node_write","node_dashboard_write","transfer_get_job_output","transfer_git_diff"]{let op=f.rt.begin_operation(tool,"demo","demo",json!({"request_hash":"digest"}));let id=op.id.unwrap();let delivered=f.rt.finish_operation(op,Ok(json!({"output":"REMOTE_SECRET_LOG","diff":"REMOTE_SECRET_PATCH"}))).unwrap();assert_eq!(delivered["output"],"REMOTE_SECRET_LOG");let stored=f.rt.db.operation(id).unwrap();assert_eq!(stored["output"]["redacted"],true);assert!(!stored.to_string().contains("REMOTE_SECRET_LOG"));assert!(!stored.to_string().contains("REMOTE_SECRET_PATCH"));}}
+#[tokio::test]
+async fn nodes_request_history_ui_assets_are_served(){
+ let f=fixture(|_|{});
+ let router=server::create_dashboard_router(f.rt.clone());
+ for (path,expected) in [
+  ("/nodes","id=\"node-request-history\""),
+  ("/assets/js/nodes.js","loadRequestHistory"),
+  ("/assets/js/nodes.js","request_history"),
+  ("/assets/app.css",".node-history-state[data-state=\"interrupted\"]"),
+ ]{
+  let response=http(&router,"GET",path,Body::empty(),None,None,None).await;
+  assert_eq!(response.status(),StatusCode::OK,"{path}");
+  let body=to_bytes(response.into_body(),2*1024*1024).await.unwrap();
+  assert!(String::from_utf8_lossy(&body).contains(expected),"{path} missing {expected}");
+ }
+}
 #[tokio::test]async fn nodes_dashboard_and_transfer_config_endpoint_are_local_only(){let f=fixture(|_|{});let app=server::create_dashboard_router(f.rt.clone());for(path,text)in[("/nodes","id=\"node-pending-list\""),("/assets/js/nodes.js","renderTrusted")]{let response=http(&app,"GET",path,Body::empty(),None,None,None).await;assert_eq!(response.status(),StatusCode::OK);let bytes=to_bytes(response.into_body(),2*1024*1024).await.unwrap();assert!(String::from_utf8_lossy(&bytes).contains(text));}let old=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;let request=Request::builder().method("PUT").uri("/api/config/transfer").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"expected_revision":old["revision"],"enabled":true,"listen":"0.0.0.0:20002","advertise":true,"discover":true,"display_name":"Child Test"}).to_string())).unwrap();let response=app.clone().oneshot(request).await.unwrap();assert_eq!(response.status(),StatusCode::OK);assert_eq!(json_body(response).await["requires_restart"],true);let config=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;assert_eq!(config["transfer"]["display_name"],"Child Test");let denied=Request::builder().method("POST").uri("/api/nodes/read").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"write_file","arguments":{}}).to_string())).unwrap();assert_eq!(app.clone().oneshot(denied).await.unwrap().status(),StatusCode::FORBIDDEN);let missing_confirm=Request::builder().method("POST").uri("/api/nodes/write").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"run_command","arguments":{"workspace":"demo","project":"demo"},"confirm":false}).to_string())).unwrap();assert_eq!(app.clone().oneshot(missing_confirm).await.unwrap().status(),StatusCode::FORBIDDEN);let forbidden=Request::builder().method("POST").uri("/api/nodes/write").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"run_shell","arguments":{},"confirm":true}).to_string())).unwrap();assert_eq!(app.clone().oneshot(forbidden).await.unwrap().status(),StatusCode::FORBIDDEN);}
 struct Fixture{_dir:tempfile::TempDir,rt:Arc<Runtime>,owner:String}
 fn fixture(edit:impl FnOnce(&mut Config))->Fixture{
