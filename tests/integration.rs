@@ -93,7 +93,19 @@ async fn transfer_request_history_survives_runtime_restart_and_revocation(){
  let config_path=child.rt.config_path.clone();
  stop.cancel();server_task.await.unwrap().unwrap();
  drop(child.rt);
- let restarted=Runtime::new(config,&config_path).unwrap();
+ // An accepted TLS session may finish releasing its Runtime Arc just after
+ // the listener task exits; wait only for that known transient file lock.
+ let restarted=tokio::time::timeout(Duration::from_secs(3),async{
+  loop{
+   match Runtime::new(config.clone(),&config_path){
+    Ok(rt)=>break rt,
+    Err(error) if error.to_string().contains("Another EndlessVibe process is using this state directory")=>{
+     tokio::time::sleep(Duration::from_millis(20)).await;
+    },
+    Err(error)=>panic!("Transfer Runtime restart failed: {error:#}"),
+   }
+  }
+ }).await.expect("Active TLS sessions did not release the state lock after shutdown");
  assert_eq!(restarted.transfer.node_id,node_id);
  let resume=tokio_util::sync::CancellationToken::new();
  let restart_task=tokio::spawn(restarted.transfer.clone().run_tls(resume.clone(),Some(restarted.clone())));
