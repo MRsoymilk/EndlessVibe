@@ -72,7 +72,71 @@ impl TransferManager{
  let(answer,fingerprint)=match first{Ok(result)=>result,Err(error) if retryable_tool(tool)=>{tracing::debug!(node_id=%node_id,tool,error=%error,"Retrying safe Transfer read after connection failure");request(peer.endpoint,Some(peer.cert_sha.clone()),req,90).await?},Err(error)=>return Err(error)};
  if fingerprint!=peer.cert_sha{bail!("Transfer child certificate changed");}if answer["ok"]!=true{bail!("Child refused transfer request: {}",answer["error"].as_str().unwrap_or("unknown"));}Ok(answer["result"].clone())}
  pub fn authorized(&self,node_id:&str,token:&str,workspace:&str,project:&str,operation:&str)->Result<Grant>{let peer=self.incoming_peer(node_id,token)?;let grant=peer.grants.into_iter().find(|g|g.workspace==workspace&&g.project==project).context("Project not granted to parent")?;let allowed=match operation{"read"=>grant.read,"write"=>grant.write,"execute"=>grant.execute,"git"=>grant.git,_=>false};if !allowed{bail!("Transfer operation not granted");}Ok(grant)}
- pub async fn run_tls(self:Arc<Self>,shutdown:CancellationToken,rt:Option<Arc<crate::runtime::Runtime>>)->Result<()>{let server=tls_server_config(&self.db)?;let listener=TcpListener::bind(self.config.listen).await.with_context(||format!("Cannot bind Transfer TLS {}",self.config.listen))?;let acceptor=TlsAcceptor::from(server);let slots=Arc::new(tokio::sync::Semaphore::new(12));loop{tokio::select!{_ = shutdown.cancelled()=>break,connection=listener.accept()=>{let(stream,addr)=connection?;if !lan(addr){continue;}let Ok(permit)=slots.clone().try_acquire_owned()else{continue;};let manager=self.clone();let tls=acceptor.clone();let rt=rt.clone();tokio::spawn(async move{let _permit=permit;let fut=async{let mut session=tls.accept(stream).await?;let request=recv(&mut session).await?;let wire:Wire=serde_json::from_value(request)?;let cert:Vec<u8>=manager.db.get::<(Vec<u8>,Vec<u8>)>("transfer_meta","tls_identity")?.context("Missing server identity")?.0;let digest=util::digest(&cert);let response=match wire.kind.as_str(){"pair_hello"=>manager.receive_pair(&wire,addr,&digest),"call"=>{let rt=rt.context("Transfer Project routing is not active")?;crate::transfer::router::dispatch(rt,manager.clone(),wire).await.map(|outcome|json!({"ok":true,"node_id":manager.node_id,"result":outcome}))},_=>Err(anyhow::anyhow!("Transfer request type is not supported"))};let data=match response{Ok(value)=>value,Err(e)=>json!({"ok":false,"error":util::bounded_text(&e.to_string(),200)})};send(&mut session,&data).await?;Ok::<_,anyhow::Error>(())};if let Err(error)=tokio::time::timeout(Duration::from_secs(95),fut).await.unwrap_or_else(|_|Err(anyhow::anyhow!("Peer request timed out"))){tracing::debug!(error=%error,"Transfer TLS session failed");}});}}}Ok(())}
+ pub async fn run_tls(self:Arc<Self>,shutdown:CancellationToken,rt:Option<Arc<crate::runtime::Runtime>>)->Result<()>{
+  let server=tls_server_config(&self.db)?;
+  let listener=TcpListener::bind(self.config.listen).await
+   .with_context(||format!("Cannot bind Transfer TLS {}",self.config.listen))?;
+  let acceptor=TlsAcceptor::from(server);
+  let slots=Arc::new(tokio::sync::Semaphore::new(12));
+  // Reap completed TLS sessions while serving; detached tasks must not outlive shutdown.
+  let mut sessions=tokio::task::JoinSet::new();
+  loop{
+   tokio::select!{
+    _=shutdown.cancelled()=>break,
+    completed=sessions.join_next(),if !sessions.is_empty()=>{
+     if let Some(Err(error))=completed{tracing::debug!(error=%error,"Transfer TLS session join failed");}
+    },
+    connection=listener.accept()=>{
+     let(stream,addr)=connection?;
+     if !lan(addr){continue;}
+     let Ok(permit)=slots.clone().try_acquire_owned()else{continue;};
+     let manager=self.clone();let tls=acceptor.clone();let rt=rt.clone();
+     sessions.spawn(async move{
+      let _permit=permit;
+      let fut=async{
+       let mut session=tls.accept(stream).await?;
+       let request=recv(&mut session).await?;
+       let wire:Wire=serde_json::from_value(request)?;
+       let cert:Vec<u8>=manager.db.get::<(Vec<u8>,Vec<u8>)>("transfer_meta","tls_identity")?
+        .context("Missing server identity")?.0;
+       let digest=util::digest(&cert);
+       let response=match wire.kind.as_str(){
+        "pair_hello"=>manager.receive_pair(&wire,addr,&digest),
+        "call"=>{
+         let rt=rt.context("Transfer Project routing is not active")?;
+         crate::transfer::router::dispatch(rt,manager.clone(),wire)
+          .await.map(|outcome|json!({"ok":true,"node_id":manager.node_id,"result":outcome}))
+        },
+        _=>Err(anyhow::anyhow!("Transfer request type is not supported"))
+       };
+       let data=match response{
+        Ok(value)=>value,
+        Err(error)=>json!({"ok":false,"error":util::bounded_text(&error.to_string(),200)})
+       };
+       send(&mut session,&data).await?;
+       Ok::<_,anyhow::Error>(())
+      };
+      if let Err(error)=tokio::time::timeout(Duration::from_secs(95),fut)
+       .await.unwrap_or_else(|_|Err(anyhow::anyhow!("Peer request timed out"))){
+       tracing::debug!(error=%error,"Transfer TLS session failed");
+      }
+     });
+    }
+   }
+  }
+  // Allow active requests to finish before releasing Runtime; terminate stalled
+  // half-open sessions after a bounded grace period.
+  if tokio::time::timeout(Duration::from_secs(3),async{
+   while let Some(joined)=sessions.join_next().await{
+    if let Err(error)=joined{tracing::debug!(error=%error,"Transfer TLS session join failed");}
+   }
+  }).await.is_err(){
+   tracing::debug!("Transfer shutdown aborting sessions that exceeded grace period");
+   sessions.abort_all();
+   while sessions.join_next().await.is_some(){}
+  }
+  Ok(())
+ }
 }
 #[cfg(test)]mod tests{use super::*;
 #[tokio::test]async fn tls_pair_offer_matches_both_nodes_and_never_grants_projects(){let a=tempfile::tempdir().unwrap();let b=tempfile::tempdir().unwrap();let db_a=Arc::new(Store::open(&a.path().join("state")).unwrap());let db_b=Arc::new(Store::open(&b.path().join("state")).unwrap());let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();drop(listener);let mut child_cfg=crate::config::Transfer::default();child_cfg.enabled=true;child_cfg.listen=address;child_cfg.display_name="Child".into();let child=TransferManager::new(child_cfg,db_b).unwrap();let mut parent_cfg=crate::config::Transfer::default();parent_cfg.enabled=true;let parent=TransferManager::new(parent_cfg,db_a).unwrap();let shutdown=CancellationToken::new();let task=tokio::spawn(child.clone().run_tls(shutdown.clone(),None));tokio::time::sleep(Duration::from_millis(100)).await;let result=parent.start_pair(address).await.unwrap();assert_eq!(result["role"],"parent");let pending=child.pending().unwrap();assert_eq!(pending["pending"][0]["code"],result["code"]);assert_eq!(pending["pending"][0]["node_id"],parent.node_id);assert_eq!(child.peers().unwrap()["peers"].as_array().unwrap().len(),0);assert!(child.authorized(&parent.node_id,"invalid","w","p","read").is_err());shutdown.cancel();task.await.unwrap().unwrap();}
@@ -161,6 +225,36 @@ async fn tls_partial_frame_and_disconnected_response_never_duplicate_mutation(){
   "SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get::<_,i64>(0))?)).unwrap();
  assert_eq!(after,before);
  shutdown.cancel();server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn tls_shutdown_drains_or_aborts_stalled_partial_frames(){
+ let dir=tempfile::tempdir().unwrap();
+ let db=Arc::new(Store::open(&dir.path().join("db")).unwrap());
+ let probe=TcpListener::bind("127.0.0.1:0").await.unwrap();
+ let address=probe.local_addr().unwrap();drop(probe);
+ let mut cfg=crate::config::Transfer::default();
+ cfg.enabled=true;cfg.listen=address;
+ let manager=TransferManager::new(cfg,db).unwrap();
+ let shutdown=CancellationToken::new();
+ let task=tokio::spawn(manager.clone().run_tls(shutdown.clone(),None));
+ tokio::time::sleep(Duration::from_millis(100)).await;
+ let connector=TlsConnector::from(tls_client_config(None).unwrap());
+ let socket=TcpStream::connect(address).await.unwrap();
+ let mut connection=connector.connect(
+  ServerName::try_from("endlessvibe.local").unwrap().to_owned(),socket
+ ).await.unwrap();
+ // Keep a TLS session open after claiming a frame larger than the bytes sent.
+ connection.write_u32(4096).await.unwrap();
+ connection.write_all(b"{\"kind\":").await.unwrap();
+ connection.flush().await.unwrap();
+ shutdown.cancel();
+ tokio::time::timeout(Duration::from_secs(6),task).await
+  .expect("TLS listener shutdown exceeded bounded grace").unwrap().unwrap();
+ // The partial request cannot outlive the listener and eventually execute.
+ let outcome=tokio::time::timeout(Duration::from_secs(1),recv(&mut connection)).await
+  .expect("Stalled TLS session was not closed after shutdown");
+ assert!(outcome.is_err());
 }
 #[test]fn retry_policy_never_replays_mutations(){for tool in ["read_file","list_directory","git_status","get_task_checkpoint","continue_task","get_job","get_job_output"]{assert!(retryable_tool(tool),"{tool}");}for tool in ["write_file","apply_patch","create_directory","run_command","cancel_job","git_commit","git_push","run_shell"]{assert!(!retryable_tool(tool),"{tool}");}}
 #[test]fn code_is_stable_and_permissions_fail_closed(){assert_eq!(code("cert","token"),code("cert","token"));assert_ne!(code("cert","token"),code("cert2","token"));assert!(!lan("8.8.8.8:20002".parse().unwrap()));assert!(lan("127.0.0.1:20002".parse().unwrap()));}}

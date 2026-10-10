@@ -77,6 +77,13 @@ a reconnect with the same request ID to return the cached result without
 creating a second operation. These tests do not simulate arbitrary packet loss
 or network latency; the fail-closed rule for uncertain mutations remains unchanged.
 
+The TLS server tracks its accepted sessions and reaps completed tasks. On shutdown it
+stops accepting new connections, gives existing sessions up to **3 seconds** to
+finish and then aborts remaining half-open sessions before releasing the
+listener's Runtime references. If a mutation is interrupted, its persisted
+request identity remains non-replayable; operators must inspect the child state
+rather than blindly submitting a new request ID.
+
 ## Planned authorization and routing invariants
 
 - Pairing must use an encrypted authenticated protocol. The discovery name and IP are untrusted hints, not identities.
