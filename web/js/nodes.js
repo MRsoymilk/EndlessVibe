@@ -14,15 +14,20 @@ function renderDiscovered(items){const root=clear("node-discovered-list",items.l
 async function remote(nodeId,tool,arguments_={}){const v=await send("/api/nodes/read","POST",{node_id:nodeId,tool,arguments:arguments_});return v}
 function detail(title,content){setText("node-remote-title",title);const output=$("node-remote-output");if(output)output.textContent=typeof content==="string"?content:JSON.stringify(content,null,2);const root=$("node-project-detail");if(root)root.hidden=false;}
 // Requests are untrusted child-node data: render labels with textContent, never innerHTML.
-async function loadRequestHistory(peer,w,p){
- const data=await remote(peer.node_id,"request_history",{workspace:w,project:p,limit:20});
+async function loadRequestHistory(peer,w,p,cursor=null,append=false){
+ const query={workspace:w,project:p,limit:20};
+ if(cursor)query.cursor=cursor;
+ const data=await remote(peer.node_id,"request_history",query);
  if(!selected||selected.node!==peer.node_id||selected.workspace!==w||selected.project!==p)return;
- const panel=$("node-request-history"),list=clear("node-history-list");
+ const panel=$("node-request-history"),list=append?$("node-history-list"):clear("node-history-list");
  if(!panel||!list)return;
  panel.hidden=false;
- setText("node-history-summary",(data.requests||[]).length+" recent"+(data.has_more?" · more available":""));
- if(!(data.requests||[]).length){list.append(node("span","node-muted","没有可显示的新请求记录。旧请求仍可通过 Request status 按 ID 查询。"));return;}
- for(const record of data.requests){
+ const records=Array.isArray(data.requests)?data.requests:[];
+ if(!records.length&&!append){
+  list.append(node("span","node-muted","没有可显示的新请求记录。旧请求仍可通过 Request status 按 ID 查询。"));
+ }
+ // Requests are untrusted child-node data: always render with textContent.
+ for(const record of records){
   const row=node("div","node-history-row"),meta=node("div","node-history-meta");
   const tag=node("span","node-history-state",String(record.state||"unknown"));tag.dataset.state=String(record.state||"unknown");
   const identity=node("strong","",String(record.request_id||""));
@@ -33,6 +38,16 @@ async function loadRequestHistory(peer,w,p){
   if(record.job_status){const jobTag=node("span","node-history-state","Job: "+record.job_status);jobTag.dataset.state=String(record.job_status);actions.append(jobTag);}
   actions.append(btn("Inspect",async()=>detail(w+"/"+p+" · Request "+record.request_id,await remote(peer.node_id,"request_status",{workspace:w,project:p,request_id:record.request_id}))));
   row.append(meta,actions);list.append(row);
+ }
+ const count=list.querySelectorAll(".node-history-row").length;
+ setText("node-history-summary",count+" loaded"+(data.has_more?" · older records available":""));
+ if(data.has_more&&data.next_cursor){
+  const more=btn("Load older requests",async()=>{
+   await loadRequestHistory(peer,w,p,data.next_cursor,true);
+   more.remove();
+  });
+  more.classList.add("node-history-more");
+  list.append(more);
  }
 }
 

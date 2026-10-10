@@ -7,7 +7,7 @@ form{display:grid;gap:14px;margin-top:24px}form input[type=password]{display:blo
 .node-history-heading,.node-history-row,.node-history-actions{display:flex;align-items:center;gap:10px}
 .node-history-heading,.node-history-row{justify-content:space-between}
 .node-history-heading{flex-wrap:wrap;font-size:12px}
-.node-history-list{display:grid;gap:8px;max-height:350px;overflow-y:auto}
+.node-history-list{display:grid;gap:8px;max-height:350px;overflow-y:auto}.node-history-more{justify-self:start;margin:4px 0}
 .node-history-row{flex-wrap:wrap;padding:10px 12px;background:var(--panel);border:1px solid var(--border);border-radius:9px}
 .node-history-meta{display:grid;gap:5px;min-width:0}
 .node-history-meta strong{font:600 12px "SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere}
