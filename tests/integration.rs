@@ -725,7 +725,33 @@ fn initialize_git(f:&Fixture,initial:bool){let w=f.rt.project("demo","demo").unw
 #[tokio::test]async fn read_only_projects_refuse_changes(){let f=fixture(|c|{c.workspaces[0].projects[0].allow_write=false;c.workspaces[0].projects[0].allow_exec=false;c.workspaces[0].projects[0].allow_git_commit=false;});let w=f.rt.project("demo","demo").unwrap();assert!(filesystem::mkdir(&w,MakeDirectoryArgs{workspace:"demo".into(),project:"demo".into(),path:"new".into(),task_id:None,stage:None}).is_err());assert!(w.exec_allowed().is_err());}
 #[tokio::test]async fn sibling_projects_have_independent_locks(){let f=fixture(|c|{let root=c.workspaces[0].path.clone();std::fs::create_dir_all(root.join("other")).unwrap();c.workspaces[0].projects.push(ProjectConfig{id:"other".into(),path:"other".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:endlessvibe::config::default_project_profile(),environment:vec![]});});let a=f.rt.project("demo","demo").unwrap();let b=f.rt.project("demo","other").unwrap();let guard=a.lock.clone().try_lock_owned().unwrap();assert!(a.lock.clone().try_lock_owned().is_err());assert!(b.lock.clone().try_lock_owned().is_ok());drop(guard);}
 #[tokio::test]async fn search_excludes_credentials_and_generated_files(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();std::fs::write(w.root.path.join(".env"),"hello SECRET=private").unwrap();std::fs::create_dir(w.root.path.join("target")).unwrap();std::fs::write(w.root.path.join("target/cache"),"hello generated").unwrap();let r=filesystem::search(&f.rt,&w,SearchArgs{workspace:"demo".into(),project:"demo".into(),query:"hello".into(),path:".".into(),regex:false,case_sensitive:true,max_results:100,task_id:None,stage:None}).unwrap();assert_eq!(r["matches"].as_array().unwrap().len(),1);assert!(!r.to_string().contains("SECRET"));}
-#[tokio::test]async fn projects_cannot_escape_to_server_state(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();std::os::unix::fs::symlink(&f.rt.config.security.data_dir,w.root.path.join("escape")).unwrap();assert!(w.root.read("escape/owner.key",4096).is_err());assert!(f.rt.project("demo","/etc").is_err());}
+#[tokio::test]
+async fn projects_cannot_escape_to_server_state(){
+    let f=fixture(|_|{});
+    let w=f.rt.project("demo","demo").unwrap();
+    #[cfg(unix)]
+    let link_created={
+        std::os::unix::fs::symlink(
+            &f.rt.config.security.data_dir,w.root.path.join("escape")
+        ).unwrap();
+        true
+    };
+    #[cfg(windows)]
+    let link_created=match std::os::windows::fs::symlink_dir(
+        &f.rt.config.security.data_dir,w.root.path.join("escape")
+    ){
+        Ok(())=>true,
+        Err(error) if error.raw_os_error()==Some(1314)=>{
+            eprintln!("Windows symlink privilege is unavailable; link traversal assertion skipped");
+            false
+        },
+        Err(error)=>panic!("Cannot create test directory symlink: {error}"),
+    };
+    if link_created{
+        assert!(w.root.read("escape/owner.key",4096).is_err());
+    }
+    assert!(f.rt.project("demo","/etc").is_err());
+}
 
 #[tokio::test]async fn git_commit_preserves_unrelated_staging_and_working_files(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.project("demo","demo").unwrap();std::fs::write(w.root.path.join("other.txt"),"staged user work\n").unwrap();git_cli(&w.root.path,&["add","other.txt"]);let before=git_cli(&w.root.path,&["diff","--cached","--binary"]);std::fs::write(w.root.path.join("tracked.txt"),"reviewed\n").unwrap();std::fs::write(w.root.path.join("new.txt"),"new file\n").unwrap();let paths=vec!["tracked.txt".into(),"new.txt".into()];let d=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),project:"demo".into(),paths:paths.clone(),offset:0,limit:16384,task_id:None,stage:None}).await.unwrap();let result=git::commit(&f.rt,&w,CommitArgs{workspace:"demo".into(),project:"demo".into(),paths,message:"feat(test): reviewed snapshot".into(),expected_head:d["head"].as_str().unwrap().into(),expected_diff_sha256:d["diff_sha256"].as_str().unwrap().into(),task_id:None,stage:None}).await.unwrap();assert_eq!(result["pushed"],false);assert_eq!(git_cli(&w.root.path,&["show","HEAD:tracked.txt"]),b"reviewed\n");assert_eq!(git_cli(&w.root.path,&["show","HEAD:new.txt"]),b"new file\n");assert_eq!(git_cli(&w.root.path,&["show","HEAD:other.txt"]),b"base\n");assert_eq!(git_cli(&w.root.path,&["diff","--cached","--binary"]),before);assert_eq!(std::fs::read(w.root.path.join("other.txt")).unwrap(),b"staged user work\n");assert!(!w.root.path.join(".git/index.lock").exists());}
 #[tokio::test]async fn git_rejects_stale_reviews(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.project("demo","demo").unwrap();std::fs::write(w.root.path.join("tracked.txt"),"first\n").unwrap();let paths=vec!["tracked.txt".into()];let d=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),project:"demo".into(),paths:paths.clone(),offset:0,limit:16384,task_id:None,stage:None}).await.unwrap();std::fs::write(w.root.path.join("tracked.txt"),"new user change\n").unwrap();let e=git::commit(&f.rt,&w,CommitArgs{workspace:"demo".into(),project:"demo".into(),paths,message:"fix(test): stale".into(),expected_head:d["head"].as_str().unwrap().into(),expected_diff_sha256:d["diff_sha256"].as_str().unwrap().into(),task_id:None,stage:None}).await;assert!(e.is_err());assert!(!w.root.path.join(".git/index.lock").exists());assert_eq!(std::fs::read(w.root.path.join("tracked.txt")).unwrap(),b"new user change\n");}

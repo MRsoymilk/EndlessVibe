@@ -62,7 +62,7 @@ pub fn snapshot(data_dir:&Path,db:&Store,retained_jobs:usize)->Result<Value>{
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test,unix))]
 mod tests{
     use super::*;
     #[cfg(unix)]
