@@ -190,6 +190,10 @@ async fn nodes_request_history_ui_assets_are_served(){
   ("/assets/js/nodes.js","loadRequestHistory"),
   ("/assets/js/nodes.js","request_history"),
   ("/assets/js/nodes.js","Load older requests"),
+  ("/nodes","id=\"node-metrics\""),
+  ("/assets/js/nodes.js","renderTransferMetrics"),
+  ("/assets/js/nodes.js","/api/nodes/metrics"),
+  ("/assets/app.css",".node-metrics article"),
   ("/assets/app.css",".node-history-state[data-state=\"interrupted\"]"),
  ]{
   let response=http(&router,"GET",path,Body::empty(),None,None,None).await;

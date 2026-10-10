@@ -40,6 +40,12 @@
 <section class="page" data-page="nodes">
 <div class="page-title"><div><p class="eyebrow">LAN NODE MESH</p><h2>Nodes</h2><p>局域网发现、加密配对与远程 Project 管理。发现不等于授权；必须在两台设备上核对验证码并分别批准。</p></div><span id="node-updated">等待扫描</span></div>
 <div class="node-summary"><span id="node-identity">Transfer disabled</span><button id="node-refresh" type="button">Refresh nodes</button></div>
+<div class="node-metrics" id="node-metrics" aria-label="Transfer reliability metrics">
+<article><span>Recorded requests</span><strong id="node-metric-total">—</strong></article>
+<article><span>Needs review</span><strong id="node-metric-review">—</strong></article>
+<article><span>Completed requests</span><strong id="node-metric-completed">—</strong></article>
+<article><span>Call success · 24h</span><strong id="node-metric-success">—</strong></article>
+</div><p id="node-metrics-detail" class="node-muted" aria-live="polite">Transfer request metrics are local-only.</p>
 <div id="node-status" class="write-status" role="status" aria-live="polite"></div>
 <div class="config-grid">
 <section class="config-card full"><div class="config-heading"><h3>Pair Child</h3><span>LAN · TLS</span></div><p class="config-note">从下方发现列表选择节点，或手动输入子节点的局域网 IP:Transfer 端口。配对仅创建等待确认的申请，不直接授权 Project。</p><form id="node-pair-form" class="node-pair-form"><label>Child IP:Port<input id="node-pair-address" type="text" placeholder="192.168.1.20:20002" required></label><button type="submit">Request pairing</button></form></section>
