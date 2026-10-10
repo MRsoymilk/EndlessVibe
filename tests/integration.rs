@@ -284,6 +284,36 @@ fn initialize_git(f:&Fixture,initial:bool){let w=f.rt.project("demo","demo").unw
 #[tokio::test]async fn git_diff_is_paginated_with_stable_review_token(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.project("demo","demo").unwrap();std::fs::write(w.root.path.join("tracked.txt"),(0..300).map(|i|format!("changed-line-{i:03}\n")).collect::<String>()).unwrap();let paths=vec!["tracked.txt".into()];let first=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),project:"demo".into(),paths:paths.clone(),offset:0,limit:512,task_id:None,stage:None}).await.unwrap();assert_eq!(first["has_more"],true);assert!(first["total_bytes"].as_u64().unwrap()>first["diff"].as_str().unwrap().len() as u64);let second=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),project:"demo".into(),paths,offset:first["next_offset"].as_u64().unwrap(),limit:512,task_id:None,stage:None}).await.unwrap();assert_eq!(first["diff_sha256"],second["diff_sha256"]);assert_eq!(first["head"],second["head"]);assert!(second["offset"].as_u64().unwrap()>0);}
 
 async fn wait_job(rt:&Arc<Runtime>,id:&str)->Value{for _ in 0..150{let j=rt.jobs.get(id).unwrap();if !matches!(j["status"].as_str(),Some("queued"|"running")){return j;}tokio::time::sleep(Duration::from_millis(30)).await;}panic!("Job did not finish");}
+#[tokio::test]
+async fn trusted_host_project_can_run_unlisted_local_tool_without_shell_api(){
+ let f=fixture(|c|{
+  c.execution.backend="host".into();
+  c.execution.acknowledge_unsafe_host_execution=true;
+  c.execution.allow_shell=false;
+  c.workspaces[0].projects[0].execution_profile="trusted_host".into();
+ });
+ let args=CommandArgs{workspace:"demo".into(),project:"demo".into(),
+  program:"sh".into(),args:vec!["-c".into(),"printf TRUSTED_HOST_OK".into()],
+  cwd:".".into(),request_id:"trusted-host-shell-command".into(),
+  timeout_seconds:Some(5),preflight_programs:vec![],
+  environment:Default::default(),network:None,task_id:None,stage:None};
+ assert!(!f.rt.config.execution.allowed_programs.contains(&"sh".to_owned()));
+ let job=f.rt.jobs.submit(f.rt.clone(),args,false).await.unwrap();
+ let id=job["job_id"].as_str().unwrap();
+ let finished=wait_job(&f.rt,id).await;
+ assert_eq!(finished["status"],"succeeded");
+ let output=f.rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:1024}).unwrap();
+ assert!(output["output"].as_str().unwrap().contains("TRUSTED_HOST_OK"));
+ assert_eq!(job["preflight"]["execution_profile"],"trusted_host");
+ let app=server::create_dashboard_router(f.rt.clone());
+ let page=http(&app,"GET","/projects",Body::empty(),None,None,None).await;
+ assert_eq!(page.status(),StatusCode::OK);
+ let html=to_bytes(page.into_body(),2*1024*1024).await.unwrap();
+ assert!(String::from_utf8_lossy(&html).contains("value=\"trusted_host\""));
+ let script=http(&app,"GET","/assets/app.js",Body::empty(),None,None,None).await;
+ let source=to_bytes(script.into_body(),2*1024*1024).await.unwrap();
+ assert!(String::from_utf8_lossy(&source).contains("trusted_host"));
+}
 #[tokio::test]async fn jobs_return_output_and_deduplicate(){let f=fixture(|_|{});let a=CommandArgs{workspace:"demo".into(),project:"demo".into(),program:"git".into(),args:vec!["--version".into()],cwd:".".into(),request_id:"once".into(),timeout_seconds:Some(3),preflight_programs:vec![],environment:Default::default(),network:Some(false),task_id:None,stage:None};let j=f.rt.jobs.submit(f.rt.clone(),a.clone(),false).await.unwrap();let id=j["job_id"].as_str().unwrap();let finished=wait_job(&f.rt,id).await;assert_eq!(finished["status"],"succeeded");let task_id=finished["task_id"].as_str().unwrap();assert!(task_id.starts_with("auto-job-"));assert_eq!(finished["stage"],"execute");let checkpoint=tasks::get(&f.rt.db,TaskArgs{workspace:"demo".into(),project:"demo".into(),task_id:task_id.into()}).unwrap();assert_eq!(checkpoint["latest"]["origin"],"auto_job");assert_eq!(checkpoint["latest"]["status"],"succeeded");let out=f.rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:4096}).unwrap();assert!(out["output"].as_str().unwrap().contains("git version"));let reused=f.rt.jobs.submit(f.rt.clone(),a.clone(),false).await.unwrap();assert_eq!(reused["job_id"],id);assert_eq!(reused["reused"],true);let mut changed=a;changed.args.push("different".into());assert!(f.rt.jobs.submit(f.rt.clone(),changed,false).await.is_err());}
 #[tokio::test]async fn dashboard_lists_automatic_job_and_job_detail(){let f=fixture(|_|{});let a=CommandArgs{workspace:"demo".into(),project:"demo".into(),program:"git".into(),args:vec!["--version".into()],cwd:".".into(),request_id:"dashboard-auto-job".into(),timeout_seconds:Some(3),preflight_programs:vec![],environment:Default::default(),network:Some(false),task_id:None,stage:None};let j=f.rt.jobs.submit(f.rt.clone(),a,false).await.unwrap();let id=j["job_id"].as_str().unwrap();assert_eq!(wait_job(&f.rt,id).await["status"],"succeeded");let dashboard=server::create_dashboard_router(f.rt.clone());let data=json_body(http(&dashboard,"GET","/api/tasks",Body::empty(),None,None,None).await).await;let checkpoints=data["checkpoints"].as_array().unwrap();assert_eq!(checkpoints.len(),1);assert_eq!(checkpoints[0]["origin"],"auto_job");assert_eq!(checkpoints[0]["status"],"succeeded");assert!(checkpoints[0]["last_commit"].is_null());assert_eq!(checkpoints[0]["program"],"git");assert_eq!(checkpoints[0]["request_id"],"dashboard-auto-job");assert_eq!(data["total_auto_jobs"],1);assert_eq!(data["total_explicit_tasks"],0);let detail=http(&dashboard,"GET",&format!("/api/jobs/{id}"),Body::empty(),None,None,None).await;assert_eq!(detail.status(),StatusCode::OK);let payload=json_body(detail).await;assert!(payload["output"]["output"].as_str().unwrap().contains("git version"));}
 #[tokio::test]async fn task_tool_links_file_operations_and_dashboard_shows_them(){let f=fixture(|_|{});let app=server::create_router(f.rt.clone());let token=f.rt.auth.issue_local_token().unwrap();let start=json!({"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"start_task","arguments":{"workspace":"demo","project":"demo","task_id":"feature-fft","stage":"inspect"}}});let response=http(&app,"POST","/mcp",Body::from(start.to_string()),Some("application/json"),Some(&token),None).await;assert_eq!(response.status(),StatusCode::OK);let read=json!({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"demo","project":"demo","path":"src/main.rs","task_id":"feature-fft","stage":"inspect"}}});let response=http(&app,"POST","/mcp",Body::from(read.to_string()),Some("application/json"),Some(&token),None).await;assert_eq!(response.status(),StatusCode::OK);let cp=tasks::get(&f.rt.db,TaskArgs{workspace:"demo".into(),project:"demo".into(),task_id:"feature-fft".into()}).unwrap();let ops=cp["latest"]["operations"].as_array().unwrap();assert!(ops.iter().any(|op|op["tool"]=="read_file"&&op["status"]=="succeeded"));assert_eq!(cp["latest"]["status"],"pending");let dashboard=server::create_dashboard_router(f.rt.clone());let data=json_body(http(&dashboard,"GET","/api/tasks",Body::empty(),None,None,None).await).await;assert!(data["checkpoints"].as_array().unwrap().iter().any(|item|item["task_id"]=="feature-fft"));assert_eq!(data["total_explicit_tasks"],1);assert_eq!(data["total_auto_jobs"],0);}

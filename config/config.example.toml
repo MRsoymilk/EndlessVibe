@@ -26,6 +26,11 @@ search_max_files = 5000
 search_max_bytes = 67108864
 
 [execution]
+# To allow all installed local executables for a single trusted Project:
+#   backend = "host"
+#   acknowledge_unsafe_host_execution = true
+#   and set that Project's execution_profile = "trusted_host".
+# This disables the sandbox for command-enabled Projects; do not use for untrusted code.
 backend = "bubblewrap"
 acknowledge_unsafe_host_execution = false
 allow_shell = false
@@ -59,6 +64,8 @@ allow_git_commit = true
 allow_git_mutation = false
 allow_git_push = false
 execution_profile = "development"
+# Optional (requires acknowledged [execution] backend="host"):
+# execution_profile = "trusted_host" # Run any installed PATH tool via run_command.
 # Optional one-time Project environment. Values are not shown by Dashboard/API summaries.
 # environment = ["TEST_DATABASE_URL=postgres://user:password@127.0.0.1:19031/test"]
 

@@ -103,6 +103,83 @@ readonly_mounts = [
 
 在 `isolated` profile 下，不要挂宿主 PostgreSQL 的数据目录、认证文件、Unix socket、开发数据库或 Docker socket。测试应在 `/cache` 或其他 Job 私有可写目录初始化临时数据库并使用自己的 loopback namespace。需要复用现有 Docker 开发环境时，应明确把该 Project 切到 `development`，由统一的 profile 逻辑暴露宿主网络和 Docker socket，而不是手工追加任意 mount。
 
+### Trusted host Project: use locally installed tools without a per-tool allowlist
+
+For **personally trusted** projects that need QEMU, image builders, cross-compilers,
+or custom SDKs, set `execution_profile = "trusted_host"` on that Project.
+This is a **per-project** opt-in, not an implicit global wildcard and not a new MCP.
+The global `[execution]` section must also explicitly select and acknowledge
+unsandboxed host execution:
+
+```toml
+[execution]
+backend = "host"
+acknowledge_unsafe_host_execution = true
+allow_shell = false
+path = "/usr/local/bin:/usr/bin:/bin"
+
+[[workspaces]]
+id = "projects"
+path = "/home/vv/project"
+
+[[workspaces.projects]]
+id = "milk64"
+path = "milk64"
+allow_write = true
+allow_exec = true
+allow_git_commit = true
+execution_profile = "trusted_host"
+```
+
+Merge these values with your **existing** config; do not duplicate TOML tables
+or replace other workspace/project grants. The global `host` backend impacts
+every command-enabled project (other profiles retain their program allowlist,
+but are still **not sandboxed**). Use a dedicated unprivileged OS account,
+not root. Restart EndlessVibe after changing the service-level execution
+backend, then enable the individual Project profile in Config or TOML.
+
+In `trusted_host`, `run_command` can launch any **installed executable
+whose simple name is resolvable in `execution.path`**, without being present
+in `execution.allowed_programs` or an auto-detected manifest. Thus
+`program="bash", args=["tools/boot.sh","smoke"]` can run a project's QEMU
+and ISO workflow. The program name must still be simple (no arbitrary
+absolute paths), arguments remain bounded, jobs are audited and have a
+timeout, and preflight refuses missing tools. `run_shell` remains separately
+controlled by `allow_shell`, **but allowing Bash through `run_command`
+also permits arbitrary shell scripts**; it is not a security barrier.
+
+**Risk:** host commands run with the EndlessVibe service user's filesystem,
+network and device permissions. Build scripts can spawn child commands or
+read the service account's files; Project filesystem APIs and Git push scopes
+cannot constrain arbitrary host processes. This mode is unsuitable for
+untrusted repositories or external collaborators. No sudo/system packages,
+Rust target libraries, QEMU, OVMF, or image tools are installed automatically.
+
+#### Rust bare-metal and Milk64 prerequisites
+
+`x86_64-unknown-none` is a freestanding Rust target. Its precompiled `core`
+must match the compiler/toolchain used by the Job. For rustup-managed 1.97.1:
+
+```sh
+rustup toolchain install 1.97.1 --profile minimal
+rustup target add x86_64-unknown-none --toolchain 1.97.1
+rustup run 1.97.1 rustc --print target-libdir --target x86_64-unknown-none
+```
+
+For Gentoo's system-packaged Rust without rustup, install the matching target
+components using an appropriate toolchain manager, or switch this project to
+a compatible rustup toolchain. Merely listing `targets` in
+`rust-toolchain.toml` does not install `libcore` into a system Rust sysroot.
+Verify an actual `libcore-*.rlib` exists in the target libdir and run
+`cargo check -p milk64-kernel --target x86_64-unknown-none`.
+
+Milk64's boot script additionally needs `bash`, `qemu-system-x86_64`,
+`xorriso`, `curl`, `tar`, `sha256sum`, `timeout`, and matching OVMF
+CODE/VARS files; `gdb` and `nasm` are useful for later stages. The tools must
+be installed and on the configured PATH. Test first with
+`run_command(program="bash", args=["tools/boot.sh","smoke"], ...)`; never
+assume availability simply because the trusted mode bypasses a whitelist.
+
 ## Shell 与白名单
 
 `run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
