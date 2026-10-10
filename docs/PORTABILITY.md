@@ -41,6 +41,20 @@ for the same desktop logon session and Windows account. Sessions managed by
 external service supervisors should still be controlled by those supervisors.
 No host-command execution backend needs to be enabled for process control.
 
+### Windows MSVC toolchain in host jobs
+
+When a Windows host job executes cargo, rustc, cmake, or ninja, EndlessVibe
+discovers an installed Visual Studio MSVC x64 toolset and a Windows SDK.
+It injects absolute paths for link.exe, cl.exe, lib.exe, the SDK libraries
+and include directories, along with PATH, LIB, and INCLUDE settings.
+The newest complete installed versions are selected, not hardcoded releases.
+
+For nonstandard installations, set ENDLESSVIBE_MSVC_LINKER to the absolute
+path of link.exe in the service process environment before starting
+EndlessVibe. Matching cl.exe, lib.exe, runtime libraries and a Windows SDK
+must also be installed. Explicit job environment values override discovered
+defaults. This fixes host toolchain setup; it does not add sandbox isolation.
+
 ## Safe defaults
 
 On Linux, Bubblewrap is the default execution backend. Windows and macOS

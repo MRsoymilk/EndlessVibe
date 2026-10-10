@@ -239,6 +239,12 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
             if !config.execution.acknowledge_unsafe_host_execution{bail!("Host execution has not been explicitly authorized");}
             let executable=if shell{validated_executable(&config.execution.path,if cfg!(windows){"powershell"}else{"bash"})?}else{validated_executable(&config.execution.path,program)?};
             let mut c=Command::new(executable);clean_environment(&mut c,&config.execution.path);c.current_dir(host_cwd);
+            #[cfg(windows)]
+            if matches!(program,"cargo"|"rustc"|"cmake"|"ninja"){
+                if !crate::tools::windows_msvc::configure_host_job(&mut c,&config.execution.path){
+                    tracing::debug!("Windows MSVC toolchain was not found; using configured PATH");
+                }
+            }
             // Explicit host mode is not a sandbox; no service token/key is inherited.
             if let Some(home)=std::env::var_os("HOME").or_else(||std::env::var_os("USERPROFILE")){c.env("HOME",home);}c.envs(environment).env("ENDLESSVIBE_JOB_SUMMARY",summary_path);c.args(args);c
         }
