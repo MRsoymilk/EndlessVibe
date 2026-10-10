@@ -49,7 +49,7 @@ pub fn default_project_profile()->String{"isolated".into()}
 fn is_isolated_profile(value:&String)->bool{value=="isolated"}
 pub fn valid_environment_name(name:&str)->bool{let mut bytes=name.bytes();matches!(bytes.next(),Some(b)if b.is_ascii_alphabetic()||b==b'_')&&bytes.all(|b|b.is_ascii_alphanumeric()||b==b'_')}
 pub fn parse_environment_entries(entries:&[String])->Result<BTreeMap<String,String>>{if entries.len()>64{bail!("project environment accepts at most 64 entries");}let reserved=["HOME","PATH","CARGO_HOME","XDG_CACHE_HOME","LANG","LC_ALL","TERM","ENDLESSVIBE_JOB_SUMMARY"];let mut out=BTreeMap::new();let mut total=0usize;for entry in entries{let(name,value)=entry.split_once('=').context("project environment entries must use NAME=VALUE")?;if !valid_environment_name(name)||name.len()>128{bail!("project environment names must match [A-Za-z_][A-Za-z0-9_]* and be at most 128 bytes");}if reserved.contains(&name){bail!("project environment variable {name} is reserved by EndlessVibe");}if value.contains('\0')||value.len()>65536{bail!("project environment variable {name} contains NUL or exceeds 65536 bytes");}total=total.saturating_add(entry.len());if out.insert(name.to_owned(),value.to_owned()).is_some(){bail!("project environment contains duplicate variable {name}");}}if total>131072{bail!("project environment exceeds 131072 bytes");}Ok(out)}
-impl ProjectConfig{pub fn development(&self)->bool{self.execution_profile=="development"}pub fn environment_map(&self)->Result<BTreeMap<String,String>>{parse_environment_entries(&self.environment)}}
+impl ProjectConfig{pub fn development(&self)->bool{matches!(self.execution_profile.as_str(),"development"|"trusted_host")}pub fn trusted_host(&self)->bool{self.execution_profile=="trusted_host"}pub fn environment_map(&self)->Result<BTreeMap<String,String>>{parse_environment_entries(&self.environment)}}
 
 pub fn default_config_path() -> PathBuf { env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config")).join("endlessvibe/config.toml") }
 pub fn default_state_dir() -> PathBuf { env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("endlessvibe") }
@@ -99,13 +99,13 @@ impl Config {
             if !valid_id(&w.id) || !ids.insert(w.id.clone()) || !w.path.is_absolute() { bail!("Workspaces need unique simple IDs and absolute root paths"); }
             if w.projects.is_empty() && (w.allow_exec==Some(true) || w.allow_git_commit==Some(true) || w.allow_git_mutation==Some(true)) && w.allow_write!=Some(true) { bail!("Legacy workspace {}: execution/commit/git mutation also require allow_write", w.id); }
             if w.projects.is_empty() && w.allow_git_mutation==Some(true) && w.allow_exec!=Some(true) { bail!("Legacy workspace {}: allow_git_mutation requires allow_exec=true", w.id); }
-            if w.projects.is_empty(){if let Some(profile)=&w.execution_profile{if !matches!(profile.as_str(),"isolated"|"development"){bail!("Legacy workspace {}: execution_profile must be isolated or development",w.id);}}parse_environment_entries(&w.environment).with_context(||format!("Legacy workspace {} environment is invalid",w.id))?;}
+            if w.projects.is_empty(){if let Some(profile)=&w.execution_profile{if !matches!(profile.as_str(),"isolated"|"development"|"trusted_host"){bail!("Legacy workspace {}: execution_profile must be isolated, development or trusted_host",w.id);}if profile=="trusted_host" && (self.execution.backend!="host"||!self.execution.acknowledge_unsafe_host_execution||w.allow_exec!=Some(true)||w.allow_write!=Some(true)){bail!("Legacy workspace {}: trusted_host requires acknowledged host backend and write + exec permissions",w.id);}}parse_environment_entries(&w.environment).with_context(||format!("Legacy workspace {} environment is invalid",w.id))?;}
             let mut projects=HashSet::new();
             for p in &w.projects {
                 if !valid_id(&p.id)||!projects.insert(p.id.clone())||p.path.is_absolute()||p.path.components().any(|c|matches!(c,std::path::Component::ParentDir|std::path::Component::RootDir|std::path::Component::Prefix(_))){bail!("Workspace {} projects need unique simple IDs and relative paths without '..'",w.id);}
                 if (p.allow_exec||p.allow_git_commit)&&!p.allow_write{bail!("Project {}/{}: execution/commit also require allow_write",w.id,p.id);}
                 if p.allow_git_mutation&&(!p.allow_write||!p.allow_exec){bail!("Project {}/{}: allow_git_mutation requires allow_write=true and allow_exec=true",w.id,p.id);}
-                if !matches!(p.execution_profile.as_str(),"isolated"|"development"){bail!("Project {}/{}: execution_profile must be isolated or development",w.id,p.id);}
+                if !matches!(p.execution_profile.as_str(),"isolated"|"development"|"trusted_host"){bail!("Project {}/{}: execution_profile must be isolated, development or trusted_host",w.id,p.id);}if p.trusted_host()&&(self.execution.backend!="host"||!self.execution.acknowledge_unsafe_host_execution||!p.allow_write||!p.allow_exec){bail!("Project {}/{}: trusted_host requires acknowledged host backend and write + exec permissions",w.id,p.id);}
                 p.environment_map().with_context(||format!("Project {}/{} environment is invalid",w.id,p.id))?;
             }
         }
@@ -126,5 +126,27 @@ impl Config {
     #[test] fn git_mutation_requires_write_and_exec(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:true,allow_git_push:false,execution_profile:default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];assert!(c.validate().is_err());c.workspaces[0].projects[0].allow_exec=true;assert!(c.validate().is_ok());}
     #[test] fn allowed_programs_are_simple_and_unique(){let mut c=Config::default();c.execution.allowed_programs=vec!["cargo".into(),"cargo".into()];assert!(c.validate().is_err());c.execution.allowed_programs=vec!["/usr/bin/cargo".into()];assert!(c.validate().is_err());c.execution.allowed_programs=vec!["cargo".into(),"rustc".into()];assert!(c.validate().is_ok());}
     #[test] fn required_programs_are_simple_and_may_overlap_allowed(){let mut c=Config::default();c.execution.required_programs=vec!["cargo".into(),"postgres".into()];assert!(c.validate().is_ok());c.execution.required_programs=vec!["postgres".into(),"postgres".into()];assert!(c.validate().is_err());c.execution.required_programs=vec!["/opt/postgres/bin/postgres".into()];assert!(c.validate().is_err());}
+    #[test]
+    fn trusted_host_profile_requires_explicit_host_acknowledgement(){
+      let mut c=Config::default();
+      c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![
+        ProjectConfig{id:"kernel".into(),path:"kernel".into(),allow_write:true,allow_exec:true,
+          allow_git_commit:false,allow_git_mutation:false,allow_git_push:false,
+          execution_profile:"trusted_host".into(),environment:vec![]}
+      ],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,
+        allow_git_push:None,execution_profile:None,environment:vec![]}];
+      assert!(c.validate().is_err());
+      c.execution.backend="host".into();
+      assert!(c.validate().is_err());
+      c.execution.acknowledge_unsafe_host_execution=true;
+      assert!(c.validate().is_ok());
+      c.workspaces[0].projects[0].allow_exec=false;
+      assert!(c.validate().is_err());
+      c.workspaces[0].projects[0].allow_exec=true;
+      c.workspaces[0].projects[0].execution_profile="development".into();
+      assert!(c.validate().is_ok());
+      c.execution.backend="bubblewrap".into();
+      assert!(c.validate().is_ok());
+    }
     #[test]fn project_environment_and_profiles_are_validated(){assert!(parse_environment_entries(&["TEST_DATABASE_URL=postgres://localhost/test".into()]).is_ok());assert!(parse_environment_entries(&["PATH=/tmp".into()]).is_err());let p=ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:"development".into(),environment:vec!["A=1".into()]};assert!(p.development());assert_eq!(p.environment_map().unwrap()["A"],"1");}
 }
