@@ -104,6 +104,13 @@ async fn transfer_request_history_survives_runtime_restart_and_revocation(){
  assert_eq!(state["recovery_action"],"inspect_project_before_new_request");
  let history=parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":20})).await.unwrap();
  let rows=history["requests"].as_array().unwrap();
+ let first_page=parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":1})).await.unwrap();
+ assert_eq!(first_page["requests"].as_array().unwrap().len(),1);
+ assert_eq!(first_page["has_more"],true);
+ let cursor=first_page["next_cursor"].as_str().unwrap();
+ let second_page=parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":1,"cursor":cursor})).await.unwrap();
+ assert_ne!(first_page["requests"][0]["request_id"],second_page["requests"][0]["request_id"]);
+ assert!(parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":1,"cursor":"invalid"})).await.is_err());
  assert!(rows.iter().any(|r|r["request_id"]=="confirmed-create"&&r["state"]=="completed"));
  assert!(rows.iter().any(|r|r["request_id"]=="rejected-create"&&r["state"]=="failed"));
  assert!(rows.iter().any(|r|r["request_id"]==interrupted_id&&r["state"]=="interrupted"));
