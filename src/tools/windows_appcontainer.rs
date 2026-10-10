@@ -250,6 +250,7 @@ fn launch_isolated_test(
     let mut startup:STARTUPINFOEXW=unsafe{zeroed()};
     startup.StartupInfo.cb=size_of::<STARTUPINFOEXW>() as u32;
     startup.lpAttributeList=attrs.ptr() as _;
+    let job=crate::tools::windows_job::JobObject::create(512,8)?;
     let mut child:PROCESS_INFORMATION=unsafe{zeroed()};
     let ok=unsafe{CreateProcessW(
         executable.as_ptr(),command.as_mut_ptr(),ptr::null(),ptr::null(),0,
@@ -264,7 +265,11 @@ fn launch_isolated_test(
     if !has_appcontainer_token(process.process.as_raw_handle() as _)?{
         bail!("Isolated child did not have a real AppContainer token");
     }
-    process.resume_and_wait()
+    job.assign(child.dwProcessId)?;
+    assert!(job.contains(child.dwProcessId)?,"AppContainer probe escaped its Job Object");
+    let result=process.resume_and_wait();
+    job.terminate();
+    result
 }
 
 #[cfg(test)]

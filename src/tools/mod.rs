@@ -7,7 +7,7 @@ pub mod process;
 pub mod windows_msvc;
 #[cfg(windows)]
 pub mod windows_job;
-#[cfg(windows)]
+#[cfg(all(windows,test))]
 pub mod windows_appcontainer;
 pub mod tasks;
 pub mod types;

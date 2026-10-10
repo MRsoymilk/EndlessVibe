@@ -72,6 +72,10 @@ Native Windows tests launch a real AppContainer process: it can read the
 staged file but cannot read the original Project file or reach the local
 Dashboard over loopback when no network capabilities are granted.
 
+The AppContainer prototype is compiled into Windows test targets only; it
+is not included in the production command runner until output capture,
+cancellation and controlled output publication have been implemented.
+
 This is still an isolated-identity and file-staging layer, NOT a selectable
 production execution backend or a general sandboxed Cargo runner. Complete
 stdout/stderr streaming, cancellation, and controlled output synchronization

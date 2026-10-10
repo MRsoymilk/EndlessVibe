@@ -35,7 +35,7 @@ pub struct JobObject{
     handle:OwnedHandle,
 }
 impl JobObject {
-    fn create(memory_mb:u64,processes:u64)->Result<Self>{
+    pub(super) fn create(memory_mb:u64,processes:u64)->Result<Self>{
         let bytes=memory_mb.checked_mul(1024*1024)
             .and_then(|value|usize::try_from(value).ok())
             .context("Windows Job Object memory limit exceeds architecture capacity")?;
@@ -62,7 +62,7 @@ impl JobObject {
         }
         Ok(Self{handle})
     }
-    fn assign(&self,pid:u32)->Result<()>{
+    pub(super) fn assign(&self,pid:u32)->Result<()>{
         let process=unsafe{OpenProcess(
             PROCESS_SET_QUOTA|PROCESS_TERMINATE|PROCESS_QUERY_LIMITED_INFORMATION,0,pid,
         )};
@@ -83,7 +83,7 @@ impl JobObject {
         let _=unsafe{TerminateJobObject(self.handle.as_raw_handle() as _,1)};
     }
     #[cfg(test)]
-    fn contains(&self,pid:u32)->Result<bool>{
+    pub(super) fn contains(&self,pid:u32)->Result<bool>{
         let raw=unsafe{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,pid)};
         if raw.is_null(){return Err(std::io::Error::last_os_error()).context("Open child for job membership check");}
         let process=unsafe{OwnedHandle::from_raw_handle(raw as _)};
