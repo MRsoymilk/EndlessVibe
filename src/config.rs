@@ -32,7 +32,7 @@ impl Default for Git { fn default() -> Self { Self { executable: if cfg!(windows
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Docker { pub enabled:bool, pub socket:PathBuf, pub allowed_containers:Vec<String>, pub allow_start:bool, pub allow_stop:bool, pub allow_restart:bool, pub allow_project_socket:bool }
-impl Default for Docker { fn default()->Self{Self{enabled:false,socket:"/var/run/docker.sock".into(),allowed_containers:vec![],allow_start:false,allow_stop:false,allow_restart:false,allow_project_socket:false}} }
+impl Default for Docker { fn default()->Self{Self{enabled:false,socket:if cfg!(windows){PathBuf::new()}else{"/var/run/docker.sock".into()},allowed_containers:vec![],allow_start:false,allow_stop:false,allow_restart:false,allow_project_socket:false}} }
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Transfer{pub enabled:bool,pub listen:SocketAddr,pub advertise:bool,pub discover:bool,pub display_name:String}
@@ -106,9 +106,20 @@ impl Config {
         if self.execution.memory_limit_mb < 64 || self.execution.max_processes < 8 { bail!("Execution resource limits too small"); }
         if self.execution.readonly_mounts.len()>64{bail!("execution.readonly_mounts accepts at most 64 entries");}let mut mount_targets=HashSet::new();for m in &self.execution.readonly_mounts { if !m.source.is_absolute() || !m.source.exists() || !(m.target.starts_with("/opt/") || m.target.starts_with("/cache-readonly/")) || m.target.components().any(|p| matches!(p, std::path::Component::ParentDir)) { bail!("Read-only mounts require an existing absolute source and a /opt/... or /cache-readonly/... destination"); }if !mount_targets.insert(m.target.clone()){bail!("execution.readonly_mounts target paths must be unique");} }
         if self.transfer.listen.port()==0||self.transfer.display_name.trim().is_empty()||self.transfer.display_name.len()>64||self.transfer.display_name.contains(['\n','\r','\0']){bail!("Transfer listener requires a nonzero port and a short safe display name");}
-        if !self.docker.socket.is_absolute()||self.docker.socket.components().any(|c|matches!(c,std::path::Component::ParentDir))||self.docker.allowed_containers.len()>64||self.docker.allowed_containers.iter().any(|name|!valid_docker_container(name)) { bail!("Docker socket must be an absolute path without '..'; allowlist supports at most 64 exact, simple container names"); }
+        // Docker is disabled by default. On Windows a Unix socket path cannot
+        // be absolute; validate socket paths only when the transport is enabled.
+        // Container allowlist validation always applies, even when disabled.
+        if self.docker.allowed_containers.len()>64||self.docker.allowed_containers.iter().any(|name|!valid_docker_container(name)){bail!("Docker allowlist supports at most 64 exact, simple container names");}
         let mut docker_names=HashSet::new();if self.docker.allowed_containers.iter().any(|name|!docker_names.insert(name)){bail!("Docker allowed_containers must be unique");}
-        if self.docker.enabled&&self.docker.allowed_containers.is_empty(){bail!("Docker MCP requires at least one explicitly allowed container name");}
+        if self.docker.enabled {
+            #[cfg(windows)]
+            bail!("Docker MCP Unix-socket transport is not supported on Windows; set [docker].enabled=false");
+            #[cfg(unix)]
+            {
+                if !self.docker.socket.is_absolute()||self.docker.socket.components().any(|c|matches!(c,std::path::Component::ParentDir)){bail!("Enabled Docker socket must be an absolute path without '..'");}
+                if self.docker.allowed_containers.is_empty(){bail!("Docker MCP requires at least one explicitly allowed container name");}
+            }
+        }
         if !self.git.executable.is_absolute() && !(cfg!(windows)&&self.git.executable==Path::new("git")) || self.git.author_name.trim().is_empty() || self.git.author_email.trim().is_empty() || self.git.author_name.contains(['\n', '\r', '\0']) || self.git.author_email.contains(['\n', '\r', '\0']) { bail!("Invalid Git executable or author identity"); }
         let mut ids = HashSet::new();
         for w in &self.workspaces {
@@ -133,7 +144,69 @@ impl Config {
     use super::*;
     #[test]fn search_resource_limits_are_bounded(){let mut c=Config::default();assert!(c.validate().is_ok());c.limits.search_max_files=0;assert!(c.validate().is_err());c.limits.search_max_files=100001;assert!(c.validate().is_err());c.limits.search_max_files=5000;c.limits.search_max_bytes=1024*1024*1024+1;assert!(c.validate().is_err());}
     #[test]fn transfer_is_disabled_by_default(){let mut c=Config::default();assert!(!c.transfer.enabled);assert_eq!(c.transfer.listen.port(),20002);c.transfer.display_name.clear();assert!(c.validate().is_err());}
-    #[test]fn docker_requires_exact_allowlist_and_is_disabled_by_default(){let mut c=Config::default();assert!(!c.docker.enabled);assert!(!c.docker.allow_project_socket);c.docker.enabled=true;assert!(c.validate().is_err());c.docker.allowed_containers=vec!["endlessvibe".into()];assert!(c.validate().is_ok());c.docker.allowed_containers.push("../other".into());assert!(c.validate().is_err());c.docker.allowed_containers.pop();c.docker.allowed_containers.push("endlessvibe".into());assert!(c.validate().is_err());}
+    #[test]fn docker_requires_exact_allowlist_and_is_disabled_by_default(){
+        let mut c=Config::default();
+        assert!(!c.docker.enabled);
+        assert!(!c.docker.allow_project_socket);
+        c.docker.enabled=true;
+        assert!(c.validate().is_err());
+        c.docker.allowed_containers=vec!["endlessvibe".into()];
+        #[cfg(unix)]
+        assert!(c.validate().is_ok());
+        #[cfg(windows)]
+        assert!(c.validate().unwrap_err().to_string().contains("Windows"));
+        c.docker.allowed_containers.push("../other".into());
+        assert!(c.validate().is_err());
+        c.docker.allowed_containers.pop();
+        c.docker.allowed_containers.push("endlessvibe".into());
+        assert!(c.validate().is_err());
+    }
+    #[test]fn disabled_docker_does_not_require_a_unix_socket(){
+        let mut c=Config::default();
+        assert!(!c.docker.enabled);
+        c.docker.socket=PathBuf::new();
+        assert!(c.validate().is_ok());
+        // An inactive socket setting must not prevent Windows initialization.
+        c.docker.socket="../not-a-docker.sock".into();
+        assert!(c.validate().is_ok());
+        // Inactive does not mean that invalid allowlists become acceptable.
+        c.docker.allowed_containers=vec!["../unsafe".into()];
+        assert!(c.validate().is_err());
+    }
+    #[cfg(unix)]
+    #[test]fn enabled_docker_rejects_invalid_unix_socket_paths(){
+        let mut c=Config::default();
+        c.docker.enabled=true;
+        c.docker.allowed_containers=vec!["allowed".into()];
+        c.docker.socket=PathBuf::new();
+        assert!(c.validate().is_err());
+        c.docker.socket="../relative.sock".into();
+        assert!(c.validate().is_err());
+        c.docker.socket="/tmp/../docker.sock".into();
+        assert!(c.validate().is_err());
+        c.docker.socket="/var/run/docker.sock".into();
+        assert!(c.validate().is_ok());
+    }
+    #[cfg(windows)]
+    #[test]fn windows_default_config_serializes_and_validates_for_init(){
+        let root=tempfile::tempdir().unwrap();
+        let mut c=Config::default();
+        assert!(c.docker.socket.as_os_str().is_empty());
+        c.workspaces.push(WorkspaceConfig{
+            id:"project".into(),path:root.path().to_owned(),projects:vec![],
+            allow_write:None,allow_exec:None,allow_git_commit:None,
+            allow_git_mutation:None,allow_git_push:None,execution_profile:None,
+            environment:vec![]
+        });
+        c.validate().expect("default Windows settings should permit --init");
+        let text=toml::to_string_pretty(&c).unwrap();
+        let decoded:Config=toml::from_str(&text).unwrap();
+        decoded.validate().expect("generated Windows config should be loadable");
+        assert!(decoded.docker.socket.as_os_str().is_empty());
+        c.docker.enabled=true;
+        c.docker.allowed_containers.push("allowed".into());
+        assert!(c.validate().unwrap_err().to_string().contains("Windows"));
+    }
     #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, if cfg!(target_os="linux"){"bubblewrap"}else{"disabled"}); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }
