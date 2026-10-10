@@ -56,6 +56,17 @@ Job Objects do not restrict file access, registry, network or user security
 tokens: this is a resource-containment stage, NOT a Windows AppContainer
 sandbox. Host mode still requires explicit unsafe-host authorization.
 
+### Windows sandbox status in the local Dashboard
+
+The /sandbox page has a Check Sandbox action on Windows as well as Linux.
+On Windows this is a policy/status check: it does not execute Project code,
+launch a sandboxed task or claim that AppContainer is production-ready.
+It reports whether Job Objects resource limits apply to currently enabled
+command jobs, marks filesystem/network isolation as absent for host mode,
+shows the fixed-operation AppContainer worker protocol version, and reports
+the protected startup profile-recovery facility. AppContainer remains
+unselectable as a general command execution backend.
+
 ### Versioned isolated-worker protocol
 
 src/tools/sandbox_protocol.rs defines a size-bounded, strict JSON request

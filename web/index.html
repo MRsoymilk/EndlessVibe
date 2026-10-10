@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="/assets/app.css?v=design-2">
 <link rel="stylesheet" href="/assets/theme.css?v=design-3">
 <script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
-<script type="module" src="/assets/app.js?v=dashboard-data-15" defer></script>
+<script type="module" src="/assets/app.js?v=dashboard-data-16" defer></script>
 </head>
 <body>
 <main class="shell">
@@ -146,7 +146,7 @@
 <article><div class="sandbox-stage-title"><strong>AppContainer</strong><span id="sandbox-appcontainer-status">开发中 · 不可选</span></div><p>已在 Windows 测试构建中验证低权限令牌、默认网络拒绝、私有文件暂存、日志读取及异常清理。尚未支持生产任务执行与任意程序的标准输出捕获，不能启用。</p></article>
 <article><div class="sandbox-stage-title"><strong>Bubblewrap</strong><span id="sandbox-bubblewrap-status">检查平台</span></div><p>Linux 专用的命名空间隔离；Windows 不支持。只有 Linux 才可以选择该执行后端。</p></article>
 </div></section>
-<section class="config-card full"><div class="config-heading"><h3>Sandbox Diagnostics</h3><span id="sandbox-updated">NOT CHECKED</span></div><p class="config-note">只探测基础 bubblewrap namespace 和程序可见性，不挂载 Project、不运行项目代码。</p><div class="config-reload-actions"><button type="button" id="sandbox-check">Check Sandbox</button><span id="sandbox-check-status" class="write-status" role="status" aria-live="polite"></span></div><dl id="config-sandbox-summary" class="config-list"></dl><div id="sandbox-program-list" class="activity-list empty-state">尚未执行 sandbox diagnostics</div></section>
+<section class="config-card full"><div class="config-heading"><h3>Sandbox Diagnostics</h3><span id="sandbox-updated">NOT CHECKED</span></div><p class="config-note">Linux 仅探测 bubblewrap namespace 和程序可见性；Windows 展示 Job Objects、AppContainer 和恢复能力的实际支持状态，不执行项目代码。</p><div class="config-reload-actions"><button type="button" id="sandbox-check">Check Sandbox</button><span id="sandbox-check-status" class="write-status" role="status" aria-live="polite"></span></div><dl id="config-sandbox-summary" class="config-list"></dl><div id="sandbox-program-list" class="activity-list empty-state">尚未执行 sandbox diagnostics</div></section>
 </div>
 </section>
 

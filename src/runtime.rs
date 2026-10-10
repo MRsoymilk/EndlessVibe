@@ -5,6 +5,30 @@ use std::{collections::BTreeMap,fs::File,future::Future,path::{Path,PathBuf},syn
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+fn windows_sandbox_status(config:&Config)->Value{
+    json!({
+        "job_objects":{
+            "active_for_command_jobs":config.execution.backend=="host",
+            "resource_limits_only":true,
+            "memory_limit_mb":config.execution.memory_limit_mb,
+            "max_processes":config.execution.max_processes,
+            "filesystem_isolation":false,
+            "network_isolation":false,
+        },
+        "appcontainer":{
+            "backend_selectable":false,
+            "status":"test_only",
+            "supported_operation":"hash_input",
+            "protocol_version":crate::tools::sandbox_protocol::VERSION,
+            "arbitrary_program_execution":false,
+        },
+        "profile_recovery":{
+            "startup_scan_enabled":true,
+            "requires_exclusive_service_lock":true,
+        },
+    })
+}
 pub struct OperationTrace{pub id:Option<i64>,pub started:Instant,pub tool:String,pub workspace:String,pub project:String,pub task_id:Option<String>,pub stage:Option<String>}
 fn service_config_revision(config:&Config)->Result<String>{Ok(util::digest(serde_json::to_vec(&(&config.server,&config.security,&config.limits,&config.execution,&config.git,&config.docker,&config.transfer))?))}
 fn reuse_project_locks(next:&mut BTreeMap<String,Arc<Workspace>>,old:&BTreeMap<String,Arc<Workspace>>){for(workspace_id,next_workspace)in next.iter_mut(){let Some(old_workspace)=old.get(workspace_id)else{continue};let Some(next_workspace)=Arc::get_mut(next_workspace)else{continue};for(project_id,next_project)in next_workspace.projects.iter_mut(){let Some(old_project)=old_workspace.projects.get(project_id)else{continue};if old_project.root.path!=next_project.root.path{continue;}if let Some(next_project)=Arc::get_mut(next_project){next_project.lock=old_project.lock.clone();}}}}
@@ -78,7 +102,22 @@ impl Runtime{
     pub fn dashboard_storage_health(&self)->Result<Value>{let mut result=crate::storage::snapshot(&self.config.security.data_dir,&self.db,self.config.limits.retained_jobs)?;let active=self.jobs.active_count();result["cleanup"]=json!({"active_jobs":active,"cache_cleanup_available":active==0,"scope":"exec_cache","requires_confirmation":true});Ok(result)}
     pub async fn dashboard_storage_cache_cleanup(self:&Arc<Self>,request:crate::storage::CleanupRequest)->Result<Value>{let operation=self.begin_operation("dashboard_storage_cache_cleanup","","",json!({"scope":request.scope,"confirmed":request.confirmation==crate::storage::EXEC_CACHE_CONFIRM}));let result=async{if request.scope!="exec_cache"||request.confirmation!=crate::storage::EXEC_CACHE_CONFIRM{bail!("Cache cleanup requires the exact exec_cache scope and confirmation token");}let _cache_guard=self.jobs.begin_cache_cleanup()?;let data_dir=self.config.security.data_dir.clone();let result=tokio::task::spawn_blocking(move||crate::storage::clear_execution_cache(&data_dir)).await.context("Cache cleanup worker panicked")??;self.publish_dashboard("storage_changed",json!({"scope":"exec_cache"}));Ok(result)}.await;self.finish_operation(operation,result)}
     pub async fn dashboard_storage_compact(self:&Arc<Self>)->Result<Value>{let operation=self.begin_operation("dashboard_storage_compact","","",json!({"scope":"sqlite"}));let result=async{let _cache_guard=self.jobs.begin_cache_cleanup()?;let maintenance=self.db.maintain(self.config.limits.retained_jobs)?;let db=self.db.clone();let compact=tokio::task::spawn_blocking(move||db.compact_database()).await.context("SQLite compaction worker panicked")??;self.publish_dashboard("storage_changed",json!({"scope":"sqlite"}));Ok(json!({"maintenance":maintenance,"compaction":compact}))}.await;self.finish_operation(operation,result)}
-    pub async fn dashboard_sandbox_diagnostics(&self)->Result<Value>{let diagnostics=process::sandbox_diagnostics(&self.config).await?;let persisted_revision=config_edit::revision(&self.config_path)?;let active_revision=self.active_config_revision.read().unwrap_or_else(|e|e.into_inner()).clone();Ok(json!({"generated_at":util::now(),"persisted_revision":persisted_revision,"active_revision":active_revision,"requires_restart":persisted_revision!=active_revision,"diagnostics":diagnostics}))}
+    pub async fn dashboard_sandbox_diagnostics(&self)->Result<Value>{
+        let mut diagnostics=process::sandbox_diagnostics(&self.config).await?;
+        #[cfg(windows)]
+        {
+            diagnostics["windows_security"]=windows_sandbox_status(&self.config);
+        }
+        let persisted_revision=config_edit::revision(&self.config_path)?;
+        let active_revision=self.active_config_revision.read().unwrap_or_else(|e|e.into_inner()).clone();
+        Ok(json!({
+            "generated_at":util::now(),
+            "persisted_revision":persisted_revision,
+            "active_revision":active_revision,
+            "requires_restart":persisted_revision!=active_revision,
+            "diagnostics":diagnostics,
+        }))
+    }
     pub fn snapshot(&self)->Value{let workspaces=self.workspaces_snapshot();let projects=workspaces.values().map(|w|w.projects.len()).sum::<usize>();let development_projects=workspaces.values().flat_map(|w|w.projects.values()).filter(|p|p.config.development()).count();let network_enabled=self.config.execution.backend=="host"||self.config.execution.allow_network||development_projects>0;json!({"status":"running","name":"EndlessVibe","version":env!("CARGO_PKG_VERSION"),"listen_address":self.config.server.bind.to_string(),"port":self.config.server.bind.port(),"uptime_seconds":self.started.elapsed().as_secs(),"started_at_unix_seconds":self.started_unix,"checked_at_unix_seconds":util::now(),"security":{"authentication":"oauth2_pkce","anonymous_private_tools":false,"execution_backend":self.config.execution.backend,"shell_enabled":self.config.execution.allow_shell,"network_enabled":network_enabled,"development_project_count":development_projects,"network_mode":if self.config.execution.backend=="host"{"host_always"}else if development_projects>0{"project_profiles"}else if self.config.execution.allow_network{"per_job_opt_in"}else{"isolated"},"network_isolation":if self.config.execution.backend=="host"{"none_host_permissions"}else if development_projects>0{"isolated projects stay isolated; development projects share host network by default"}else if self.config.execution.allow_network{"isolated_by_default; network=true shares host network"}else{"isolated_or_disabled"}},"dashboard":{"enabled":true,"listen_address":"127.0.0.1:20001","url":"http://127.0.0.1:20001/"},"workspace_count":workspaces.len(),"project_count":projects,"active_jobs":self.jobs.active_count(),"transfer":{"enabled":self.transfer.config.enabled,"node_id":self.transfer.node_id,"listen":self.transfer.config.listen},"docker":{"enabled":self.config.docker.enabled,"container_count":self.config.docker.allowed_containers.len(),"project_socket_enabled":self.config.docker.allow_project_socket},"mcp":{"endpoint":"/mcp","method":"POST","transport":"streamable_http","session_mode":"stateless","protocol_version":"negotiated","implementation":"rmcp","sdk_version":crate::mcp::SDK_VERSION,"tool_schema_revision":crate::mcp::TOOL_SCHEMA_REVISION,"tool_count":crate::mcp::TOOL_NAMES.len(),"chatgpt_registration":"client_specific_not_asserted","tools":crate::mcp::TOOL_NAMES}})}
     pub fn dashboard_config(&self)->Result<Value>{let persisted=Config::load_file(&self.config_path)?;let revision=config_edit::revision(&self.config_path)?;let active_revision=self.active_config_revision.read().unwrap_or_else(|e|e.into_inner()).clone();let effective=workspace::load(&persisted,&self.config_path)?;let workspaces=effective.values().map(|w|json!({"id":w.config.id,"path":w.root.path,"project_count":w.projects.len(),"projects":w.projects.values().map(|p|p.summary()).collect::<Vec<_>>() })).collect::<Vec<_>>();let requires_restart=revision!=active_revision;Ok(json!({"revision":revision,"active_revision":active_revision,"requires_restart":requires_restart,"server":{"bind":persisted.server.bind.to_string(),"public_url":persisted.server.public_url,"allowed_hosts":persisted.server.allowed_hosts},"dashboard":{"listen_address":"127.0.0.1:20001","local_only":true},"security":{"authentication":"oauth2_pkce","allow_http_loopback":persisted.security.allow_http_loopback,"access_token_seconds":persisted.security.access_token_seconds,"refresh_token_seconds":persisted.security.refresh_token_seconds,"extra_redirect_uri_count":persisted.security.extra_redirect_uris.len()},"execution":{"backend":persisted.execution.backend,"active_backend":self.config.execution.backend,"host_os":std::env::consts::OS,"allow_shell":persisted.execution.allow_shell,"allow_network":persisted.execution.allow_network,"auto_discover_toolchains":persisted.execution.auto_discover_toolchains,"bubblewrap":persisted.execution.bubblewrap,"path":persisted.execution.path,"allowed_programs":persisted.execution.allowed_programs,"required_programs":persisted.execution.required_programs,"readonly_mounts":persisted.execution.readonly_mounts.iter().map(|m|json!({"source":m.source,"target":m.target})).collect::<Vec<_>>(),"memory_limit_mb":persisted.execution.memory_limit_mb,"max_processes":persisted.execution.max_processes},"limits":{"max_file_bytes":persisted.limits.max_file_bytes,"max_read_bytes":persisted.limits.max_read_bytes,"max_output_bytes":persisted.limits.max_output_bytes,"command_timeout_seconds":persisted.limits.command_timeout_seconds,"max_jobs":persisted.limits.max_jobs,"retained_jobs":persisted.limits.retained_jobs,"search_max_files":persisted.limits.search_max_files,"search_max_bytes":persisted.limits.search_max_bytes},"git":{"executable":persisted.git.executable,"author_name":persisted.git.author_name,"author_email":persisted.git.author_email},"transfer":{"enabled":persisted.transfer.enabled,"listen":persisted.transfer.listen,"advertise":persisted.transfer.advertise,"discover":persisted.transfer.discover,"display_name":persisted.transfer.display_name},"docker":{"enabled":persisted.docker.enabled,"socket":persisted.docker.socket,"allowed_containers":persisted.docker.allowed_containers,"allow_start":persisted.docker.allow_start,"allow_stop":persisted.docker.allow_stop,"allow_restart":persisted.docker.allow_restart,"allow_project_socket":persisted.docker.allow_project_socket},"mcp":{"tool_schema_revision":crate::mcp::TOOL_SCHEMA_REVISION,"tool_count":crate::mcp::TOOL_NAMES.len(),"tools":crate::mcp::TOOL_NAMES},"workspaces":workspaces,"note":"Sensitive credentials and token material are intentionally omitted. Project authorization changes can be hot-reloaded; service-level changes still require restart."}))}
     pub fn dashboard_update_execution_backend(&self,request:UpdateExecutionBackendRequest)->Result<Value>{
@@ -117,4 +156,24 @@ impl Runtime{
     use super::*;
     #[test]fn service_revision_ignores_workspace_authorization(){let a=Config::default();let mut b=a.clone();b.workspaces.push(crate::config::WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]});assert_eq!(service_config_revision(&a).unwrap(),service_config_revision(&b).unwrap());b.execution.allow_shell=!b.execution.allow_shell;assert_ne!(service_config_revision(&a).unwrap(),service_config_revision(&b).unwrap());let mut c=a.clone();c.docker.allow_project_socket=true;assert_ne!(service_config_revision(&a).unwrap(),service_config_revision(&c).unwrap());}
     #[test]fn reload_reuses_project_locks(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let root=t.path().join("root");std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(root.join("app")).unwrap();let cfg_path=t.path().join("config.toml");std::fs::write(&cfg_path,"").unwrap();let mut cfg=Config::default();cfg.security.data_dir=state;cfg.workspaces=vec![crate::config::WorkspaceConfig{id:"root".into(),path:root,projects:vec![crate::config::ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:crate::config::default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];let old=workspace::load(&cfg,&cfg_path).unwrap();let mut next=workspace::load(&cfg,&cfg_path).unwrap();assert!(!Arc::ptr_eq(&old["root"].projects["app"].lock,&next["root"].projects["app"].lock));reuse_project_locks(&mut next,&old);assert!(Arc::ptr_eq(&old["root"].projects["app"].lock,&next["root"].projects["app"].lock));}
+}
+
+#[cfg(all(windows,test))]
+mod windows_sandbox_status_tests {
+    use super::*;
+    #[test]
+    fn appcontainer_is_reported_as_prototype_and_not_a_host_sandbox(){
+        let mut config=Config::default();
+        config.execution.backend="host".into();
+        let reported=windows_sandbox_status(&config);
+        assert_eq!(reported["job_objects"]["active_for_command_jobs"],true);
+        assert_eq!(reported["job_objects"]["filesystem_isolation"],false);
+        assert_eq!(reported["job_objects"]["network_isolation"],false);
+        assert_eq!(reported["appcontainer"]["backend_selectable"],false);
+        assert_eq!(reported["appcontainer"]["status"],"test_only");
+        assert_eq!(reported["appcontainer"]["arbitrary_program_execution"],false);
+        assert_eq!(reported["profile_recovery"]["startup_scan_enabled"],true);
+        config.execution.backend="disabled".into();
+        assert_eq!(windows_sandbox_status(&config)["job_objects"]["active_for_command_jobs"],false);
+    }
 }
