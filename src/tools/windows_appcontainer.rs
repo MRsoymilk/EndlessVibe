@@ -206,24 +206,44 @@ fn sandbox_environment(profile:&Profile,extras:&[(&str,String)])->Result<Vec<u16
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+struct ProbeOutcome{exit_code:u32,cancelled:bool,timed_out:bool}
+#[cfg(test)]
 struct ProbeProcess{process:OwnedHandle,thread:OwnedHandle}
 #[cfg(test)]
 impl ProbeProcess{
-    fn resume_and_wait(&self)->Result<u32>{
+    fn resume_and_wait(
+        &self,job:&crate::tools::windows_job::JobObject,
+        timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
+    )->Result<ProbeOutcome>{
+        use std::sync::atomic::Ordering;
         if unsafe{ResumeThread(self.thread.as_raw_handle() as _)}==u32::MAX{
             return Err(std::io::Error::last_os_error()).context("Resume isolated probe");
         }
-        match unsafe{WaitForSingleObject(self.process.as_raw_handle() as _,10_000)}{
-            WAIT_OBJECT_0=>{
-                let mut code=0u32;
-                if unsafe{GetExitCodeProcess(self.process.as_raw_handle() as _,&mut code)}==0{
-                    return Err(std::io::Error::last_os_error()).context("Read isolated process exit code");
-                }
-                Ok(code)
+        let deadline=std::time::Instant::now()+timeout;
+        let(mut cancelled,mut timed_out)=(false,false);
+        loop{
+            if cancel.load(Ordering::SeqCst){cancelled=true;break;}
+            if std::time::Instant::now()>=deadline{timed_out=true;break;}
+            match unsafe{WaitForSingleObject(self.process.as_raw_handle() as _,30)}{
+                WAIT_OBJECT_0=>break,
+                WAIT_TIMEOUT=>{},
+                _=>return Err(std::io::Error::last_os_error()).context("Wait for isolated test child"),
             }
-            WAIT_TIMEOUT=>bail!("Isolated process exceeded 10-second test timeout"),
-            _=>Err(std::io::Error::last_os_error()).context("Wait for isolated test child"),
         }
+        // Terminate the entire job even on successful completion: no orphaned
+        // grandchildren or leaked handles may remain after the task finishes.
+        job.terminate();
+        match unsafe{WaitForSingleObject(self.process.as_raw_handle() as _,5_000)}{
+            WAIT_OBJECT_0=>{},
+            WAIT_TIMEOUT=>bail!("AppContainer process survived Job Object termination"),
+            _=>return Err(std::io::Error::last_os_error()).context("Wait for contained process exit"),
+        }
+        let mut code=0u32;
+        if unsafe{GetExitCodeProcess(self.process.as_raw_handle() as _,&mut code)}==0{
+            return Err(std::io::Error::last_os_error()).context("Read isolated process exit code");
+        }
+        Ok(ProbeOutcome{exit_code:code,cancelled,timed_out})
     }
 }
 #[cfg(test)]
@@ -237,9 +257,10 @@ impl Drop for ProbeProcess{
 }
 
 #[cfg(test)]
-fn launch_isolated_test(
+fn launch_controlled_test(
     profile:&Profile,program:&Path,args:&str,extras:&[(&str,String)],
-)->Result<u32>{
+    timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
+)->Result<ProbeOutcome>{
     let caps=profile.capabilities();
     let mut attrs=Attributes::create(&caps)?;
     let executable=wide(&program.to_string_lossy());
@@ -267,14 +288,73 @@ fn launch_isolated_test(
     }
     job.assign(child.dwProcessId)?;
     assert!(job.contains(child.dwProcessId)?,"AppContainer probe escaped its Job Object");
-    let result=process.resume_and_wait();
-    job.terminate();
-    result
+    process.resume_and_wait(&job,timeout,cancel)
+}
+
+#[cfg(test)]
+fn launch_isolated_test(
+    profile:&Profile,program:&Path,args:&str,extras:&[(&str,String)],
+)->Result<u32>{
+    let outcome=launch_controlled_test(
+        profile,program,args,extras,
+        std::time::Duration::from_secs(10),
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
+    if outcome.cancelled||outcome.timed_out{
+        bail!("AppContainer isolated probe exceeded its time limit");
+    }
+    Ok(outcome.exit_code)
 }
 
 #[cfg(test)]
 mod tests{
     use super::*;
+
+    #[test]
+    fn child_sleeps_when_isolated(){
+        if std::env::var("ENDLESSVIBE_SLOW_CHILD").ok().as_deref()==Some("1"){
+            assert!(has_appcontainer_token(unsafe{GetCurrentProcess()}).unwrap());
+            std::thread::sleep(std::time::Duration::from_secs(6));
+        }
+    }
+    #[test]
+    fn cancel_stops_isolated_job_without_leaving_orphans(){
+        use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
+        let profile=Profile::create().unwrap();
+        let stage=profile.folder().unwrap().join("LocalState/EndlessVibe");
+        fs::create_dir_all(&stage).unwrap();
+        let binary=stage.join("cancel-probe.exe");
+        fs::copy(std::env::current_exe().unwrap(),&binary).unwrap();
+        let cancel=Arc::new(AtomicBool::new(false));
+        let signal=cancel.clone();
+        let notifier=std::thread::spawn(move||{
+            std::thread::sleep(std::time::Duration::from_millis(220));
+            signal.store(true,Ordering::SeqCst);
+        });
+        let child="tools::windows_appcontainer::tests::child_sleeps_when_isolated";
+        let result=launch_controlled_test(&profile,&binary,&format!("--exact {child}"),
+            &[("ENDLESSVIBE_SLOW_CHILD","1".into())],
+            std::time::Duration::from_secs(3),&cancel).unwrap();
+        notifier.join().unwrap();
+        assert!(result.cancelled&&!result.timed_out);
+        assert_ne!(result.exit_code,0);
+    }
+    #[test]
+    fn timeout_stops_isolated_job_without_leaving_orphans(){
+        use std::sync::atomic::AtomicBool;
+        let profile=Profile::create().unwrap();
+        let stage=profile.folder().unwrap().join("LocalState/EndlessVibe");
+        fs::create_dir_all(&stage).unwrap();
+        let binary=stage.join("timeout-probe.exe");
+        fs::copy(std::env::current_exe().unwrap(),&binary).unwrap();
+        let child="tools::windows_appcontainer::tests::child_sleeps_when_isolated";
+        let result=launch_controlled_test(&profile,&binary,&format!("--exact {child}"),
+            &[("ENDLESSVIBE_SLOW_CHILD","1".into())],
+            std::time::Duration::from_millis(270),&AtomicBool::new(false)).unwrap();
+        assert!(!result.cancelled&&result.timed_out);
+        assert_ne!(result.exit_code,0);
+    }
+
     #[test]
     fn appcontainer_profile_requests_no_network_capabilities(){
         let profile=Profile::create().unwrap();

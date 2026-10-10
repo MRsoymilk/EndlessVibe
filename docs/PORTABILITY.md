@@ -72,14 +72,16 @@ Native Windows tests launch a real AppContainer process: it can read the
 staged file but cannot read the original Project file or reach the local
 Dashboard over loopback when no network capabilities are granted.
 
-The AppContainer prototype is compiled into Windows test targets only; it
-is not included in the production command runner until output capture,
-cancellation and controlled output publication have been implemented.
+The AppContainer test runner now supports per-task cancellation and timeout.
+After verifying the actual AppContainer token and assigning the suspended
+child to its Job Object, the runner resumes the process. On normal exit,
+cancellation or timeout it terminates the entire Job Object and waits for
+the contained process to exit. Native tests exercise both forced-stop paths.
 
-This is still an isolated-identity and file-staging layer, NOT a selectable
-production execution backend or a general sandboxed Cargo runner. Complete
-stdout/stderr streaming, cancellation, and controlled output synchronization
-are required before enabling it for arbitrary Project commands.
+This implementation is still compiled into Windows test targets only.
+It is NOT a selectable production execution backend or a general sandboxed
+Cargo runner. Secure stdout/stderr forwarding and controlled output-file
+publication are still required before enabling arbitrary Project commands.
 
 ### Windows MSVC toolchain in host jobs
 
