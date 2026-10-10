@@ -33,6 +33,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/nodes",get(web::home))
         .route("/assets/app.css",get(web::css))
         .route("/assets/EndlessVibe.png",get(web::brand_icon))
+        .route("/manifest.webmanifest",get(web::webmanifest))
         .route("/assets/app.js",get(web::javascript))
         .route("/assets/js/common.js",get(web::javascript_common))
         .route("/assets/js/mcp.js",get(web::javascript_mcp))
