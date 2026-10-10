@@ -43,7 +43,9 @@ pub async fn capture(mut cmd:Command,input:Option<Vec<u8>>,limit:usize,seconds:u
 
 pub fn clean_environment(cmd:&mut Command,path:&str){
     cmd.env_clear().env("PATH",path).env("LANG","C.UTF-8").env("LC_ALL","C.UTF-8").env("TERM","dumb");
-    #[cfg(windows)]for key in ["SystemRoot","WINDIR","TEMP","TMP","USERPROFILE"]{
+    #[cfg(windows)]for key in ["SystemRoot","WINDIR","TEMP","TMP","USERPROFILE",
+        "SystemDrive","APPDATA","LOCALAPPDATA","HOMEDRIVE","HOMEPATH",
+        "ComSpec","ProgramData"]{
         if let Some(value)=std::env::var_os(key){cmd.env(key,value);}
     }
 }
@@ -342,6 +344,21 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn cargo_preflight_also_requires_rustc(){assert_eq!(job_preflight_programs("cargo",&[],false).unwrap(),vec!["cargo".to_owned(),"rustc".to_owned()]);}
     #[test]fn shell_preflight_is_explicit(){assert_eq!(job_preflight_programs("bash",&["postgres".into()],true).unwrap(),vec!["postgres".to_owned()]);}
     #[test]fn summary_contract_uses_private_cache_path(){let d=tempfile::tempdir().unwrap();let mut c=Config::default();c.security.data_dir=d.path().to_owned();let contract=job_summary_contract(&c,"root","demo","abc-123").unwrap();assert!(contract.host_path.starts_with(d.path().join("exec-cache/root/demo")));assert_eq!(contract.exposed_path,"/cache/job-summary-abc-123.json");}
+    #[cfg(windows)]
+    #[test]
+    fn windows_host_environment_preserves_required_system_paths_only(){
+        let mut command=Command::new("cmd.exe");
+        clean_environment(&mut command,"C:\\Windows\\System32");
+        let values=command.as_std().get_envs().collect::<Vec<_>>();
+        let has=|key:&str|values.iter().any(|(name,val)|
+            name.eq_ignore_ascii_case(key)&&val.is_some()
+        );
+        for key in ["SystemRoot","USERPROFILE","LOCALAPPDATA","SystemDrive"]{
+            if std::env::var_os(key).is_some(){assert!(has(key),"missing {key}");}
+        }
+        assert!(!has("GITHUB_TOKEN"));
+        assert!(!has("SSH_AUTH_SOCK"));
+    }
     #[test]fn network_git_subcommands_are_blocked(){for sub in ["push","fetch","pull","clone","ls-remote","remote","submodule"]{assert!(git_network_subcommand(&[sub.into()]));}for sub in ["status","switch","merge","branch","add","commit","rebase"]{assert!(!git_network_subcommand(&[sub.into()]));}}
     #[test]fn configured_git_identity_is_injected_into_sandbox(){let mut cfg=Config::default();cfg.git.author_name="Example Developer".into();cfg.git.author_email="developer@example.com".into();let mut command=Command::new("/usr/bin/bwrap");sandbox_git_identity(&mut command,&cfg);let args=command.as_std().get_args().map(|v|v.to_string_lossy().into_owned()).collect::<Vec<_>>();assert_eq!(args,vec!["--setenv","GIT_AUTHOR_NAME","Example Developer","--setenv","GIT_AUTHOR_EMAIL","developer@example.com","--setenv","GIT_COMMITTER_NAME","Example Developer","--setenv","GIT_COMMITTER_EMAIL","developer@example.com"]);}
     #[test]fn project_manifest_detection_finds_joint_toolchains(){let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("Cargo.toml"),"[dependencies]\nsqlx = \"1\"\n").unwrap();std::fs::create_dir_all(d.path().join("game")).unwrap();std::fs::write(d.path().join("game/project.godot"),"[application]\n").unwrap();let mut programs=Vec::new();inspect_project_dir(d.path(),0,&mut programs);for p in ["cargo","rustc","initdb","postgres","pg_isready","createdb","godot"]{assert!(programs.contains(&p.to_owned()),"missing {p}");}}
