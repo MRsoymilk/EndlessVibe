@@ -198,6 +198,24 @@ async fn nodes_request_history_ui_assets_are_served(){
   assert!(String::from_utf8_lossy(&body).contains(expected),"{path} missing {expected}");
  }
 }
+
+#[tokio::test]
+async fn transfer_metrics_are_local_only_and_aggregate(){
+ let child=fixture(|c|c.transfer.enabled=true);
+ child.rt.db.put("transfer_requests","secret-record",
+     &json!({"state":"failed","fingerprint":"PRIVATE_CREDENTIAL","result":null}),0).unwrap();
+ let app=server::create_dashboard_router(child.rt.clone());
+ let response=http(&app,"GET","/api/nodes/metrics",Body::empty(),None,None,None).await;
+ assert_eq!(response.status(),StatusCode::OK);
+ let metrics=json_body(response).await;
+ assert_eq!(metrics["request_records"]["review_required"],1);
+ assert_eq!(metrics["request_records"]["failed"],1);
+ assert_eq!(metrics["contains_request_contents"],false);
+ assert!(!metrics.to_string().contains("PRIVATE_CREDENTIAL"));
+ let public=server::create_router(child.rt.clone());
+ let request=Request::builder().uri("/api/nodes/metrics").header(header::HOST,"localhost").body(Body::empty()).unwrap();
+ assert_eq!(public.oneshot(request).await.unwrap().status(),StatusCode::NOT_FOUND);
+}
 #[tokio::test]async fn nodes_dashboard_and_transfer_config_endpoint_are_local_only(){let f=fixture(|_|{});let app=server::create_dashboard_router(f.rt.clone());for(path,text)in[("/nodes","id=\"node-pending-list\""),("/assets/js/nodes.js","renderTrusted")]{let response=http(&app,"GET",path,Body::empty(),None,None,None).await;assert_eq!(response.status(),StatusCode::OK);let bytes=to_bytes(response.into_body(),2*1024*1024).await.unwrap();assert!(String::from_utf8_lossy(&bytes).contains(text));}let old=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;let request=Request::builder().method("PUT").uri("/api/config/transfer").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"expected_revision":old["revision"],"enabled":true,"listen":"0.0.0.0:20002","advertise":true,"discover":true,"display_name":"Child Test"}).to_string())).unwrap();let response=app.clone().oneshot(request).await.unwrap();assert_eq!(response.status(),StatusCode::OK);assert_eq!(json_body(response).await["requires_restart"],true);let config=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;assert_eq!(config["transfer"]["display_name"],"Child Test");let denied=Request::builder().method("POST").uri("/api/nodes/read").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"write_file","arguments":{}}).to_string())).unwrap();assert_eq!(app.clone().oneshot(denied).await.unwrap().status(),StatusCode::FORBIDDEN);let missing_confirm=Request::builder().method("POST").uri("/api/nodes/write").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"run_command","arguments":{"workspace":"demo","project":"demo"},"confirm":false}).to_string())).unwrap();assert_eq!(app.clone().oneshot(missing_confirm).await.unwrap().status(),StatusCode::FORBIDDEN);let forbidden=Request::builder().method("POST").uri("/api/nodes/write").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"run_shell","arguments":{},"confirm":true}).to_string())).unwrap();assert_eq!(app.clone().oneshot(forbidden).await.unwrap().status(),StatusCode::FORBIDDEN);}
 struct Fixture{_dir:tempfile::TempDir,rt:Arc<Runtime>,owner:String}
 fn fixture(edit:impl FnOnce(&mut Config))->Fixture{
