@@ -13,6 +13,16 @@ impl Runtime{
     pub fn new(mut config:Config,config_path:&Path)->Result<Arc<Self>>{
         config.validate()?;util::private_dir(&config.security.data_dir)?;config.security.data_dir=config.security.data_dir.canonicalize()?;
         let instance=util::single_instance(&config.security.data_dir.join("service.lock"))?;
+        #[cfg(windows)]
+        {
+            // service.lock prevents a second instance from recovering an
+            // AppContainer that still belongs to the running service.
+            let journal=crate::tools::windows_recovery::journal_dir(&config.security.data_dir);
+            let recovered=crate::tools::windows_recovery::recover_pending(&journal)?;
+            if recovered>0{
+                tracing::warn!(recovered,"Recovered abandoned AppContainer profiles before accepting jobs");
+            }
+        }
         for sub in ["tmp","backups","git-journal","empty-home","exec-cache"]{util::private_dir(&config.security.data_dir.join(sub))?;}
         let cfg=config_path.canonicalize().unwrap_or_else(|_|config_path.to_owned());
         for mount in &config.execution.readonly_mounts{let source=mount.source.canonicalize()?;if config.security.data_dir.starts_with(&source)||source.starts_with(&config.security.data_dir)||cfg.starts_with(&source){bail!("Sandbox mounts must not expose EndlessVibe config, credentials or state");}}

@@ -81,15 +81,10 @@ impl Profile{
         crate::util::private_dir(journal_dir)?;
         let random=crate::util::random_secret()?;
         let name=format!("EndlessVibe.Isolated.{}",&crate::util::digest(random)[..32]);
-        let marker=journal_dir.join(format!("{name}.pending"));
-        crate::util::private_create(&marker,format!("v1:{name}\n").as_bytes())?;
-        match Self::create_named(&name,Some(marker.clone())){
-            Ok(profile)=>Ok(profile),
-            Err(error)=>{
-                let _=fs::remove_file(&marker);
-                Err(error)
-            }
-        }
+        let marker=crate::tools::windows_recovery::mark_pending(journal_dir,&name)?;
+        // If native profile creation returns an ambiguous failure, keep the
+        // marker for the next exclusively locked service recovery.
+        Self::create_named(&name,Some(marker))
     }
     fn create_named(name:&str,journal:Option<PathBuf>)->Result<Self>{
         let profile_name=wide(name);
@@ -182,42 +177,12 @@ impl Drop for Profile{
     }
 }
 
-// Only call this when the service's single-instance lock has been acquired and
-// no old command job can still be alive. The production service does not yet
-// invoke this test-only recovery path.
+// The production recovery implementation also serves as the native
+// test oracle so behavior cannot drift between test and service startup.
 #[cfg(test)]
 fn recover_orphan_profiles(journal_dir:&Path)->Result<usize>{
-    crate::util::private_dir(journal_dir)?;
-    let root=crate::security::paths::Root::open(journal_dir)?;
-    let entries=root.entries(".")?;
-    if entries.len()>128{bail!("Too many pending AppContainer recovery records");}
-    let mut deleted=0usize;
-    for entry in entries{
-        if entry.kind!="file"{bail!("AppContainer recovery records must be regular files");}
-        let name=entry.name.strip_suffix(".pending")
-            .context("Unexpected AppContainer recovery record name")?;
-        let suffix=name.strip_prefix("EndlessVibe.Isolated.")
-            .context("Recovery refuses profiles outside the EndlessVibe namespace")?;
-        if suffix.len()!=32||!suffix.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()){
-            bail!("Invalid AppContainer recovery record identifier");
-        }
-        let bytes=root.read(&entry.name,128)?;
-        if bytes!=format!("v1:{name}\n").as_bytes(){
-            bail!("AppContainer recovery record content mismatches its filename");
-        }
-        let wide_name=wide(name);
-        let hr=unsafe{DeleteAppContainerProfile(wide_name.as_ptr())};
-        // A crash could occur after writing the journal but before profile
-        // creation. ERROR_NOT_FOUND is a safe already-absent result.
-        if hr<0 && hr as u32!=0x80070490{
-            bail!("DeleteAppContainerProfile recovery failed: HRESULT 0x{:08x}",hr as u32);
-        }
-        fs::remove_file(journal_dir.join(&entry.name))?;
-        deleted+=1;
-    }
-    Ok(deleted)
+    crate::tools::windows_recovery::recover_pending(journal_dir)
 }
-
 
 struct Attributes{storage:Vec<usize>}
 impl Attributes{

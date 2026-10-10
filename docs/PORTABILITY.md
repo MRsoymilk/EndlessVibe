@@ -137,20 +137,24 @@ overlong, or disappearing logs fail closed rather than silently resuming.
 The test monitor cancels the entire Job Object when a log exceeds the
 configured total output budget. These are poll-time budgets, not filesystem
 disk quotas: a burst may temporarily exceed the budget between checks.
-A Windows test-only recovery journal now records the unique profile
-identifier in a service-owned, private file *before* calling the Windows
-profile creation API. On normal teardown the journal is cleared only if the
-profile was deleted. The recovery prototype validates each marker's exact
-namespace, file type, size and contents, then deletes that AppContainer
-profile and consumes its marker. Windows tests simulate an interrupted
-service without running destructors and reject forged recovery markers.
-Only a service instance that has acquired its exclusive state-directory
-lock, and confirmed no old jobs remain alive, may invoke such recovery.
-Production startup does not invoke this recovery prototype yet. Hard
-disk quotas and production job lifecycle remain separate work. The previous CreateProcess cross-token handle
-inheritance experiment failed native validation and was discarded. A
-production-safe command protocol, task lifecycle, and crash recovery remain
-required before enabling arbitrary Project commands.
+The Windows service now runs an orphaned-profile recovery scan during
+Runtime::new, after obtaining the exclusive service.lock and before
+accepting any commands. The private recovery directory lives under
+security.data_dir/appcontainer-profiles. All journal entries must match
+the exact EndlessVibe-owned name, regular-file type and bounded record
+contents; the complete batch is verified before any native profiles are
+deleted. Cleanup consumes each journal only after successful deletion.
+Malformed journals fail closed rather than deleting unrelated profiles.
+
+Native Windows tests share this production recovery implementation and
+simulate interrupted service cleanup by leaving profiles registered.
+The worker prototype still creates its journal only in test builds, so
+production startup currently has no AppContainer jobs to recover.
+The previous CreateProcess cross-token handle inheritance experiment
+failed native validation and was discarded. General-purpose command
+execution, crash-safe job lifecycle and filesystem quotas are still
+separate work; the current fixed-operation protocol is not an arbitrary
+Project command runner.
 
 ### Windows MSVC toolchain in host jobs
 
