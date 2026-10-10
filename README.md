@@ -153,7 +153,7 @@ Project 必须位于已登记的 Workspace 根目录之内。首次添加时也�
 | **MCP** | `/mcp`，默认在 `20000` 端口监听；公网部署须配合 HTTPS |
 | **Nodes / Transfer** | 默认关闭；需要独立配置及双方确认配对 |
 
-可通过 `--status`、`--stop`、`--restart` 管理服务进程。
+可通过 `--status`、`--stop`、`--restart` 管理服务进程。Windows 使用进程启动时间校验和专用退出事件优雅停止实例；从旧 Windows 版本升级后，须先用 Ctrl+C 或服务管理器停止旧进程一次，启动新版后才能通过 `--restart` 管理。该能力不需要开启 `host` 执行后端。
 
 ### 5. Connect an MCP Client
 

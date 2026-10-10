@@ -6,7 +6,7 @@ use std::{path::{Path,PathBuf},sync::Arc};
 fn arguments()->Result<Option<Cli>>{
     let mut c=Cli::default();let mut args=std::env::args().skip(1);
     while let Some(arg)=args.next(){match arg.as_str(){
-        "--help"|"-h"=>{println!("EndlessVibe {}\n\nInitialize a workspace root once:\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Create a new configuration and an owner key; never overwrite config\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override bind address (default 0.0.0.0:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
+        "--help"|"-h"=>{println!("EndlessVibe {}\n\nInitialize a workspace root once:\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Create a new configuration and an owner key; never overwrite config\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override bind address (default 0.0.0.0:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWindows process control verifies PID creation time and uses a local graceful shutdown event.\nWhen upgrading an older Windows process, stop it once manually and relaunch before --restart.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--version"|"-V"=>{println!("EndlessVibe {}",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--config"=>c.config=Some(PathBuf::from(args.next().context("--config needs a path")?)),
         "--workspace"=>c.workspaces.push(args.next().context("--workspace needs ID=/absolute/path")?),
@@ -31,9 +31,30 @@ async fn stop_service(settings:&Config)->Result<bool>{
     let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(15);while util::process_identity_alive(identity)&&tokio::time::Instant::now()<deadline{tokio::time::sleep(std::time::Duration::from_millis(50)).await;}
     if util::process_identity_alive(identity){bail!("EndlessVibe PID {} did not exit within 15 seconds; refusing to force-kill it",identity.pid);}util::clear_service_identity(&settings.security.data_dir,identity)?;println!("Stopped EndlessVibe PID {}",identity.pid);Ok(true)
 }
-#[cfg(not(target_os="linux"))]
+#[cfg(windows)]
+async fn stop_service(settings:&Config)->Result<bool>{
+    let identity=match service_state(settings)?{
+        ServiceState::Stopped=>{println!("EndlessVibe is not running");return Ok(false);},
+        ServiceState::LegacyRunning=>bail!(
+            "A Windows EndlessVibe instance predates safe process control; stop it once with Ctrl+C or its service manager, then launch the updated binary before using --stop/--restart"
+        ),
+        ServiceState::Running(identity)=>identity,
+    };
+    util::request_service_shutdown(&settings.security.data_dir,identity)?;
+    let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(15);
+    while util::process_identity_alive(identity)&&tokio::time::Instant::now()<deadline{
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if util::process_identity_alive(identity){
+        bail!("Windows EndlessVibe PID {} did not exit within 15 seconds; refusing to force-kill it",identity.pid);
+    }
+    util::clear_service_identity(&settings.security.data_dir,identity)?;
+    println!("Stopped EndlessVibe PID {}",identity.pid);
+    Ok(true)
+}
+#[cfg(not(any(target_os="linux",windows)))]
 async fn stop_service(_settings:&Config)->Result<bool>{
-    bail!("--stop and --restart require Linux PID start-time verification; on macOS/Windows stop the service with the OS service manager or Ctrl-C")
+    bail!("--stop and --restart require verified process control; on macOS stop with the OS service manager or Ctrl-C")
 }
 fn validate_process_control(c:&Cli)->Result<()> {
     let count=[c.status,c.stop,c.restart].into_iter().filter(|v|*v).count();if count>1{bail!("Use only one of --status, --stop or --restart");}
@@ -209,15 +230,54 @@ async fn main()->Result<()>{
     if rt.config.server.lan_only {
         eprintln!("Mode: LAN-only (no public ChatGPT URL)\nNodes Dashboard: http://127.0.0.1:20001/nodes\nLAN Transfer (paired TLS): {}\nLocal MCP (OAuth): {}/mcp\n",rt.config.transfer.listen,rt.config.server.public_url);
     }else{eprintln!("Dashboard: http://127.0.0.1:20001/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.public_url);}
-    let shutdown_rt=rt.clone();let result=axum::serve(listener,app).with_graceful_shutdown(async move{shutdown_signal().await;shutdown_rt.jobs.cancel_all();shutdown_rt.shutdown.cancel();}).await;
+    #[cfg(windows)]
+    let shutdown_handle=_service_pid.shutdown_handle();
+    let shutdown_rt=rt.clone();
+    let result=axum::serve(listener,app).with_graceful_shutdown(async move{
+        #[cfg(windows)]
+        shutdown_signal(shutdown_handle).await;
+        #[cfg(not(windows))]
+        shutdown_signal().await;
+        shutdown_rt.jobs.cancel_all();
+        shutdown_rt.shutdown.cancel();
+    }).await;
     rt.shutdown.cancel();let _=transfer_task.await;dashboard_task.abort();let _=dashboard_task.await;let _=telemetry_task.await;
     rt.jobs.shutdown().await;rt.wait_for_operations().await;result.context("HTTP server failed")
 }
-async fn shutdown_signal(){
-    let ctrl=async{if let Err(e)=tokio::signal::ctrl_c().await{tracing::error!(error=%e,"Cannot install Ctrl-C handler");}};
+async fn shutdown_signal(
+    #[cfg(windows)] shutdown_handle:usize,
+){
+    let ctrl=async{
+        if let Err(error)=tokio::signal::ctrl_c().await{
+            tracing::error!(%error,"Cannot install Ctrl-C handler");
+            std::future::pending::<()>().await;
+        }
+    };
     #[cfg(unix)]
-    let term=async{match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()){Ok(mut signal)=>{signal.recv().await;},Err(e)=>{tracing::error!(error=%e,"Cannot install SIGTERM handler");std::future::pending::<()>().await;}}};
-    #[cfg(windows)]let term=std::future::pending::<()>();
+    let term=async{
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()){
+            Ok(mut signal)=>{signal.recv().await;},
+            Err(error)=>{
+                tracing::error!(%error,"Cannot install SIGTERM handler");
+                std::future::pending::<()>().await;
+            },
+        }
+    };
+    #[cfg(windows)]
+    let term=async{
+        let mut tick=tokio::time::interval(std::time::Duration::from_millis(100));
+        loop{
+            tick.tick().await;
+            match util::windows_shutdown_requested(shutdown_handle){
+                Ok(true)=>break,
+                Ok(false)=>{},
+                Err(error)=>{
+                    tracing::error!(%error,"Cannot poll Windows shutdown event");
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    };
     tokio::select!{_=ctrl=>{},_=term=>{}};
 }
 

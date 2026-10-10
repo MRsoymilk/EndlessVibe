@@ -153,7 +153,7 @@ Projects must be located inside an authorized Workspace root. Use `--read-only` 
 | **MCP** | `/mcp` on port `20000` by default; use HTTPS for public access |
 | **Node Transfer** | Disabled by default; requires configuration and approval on both nodes |
 
-Use `--status`, `--stop`, and `--restart` for process management.
+Use `--status`, `--stop`, and `--restart` for process management. On Windows, commands verify the process creation time and signal a per-instance graceful shutdown event. When upgrading from an older Windows build, stop it once with Ctrl+C or the service manager, then launch the new binary before using `--restart`. This does not require the `host` execution backend.
 
 ### 5. Connect an MCP Client
 

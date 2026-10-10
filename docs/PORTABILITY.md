@@ -12,12 +12,34 @@ tested independently before support can be considered verified.
 | Git file/diff/commit workflows | Supported | Portable implementation | Portable implementation |
 | Bubblewrap execution | Supported (if installed) | Not available | Not available |
 | Host command execution | Explicit opt-in | Explicit opt-in | Explicit opt-in |
-| Linux built-in `--stop` / `--restart` | Supported | Use OS process manager | Use OS process manager |
+| Built-in `--status` / `--stop` / `--restart` | Linux PID start-ticks verification | Use OS process manager | Windows creation-time verification + per-instance shutdown event (native validation pending) |
 | Docker Engine Unix-socket integration | Optional | Depends on Unix socket | Unix-socket transport unavailable |
 
 **Important:** a successful Linux build is *not* proof that either other
 operating system builds successfully. Native builds and unit tests must be
 run on Windows and macOS before a release is described as supporting them.
+
+### Windows service restart
+
+After upgrading from a Windows build that lacked process control, **stop the
+old process once using Ctrl+C or the service manager**, then launch the new
+`endlessvibe.exe` normally. Older processes do not have `service.pid` or the
+Windows shutdown event, so the new CLI refuses to force-kill them.
+
+Subsequent invocations support `endlessvibe.exe --status`, `--stop`, and
+`--restart` with the same configuration. Windows stores a PID and its actual
+Windows process creation timestamp in the private state directory, then
+creates an OS event scoped to the state directory, PID and start timestamp.
+The CLI verifies the process identity before signaling that event. The service
+handles it through the normal graceful shutdown path; `--stop` waits for exit
+and `--restart` starts a new instance only after the old one exits. If a
+process has no valid identity/event, or fails to exit within 15 seconds, the
+command **fails closed** without `taskkill /F` or terminating by process name.
+
+The control event uses Windows' `Local\\` namespace: stop/restart are intended
+for the same desktop logon session and Windows account. Sessions managed by
+external service supervisors should still be controlled by those supervisors.
+No host-command execution backend needs to be enabled for process control.
 
 ## Safe defaults
 
