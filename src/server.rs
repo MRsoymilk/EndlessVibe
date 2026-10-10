@@ -61,6 +61,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/nodes/peers/{node_id}",axum::routing::delete(web::node_pair_revoke))
         .route("/api/nodes/peers/{node_id}/grants",put(web::node_update_grants))
         .route("/api/config/reload",post(web::reload_config))
+        .route("/api/config/execution/backend",put(web::update_execution_backend))
         .route("/api/config/execution/readonly-mounts",put(web::update_readonly_mounts))
         .route("/api/config/git",put(web::update_git))
         .route("/api/config/docker",put(web::update_docker))

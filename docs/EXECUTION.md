@@ -1,5 +1,17 @@
 # 命令执行后端
 
+## 通过本机 Dashboard 配置执行后端
+
+打开本机 Dashboard `http://127.0.0.1:20001/config`，在 **执行后端** 卡片选择：
+
+- `disabled`：禁止执行命令（Windows/macOS 的默认设置）。
+- `bubblewrap`：Linux 沙箱，Windows/macOS 不可使用。
+- `host`：直接使用 EndlessVibe 服务账号执行命令，**没有文件、网络或进程沙箱**。已配对且获执行授权的父节点也能触发此类命令。
+
+选择 `host` 后必须勾选独立的风险确认，再通过浏览器二次确认。保存到 `[execution]` 的 `backend` / `acknowledge_unsafe_host_execution` 字段，并不修改 `allow_shell` 或 Project 授权。后端拒绝无确认的 `host` 请求、平台不支持的 `bubblewrap`、无效配置，以及过期的配置 revision。Dashboard 的配置写入接口仅接受 loopback 主机和同源请求，不通过远程 MCP/Transfer 开放。
+
+**保存仅写入 `config.toml`，不会立即改变正在运行的后端，也不会自动重启。** 停止旧进程后启动新版本（Windows/macOS 使用服务管理器或原启动方式），再次在配置页核对「当前运行」与「已保存」值相同。启用 `host` 时应使用专门的非管理员账号，仅授权可信 Project 和可信父节点。无需命令执行时可改回 `disabled` 并重启。
+
 ## 默认 bubblewrap
 
 `backend="bubblewrap"` 配合 `allow_exec=true` 才能启动任务。首次检查 `command -v bwrap`，由管理员安装发行版维护的 bubblewrap，并确认非特权 user namespace 可用。服务不提权、不执行 sudo，不存在自动不安全回退。

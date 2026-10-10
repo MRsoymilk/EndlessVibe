@@ -61,6 +61,67 @@ fn dashboard_starts_with_generic_paths_and_config_defaults(){
     assert_eq!(Config::default().server.public_url,"https://mcp.example.com");
 }
 
+
+#[tokio::test]
+async fn dashboard_execution_backend_requires_local_explicit_confirmation_and_restart(){
+    let f=fixture(|c|{
+        c.execution.backend="disabled".into();
+        c.execution.acknowledge_unsafe_host_execution=false;
+        c.execution.allow_shell=false;
+    });
+    let app=server::create_dashboard_router(f.rt.clone());
+    let initial=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;
+    assert_eq!(initial["execution"]["backend"],"disabled");
+    assert_eq!(initial["execution"]["active_backend"],"disabled");
+    assert_eq!(initial["execution"]["host_os"],std::env::consts::OS);
+    let revision=initial["revision"].as_str().unwrap().to_owned();
+    let request=|backend:&str,ack:bool,revision:&str,origin:&str|{
+        Request::builder().method("PUT").uri("/api/config/execution/backend")
+            .header(header::HOST,"localhost")
+            .header(header::ORIGIN,origin)
+            .header(header::CONTENT_TYPE,"application/json")
+            .body(Body::from(json!({"expected_revision":revision,"backend":backend,
+                "acknowledge_unsafe_host_execution":ack}).to_string())).unwrap()
+    };
+    let rejected=app.clone().oneshot(request("host",false,&revision,"http://localhost:20001")).await.unwrap();
+    assert_eq!(rejected.status(),StatusCode::BAD_REQUEST);
+    assert!(json_body(rejected).await["message"].as_str().unwrap().contains("acknowledgement"));
+    assert_eq!(endlessvibe::config_edit::revision(&f.rt.config_path).unwrap(),revision);
+    let origin_denied=app.clone().oneshot(request("host",true,&revision,"https://external.example")).await.unwrap();
+    assert_eq!(origin_denied.status(),StatusCode::FORBIDDEN);
+    assert_eq!(endlessvibe::config_edit::revision(&f.rt.config_path).unwrap(),revision);
+    let confirmed=app.clone().oneshot(request("host",true,&revision,"http://localhost:20001")).await.unwrap();
+    assert_eq!(confirmed.status(),StatusCode::OK);
+    let saved=json_body(confirmed).await;
+    assert_eq!(saved["requires_restart"],true);
+    assert_eq!(saved["execution"]["backend"],"host");
+    assert_eq!(saved["execution"]["acknowledge_unsafe_host_execution"],true);
+    assert_eq!(f.rt.config.execution.backend,"disabled","save must not enable execution in memory");
+    let after=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;
+    assert_eq!(after["execution"]["backend"],"host");
+    assert_eq!(after["execution"]["active_backend"],"disabled");
+    assert_eq!(after["requires_restart"],true);
+    assert_eq!(app.clone().oneshot(request("host",true,&revision,"http://localhost:20001")).await.unwrap().status(),StatusCode::CONFLICT);
+    let current=saved["revision"].as_str().unwrap();
+    assert_eq!(app.clone().oneshot(request("disabled",true,current,"http://localhost:20001")).await.unwrap().status(),StatusCode::BAD_REQUEST);
+    let reverted=app.clone().oneshot(request("disabled",false,current,"http://localhost:20001")).await.unwrap();
+    assert_eq!(reverted.status(),StatusCode::OK);
+    let config=Config::load_file(&f.rt.config_path).unwrap();
+    assert_eq!(config.execution.backend,"disabled");
+    assert!(!config.execution.acknowledge_unsafe_host_execution);
+    assert!(!config.execution.allow_shell);
+    let public=server::create_router(f.rt.clone());
+    let hidden=Request::builder().method("PUT").uri("/api/config/execution/backend")
+        .header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001")
+        .header(header::CONTENT_TYPE,"application/json").body(Body::from("{}")).unwrap();
+    assert_eq!(public.oneshot(hidden).await.unwrap().status(),StatusCode::NOT_FOUND);
+    let html=include_str!("../web/index.html");
+    let js=include_str!("../web/app.js");
+    for marker in ["id=\"execution-backend-editor\"","name=\"acknowledge_unsafe_host_execution\"",
+                   "id=\"execution-host-risk\""]{assert!(html.contains(marker));}
+    for marker in ["/api/config/execution/backend","window.confirm(","execution.host_os",
+                   "executionBackendDirty","executionBackendSaving"]{assert!(js.contains(marker));}
+}
 #[tokio::test]
 async fn child_one_click_approval_finalizes_parent_without_project_grants(){
     let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
