@@ -97,9 +97,13 @@ output broker.
 
 This remains Windows test-only infrastructure, NOT a production execution
 backend. It demonstrates streaming for a cooperating AppContainer process,
-not transparent capture of arbitrary external executables. Output files may
-grow until the broker or job terminates them; disk quotas and live output
-budgets are still needed. The previous CreateProcess cross-token handle
+not transparent capture of arbitrary external executables. The Windows test-only log cursor delivers bounded byte chunks while
+verifying SHA-256 of every previously delivered prefix. Truncated, replaced,
+overlong, or disappearing logs fail closed rather than silently resuming.
+The test monitor cancels the entire Job Object when a log exceeds the
+configured total output budget. These are poll-time budgets, not filesystem
+disk quotas: a burst may temporarily exceed the budget between checks.
+Production integration still requires crash-safe retention and quotas. The previous CreateProcess cross-token handle
 inheritance experiment failed native validation and was discarded. A
 production-safe command protocol, task lifecycle, and crash recovery remain
 required before enabling arbitrary Project commands.

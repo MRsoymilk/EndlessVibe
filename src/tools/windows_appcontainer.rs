@@ -338,9 +338,132 @@ fn launch_isolated_test(
     Ok(outcome.exit_code)
 }
 
+
+/// Append-only raw-byte log cursor. The parent owns this state; child-provided
+/// metadata is never trusted for offset, content identity or output limits.
+#[cfg(test)]
+#[derive(Default)]
+struct LogCursor{
+    next:usize,
+    prefix_sha256:Option<String>,
+}
+#[cfg(test)]
+fn next_log_chunk(
+    root:&crate::security::paths::Root,
+    name:&str,
+    cursor:&mut LogCursor,
+    max_chunk:usize,
+    max_total:usize,
+)->Result<Vec<u8>>{
+    if !matches!(name,"child-stdout.log"|"child-stderr.log"){
+        bail!("Only exact AppContainer stdout/stderr log names are accepted");
+    }
+    if max_chunk==0||max_chunk>32*1024||max_total==0||max_total>MAX_STAGED_FILE{
+        bail!("Invalid log chunk or total byte budget");
+    }
+    let Some(content)=root.read_optional(name,max_total)?else{
+        if cursor.next>0{bail!("AppContainer log disappeared after streaming began");}
+        return Ok(Vec::new());
+    };
+    if cursor.next>content.len(){
+        bail!("AppContainer log shrank after streaming began");
+    }
+    if let Some(expected)=&cursor.prefix_sha256{
+        if crate::util::digest(&content[..cursor.next])!=*expected{
+            bail!("AppContainer log prefix was changed after streaming");
+        }
+    }
+    let end=cursor.next.saturating_add(max_chunk).min(content.len());
+    let part=content[cursor.next..end].to_vec();
+    cursor.next=end;
+    cursor.prefix_sha256=Some(crate::util::digest(&content[..end]));
+    Ok(part)
+}
 #[cfg(test)]
 mod tests{
     use super::*;
+
+    #[test]
+    fn incremental_log_reader_rejects_replacements_and_unbounded_output(){
+        let dir=tempfile::tempdir().unwrap();
+        let logfile=dir.path().join("child-stdout.log");
+        let root=crate::security::paths::Root::open(dir.path()).unwrap();
+        let mut cursor=LogCursor::default();
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut cursor,3,64).unwrap().is_empty());
+        fs::write(&logfile,b"abcdef").unwrap();
+        assert_eq!(next_log_chunk(&root,"child-stdout.log",&mut cursor,3,64).unwrap(),b"abc");
+        assert_eq!(next_log_chunk(&root,"child-stdout.log",&mut cursor,3,64).unwrap(),b"def");
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut cursor,3,64).unwrap().is_empty());
+        let mut file=fs::OpenOptions::new().append(true).open(&logfile).unwrap();
+        file.write_all(b"ghi").unwrap();drop(file);
+        assert_eq!(next_log_chunk(&root,"child-stdout.log",&mut cursor,2,64).unwrap(),b"gh");
+        assert_eq!(next_log_chunk(&root,"child-stdout.log",&mut cursor,2,64).unwrap(),b"i");
+        assert!(next_log_chunk(&root,"../child-stdout.log",&mut cursor,2,64).is_err());
+        assert!(next_log_chunk(&root,".env",&mut cursor,2,64).is_err());
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut cursor,0,64).is_err());
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut cursor,2,0).is_err());
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut cursor,2,MAX_STAGED_FILE+1).is_err());
+        fs::write(&logfile,b"xbcdefghi").unwrap();
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut cursor,2,64).is_err(),
+            "An earlier consumed prefix may not change");
+        fs::write(&logfile,b"ab").unwrap();
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut cursor,2,64).is_err(),
+            "A shrinking log may not be resumed with an old cursor");
+        let mut fresh=LogCursor::default();
+        fs::write(&logfile,vec![b'Y';70]).unwrap();
+        assert!(next_log_chunk(&root,"child-stdout.log",&mut fresh,2,64).is_err(),
+            "Log budget must apply to total file size, not just returned chunk");
+    }
+
+    #[test]
+    fn overflowing_stdout_log_cancels_the_entire_appcontainer_job(){
+        use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
+        let profile=Profile::create().unwrap();
+        let outputs=profile.prepare_results().unwrap();
+        let private=profile.folder().unwrap().join("LocalState/EndlessVibe");
+        fs::create_dir_all(&private).unwrap();
+        let exe=private.join("log-quota-probe.exe");
+        fs::copy(std::env::current_exe().unwrap(),&exe).unwrap();
+        let stdout=outputs.join("child-stdout.log");
+        let stderr=outputs.join("child-stderr.log");
+        let ack=outputs.join("stream-observed.ack");
+        let cancel=Arc::new(AtomicBool::new(false));
+        let monitor_cancel=cancel.clone();
+        let observer_dir=outputs.clone();
+        let observer=std::thread::spawn(move||{
+            let root=crate::security::paths::Root::open(&observer_dir).unwrap();
+            let mut cursor=LogCursor::default();
+            let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
+            while std::time::Instant::now()<until{
+                match next_log_chunk(&root,"child-stdout.log",&mut cursor,512,4096){
+                    Ok(_)=>{},
+                    Err(error)=>{
+                        assert!(error.to_string().contains("maximum size"),
+                            "Unexpected security check failure: {error}");
+                        monitor_cancel.store(true,Ordering::SeqCst);
+                        return true;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            false
+        });
+        let name="tools::windows_appcontainer::tests::isolated_process_writes_separate_stdout_stderr_files";
+        let result=launch_controlled_test(&profile,&exe,&format!("--exact {name} --nocapture"),
+            &[
+                ("ENDLESSVIBE_DIRECT_STDIO_CHILD","1".into()),
+                ("ENDLESSVIBE_STDIO_OVERFLOW","1".into()),
+                ("ENDLESSVIBE_STDOUT_FILE",stdout.to_string_lossy().into_owned()),
+                ("ENDLESSVIBE_STDERR_FILE",stderr.to_string_lossy().into_owned()),
+                ("ENDLESSVIBE_STDIO_ACK_FILE",ack.to_string_lossy().into_owned()),
+            ],
+            std::time::Duration::from_secs(7),&cancel).unwrap();
+        assert!(observer.join().unwrap(),"Log budget violation should be observed");
+        assert!(result.cancelled&&!result.timed_out);
+        assert!(profile.collect_result("child-stdout.log",4096).is_err(),
+            "Oversized logs must never be brokered into the Project");
+    }
+
 
     // The AppContainer child opens its own private log files and then changes
     // only its *own* standard handles. This shares NO handles with the parent
@@ -368,6 +491,12 @@ mod tests{
         std::io::stdout().flush().unwrap();
         std::io::stderr().write_all(b"APPCONTAINER-STDERR-EARLY\n").unwrap();
         std::io::stderr().flush().unwrap();
+        if std::env::var("ENDLESSVIBE_STDIO_OVERFLOW").ok().as_deref()==Some("1"){
+            std::io::stdout().write_all(&vec![b'X';8*1024]).unwrap();
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(9));
+            return;
+        }
         // A test handshake proves the parent saw the first bytes while the
         // process was still alive, even under parallel test scheduling.
         let until=std::time::Instant::now()+std::time::Duration::from_secs(6);
@@ -405,11 +534,14 @@ mod tests{
         let watcher=std::thread::spawn(move||{
             let root=crate::security::paths::Root::open(&watch_dir).unwrap();
             let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
+            let mut cursor=LogCursor::default();
+            let mut seen=Vec::new();
             while std::time::Instant::now()<until{
-                if let Ok(Some(chunk))=root.read_optional("child-stdout.log",1024){
-                    if chunk.windows(b"APPCONTAINER-STDOUT-EARLY".len())
+                if let Ok(chunk)=next_log_chunk(&root,"child-stdout.log",&mut cursor,512,4096){
+                    seen.extend_from_slice(&chunk);
+                    if seen.windows(b"APPCONTAINER-STDOUT-EARLY".len())
                         .any(|bytes|bytes==b"APPCONTAINER-STDOUT-EARLY")
-                        && !chunk.windows(b"APPCONTAINER-STDOUT-DONE".len())
+                        && !seen.windows(b"APPCONTAINER-STDOUT-DONE".len())
                            .any(|bytes|bytes==b"APPCONTAINER-STDOUT-DONE"){
                         if fs::write(&watch_ack,b"1").is_ok(){
                             signal.store(true,Ordering::SeqCst);
