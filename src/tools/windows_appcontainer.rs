@@ -446,6 +446,95 @@ mod tests{
     use super::*;
 
     #[test]
+    fn protocol_hash_worker_runs_with_verified_appcontainer_token(){
+        if std::env::var("ENDLESSVIBE_PROTOCOL_WORKER").ok().as_deref()!=Some("1"){
+            return;
+        }
+        assert!(has_appcontainer_token(unsafe{GetCurrentProcess()}).unwrap(),
+            "Protocol worker must actually run with a restricted Windows token");
+        let private_root=PathBuf::from(std::env::var("ENDLESSVIBE_PROTOCOL_ROOT").unwrap());
+        use std::{io::Read,os::windows::fs::OpenOptionsExt};
+        use crate::tools::sandbox_protocol::{MAX_INPUT_BYTES,MAX_REQUEST_BYTES,WorkerRequest};
+        // AppContainer cannot resolve the privileged workspace root. The
+        // broker has already created this one-job profile, and the request
+        // path grammar restricts reads to its private inputs/ subtree.
+        let request_file=fs::OpenOptions::new().read(true)
+            .custom_flags(0x0020_0000)
+            .open(private_root.join("worker-request.json")).unwrap();
+        let mut request_bytes=Vec::new();
+        request_file.take((MAX_REQUEST_BYTES+1) as u64)
+            .read_to_end(&mut request_bytes).unwrap();
+        let request=WorkerRequest::decode(&request_bytes).unwrap();
+        let input_path=private_root.join(&request.input);
+        let input_dir=private_root.join("inputs");
+        let directory_meta=fs::symlink_metadata(&input_dir).unwrap();
+        assert!(directory_meta.is_dir()&&!directory_meta.file_type().is_symlink());
+        let md=fs::symlink_metadata(&input_path).unwrap();
+        assert!(md.is_file()&&!md.file_type().is_symlink());
+        let file=fs::OpenOptions::new().read(true)
+            .custom_flags(0x0020_0000).open(&input_path).unwrap();
+        assert!(file.metadata().unwrap().is_file());
+        let mut input=Vec::new();
+        file.take((MAX_INPUT_BYTES+1) as u64)
+            .read_to_end(&mut input).unwrap();
+        let receipt=crate::tools::sandbox_protocol::WorkerReceipt::for_input(&request,&input).unwrap();
+        let bytes=receipt.encode().unwrap();
+        let output=private_root.join("outputs").join(
+            crate::tools::sandbox_protocol::RECEIPT_NAME
+        );
+        let mut file=fs::OpenOptions::new().write(true).create_new(true)
+            .open(&output).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    #[test]
+    fn appcontainer_protocol_broker_verifies_end_to_end_hash_and_identity(){
+        use crate::tools::sandbox_protocol::{WorkerReceipt,WorkerRequest,RECEIPT_NAME};
+        let profile=Profile::create().unwrap();
+        let project=tempfile::tempdir().unwrap();
+        fs::write(project.path().join("data.rs"),b"fn sandboxed() {}\n").unwrap();
+        fs::write(project.path().join(".env"),b"SHOULD_NEVER_BE_COPIED").unwrap();
+        let authorized=crate::security::paths::Root::open(project.path()).unwrap();
+        let input=profile.stage_project_file(&authorized,"data.rs").unwrap();
+        assert!(input.ends_with("inputs/data.rs"));
+        assert!(profile.stage_project_file(&authorized,".env").is_err());
+        let results=profile.prepare_results().unwrap();
+        let private=profile.folder().unwrap().join("LocalState/EndlessVibe");
+        let request=WorkerRequest::new("test_job_01","inputs/data.rs").unwrap();
+        let request_file=private.join("worker-request.json");
+        crate::util::private_create(&request_file,&request.encode().unwrap()).unwrap();
+        let exe=private.join("protocol-probe.exe");
+        fs::copy(std::env::current_exe().unwrap(),&exe).unwrap();
+        let run="tools::windows_appcontainer::tests::protocol_hash_worker_runs_with_verified_appcontainer_token";
+        let status=launch_isolated_test(&profile,&exe,&format!("--exact {run} --nocapture"),
+            &[
+                ("ENDLESSVIBE_PROTOCOL_WORKER","1".into()),
+                ("ENDLESSVIBE_PROTOCOL_ROOT",private.to_string_lossy().into_owned()),
+            ]).unwrap();
+        assert_eq!(status,0,"Verified AppContainer worker did not complete");
+        let output=profile.collect_result(RECEIPT_NAME,4096).unwrap();
+        let receipt=WorkerReceipt::decode(&output.bytes).unwrap();
+        let independently_opened=authorized.read("data.rs",
+            crate::tools::sandbox_protocol::MAX_INPUT_BYTES).unwrap();
+        receipt.verify_against(&request,&independently_opened).unwrap();
+        assert_eq!(receipt.input_bytes,independently_opened.len());
+        assert_eq!(output.sha256,crate::util::digest(&output.bytes));
+        assert!(results.join(RECEIPT_NAME).is_file());
+
+        // A hostile or corrupted sandbox receipt must never authorize
+        // publication to the original Project.
+        let mut forged=receipt.clone();
+        forged.sha256="0".repeat(64);
+        fs::write(results.join(RECEIPT_NAME),forged.encode().unwrap()).unwrap();
+        let forged_bytes=profile.collect_result(RECEIPT_NAME,4096).unwrap();
+        let forged_read=WorkerReceipt::decode(&forged_bytes.bytes).unwrap();
+        assert!(forged_read.verify_against(&request,&independently_opened).is_err());
+        assert_eq!(authorized.read("data.rs",2048).unwrap(),b"fn sandboxed() {}\n");
+    }
+
+
+    #[test]
     fn durable_profile_journal_is_cleared_after_normal_cleanup(){
         let temp=tempfile::tempdir().unwrap();
         let journal=temp.path().join("pending-profiles");

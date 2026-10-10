@@ -72,6 +72,24 @@ This protocol is a security boundary prerequisite for a future AppContainer
 worker, not a production command-execution backend. Passing a receipt does
 not imply that cargo or another external executable can run.
 
+### Verified AppContainer protocol round trip
+
+The native Windows test harness now stages one explicitly authorized Project
+file and a versioned JSON request in a fresh private AppContainer profile.
+A real low-privilege worker (with its AppContainer token checked before
+resuming) performs the single approved hash_input operation and writes a
+bounded worker receipt to its private outputs directory. The parent reads
+that receipt via its capability-pinned output broker and independently opens
+the original authorized Project file to verify size, SHA-256, job ID and path.
+Tampered receipts fail closed and never overwrite original files.
+
+Windows denies the privileged workspace-root resolution inside AppContainer.
+The restricted worker instead reads only its own pre-staged inputs through
+read-only, non-reparse-point file handles, after validating the strict
+inputs/... path grammar. The privileged parent continues to use its secure
+capability-rooted Project APIs. These are native test-only workflows, not
+an unrestricted command runner or selectable AppContainer execution backend.
+
 ### Windows AppContainer identity verification
 
 The Windows-only AppContainer prototype creates an unpredictable one-time
