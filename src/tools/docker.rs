@@ -3,8 +3,8 @@ use anyhow::{bail,Context,Result};
 use schemars::JsonSchema;
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
-use std::{path::PathBuf,time::Duration};
-use tokio::{io::{AsyncReadExt,AsyncWriteExt},net::UnixStream};
+#[cfg(unix)]use std::{path::PathBuf,time::Duration};
+#[cfg(unix)]use tokio::{io::{AsyncReadExt,AsyncWriteExt},net::UnixStream};
 
 const HTTP_LIMIT:usize=2*1024*1024;
 const LOG_LIMIT:usize=64*1024;
@@ -34,7 +34,12 @@ fn header_end(buf:&[u8])->Option<usize>{buf.windows(4).position(|s|s==b"\r\n\r\n
 fn find_crlf(buf:&[u8],start:usize)->Option<usize>{buf.get(start..)?.windows(2).position(|s|s==b"\r\n").map(|p|start+p)}
 fn unchunk(buf:&[u8])->Result<Vec<u8>>{let mut out=Vec::new();let mut pos=0;loop{let end=find_crlf(buf,pos).context("Incomplete chunked Docker response")?;let line=std::str::from_utf8(&buf[pos..end])?;let size=usize::from_str_radix(line.split(';').next().unwrap_or("").trim(),16).context("Invalid Docker HTTP chunk")?;pos=end+2;if size==0{return Ok(out);}if size>HTTP_LIMIT||out.len().saturating_add(size)>HTTP_LIMIT||pos.saturating_add(size+2)>buf.len(){bail!("Docker response exceeds limit or has incomplete chunks");}out.extend_from_slice(&buf[pos..pos+size]);pos+=size;if buf.get(pos..pos+2)!=Some(b"\r\n"){bail!("Invalid Docker chunk terminator");}pos+=2;}}
 fn decode_http(raw:&[u8])->Result<(u16,Vec<u8>)>{let end=header_end(raw).context("Incomplete Docker response headers")?;if end>16_384{bail!("Docker response headers exceed limit");}let headers=std::str::from_utf8(&raw[..end]).context("Invalid Docker response headers")?;let line=headers.lines().next().context("Missing Docker HTTP status")?;let status:u16=line.split_whitespace().nth(1).context("Missing Docker status code")?.parse()?;let chunked=headers.lines().any(|l|l.to_ascii_lowercase().starts_with("transfer-encoding:")&&l.to_ascii_lowercase().contains("chunked"));let body=if chunked{unchunk(&raw[end..])?}else{raw[end..].to_vec()};if body.len()>HTTP_LIMIT{bail!("Docker HTTP response too large");}Ok((status,body))}
+#[cfg(unix)]
 async fn call(cfg:&Docker,method:&str,path:&str,seconds:u64)->Result<(u16,Vec<u8>)>{enabled(cfg)?;if !matches!(method,"GET"|"POST")||!path.starts_with('/')||path.contains('\r')||path.contains('\n'){bail!("Unsafe Docker HTTP request");}let socket:PathBuf=cfg.socket.clone();let req=format!("{method} {path} HTTP/1.1\r\nHost: docker\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");let request=async move{let mut stream=UnixStream::connect(&socket).await.with_context(||format!("Cannot connect Docker Unix socket {}",socket.display()))?;stream.write_all(req.as_bytes()).await?;let mut raw=Vec::new();let mut buf=[0u8;8192];loop{let n=stream.read(&mut buf).await?;if n==0{break;}if raw.len()+n>HTTP_LIMIT+16_384{bail!("Docker HTTP response exceeds 2 MiB; narrow the query");}raw.extend_from_slice(&buf[..n]);if let Some(end)=header_end(&raw){if let Ok(headers)=std::str::from_utf8(&raw[..end]){let chunked=headers.lines().any(|l|l.to_ascii_lowercase().starts_with("transfer-encoding:")&&l.to_ascii_lowercase().contains("chunked"));if !chunked{if let Some(size)=headers.lines().find_map(|l|l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|s|s.trim().parse::<usize>().ok())){if raw.len()>=end+size{break;}}}}}}decode_http(&raw)};let(status,body)=tokio::time::timeout(Duration::from_secs(seconds),request).await.context("Docker request timed out")??;if !(200..300).contains(&status){let description=serde_json::from_slice::<Value>(&body).ok().and_then(|v|v["message"].as_str().map(str::to_owned)).unwrap_or_else(||format!("Docker API returned HTTP {status}"));bail!("Docker HTTP {status}: {}",crate::util::bounded_text(&description,320));}Ok((status,body))}
+#[cfg(windows)]
+async fn call(_cfg:&Docker,_method:&str,_path:&str,_seconds:u64)->Result<(u16,Vec<u8>)>{
+    bail!("Docker MCP Unix socket transport is not available on Windows; use a Unix-socket platform or an explicitly configured local Docker bridge")
+}
 async fn json_request(cfg:&Docker,method:&str,path:&str,seconds:u64)->Result<Value>{let (_,body)=call(cfg,method,path,seconds).await?;if body.is_empty(){return Ok(json!({}));}Ok(serde_json::from_slice(&body).context("Docker API returned invalid JSON")?)}
 fn canonical_name(v:&Value)->Option<&str>{v["Name"].as_str()?.strip_prefix('/')}
 fn visible(v:&Value)->Value{let names=v["Names"].as_array().cloned().unwrap_or_default();let name=names.iter().filter_map(Value::as_str).filter_map(|s|s.strip_prefix('/')).next().unwrap_or("");json!({"name":name,"id":v["Id"].as_str().unwrap_or("").chars().take(12).collect::<String>(),"image":selected(v,"Image"),"state":selected(v,"State"),"status":selected(v,"Status"),"created":selected(v,"Created"),"compose_project":v["Labels"]["com.docker.compose.project"]})}
@@ -52,6 +57,7 @@ pub async fn action(cfg:&Docker,a:ActionArgs,kind:&str)->Result<Value>{authorize
 use super::*;
 #[test]fn http_chunked_and_log_multiplex_are_decoded(){let raw=b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";let(status,body)=decode_http(raw).unwrap();assert_eq!(status,200);assert_eq!(body,b"hello world");let mut bytes=vec![1,0,0,0,0,0,0,5];bytes.extend_from_slice(b"hello");assert_eq!(demux_logs(&bytes,false),b"hello");assert_eq!(demux_logs(b"plain",false),b"plain");}
 #[tokio::test]async fn docker_is_disabled_and_denies_unauthorized_names(){let d=Docker::default();assert!(list(&d,ListArgs{limit:5}).await.is_err());let mut d=d;d.enabled=true;d.allowed_containers.push("only-this".into());assert!(inspect(&d,ContainerArgs{container:"../other".into()}).await.is_err());assert!(action(&d,ActionArgs{container:"not-allowed".into(),confirm:true},"restart").await.is_err());assert!(action(&d,ActionArgs{container:"only-this".into(),confirm:false},"restart").await.is_err());assert!(action(&d,ActionArgs{container:"only-this".into(),confirm:true},"restart").await.is_err());}
+#[cfg(unix)]
 #[tokio::test]async fn fake_daemon_enforces_allowlist_sanitization_and_action_confirmation(){
 use tokio::net::UnixListener;
 use std::sync::{Arc,Mutex};

@@ -4,19 +4,33 @@ use serde_json::{json,Value};
 use std::{collections::BTreeMap,path::{Path,PathBuf}, process::Stdio, time::Duration};
 use tokio::{io::{AsyncRead,AsyncReadExt,AsyncWriteExt}, process::Command};
 
+#[cfg(unix)]
 pub fn kill_group(pid:u32,signal:i32){if pid>1{unsafe{libc::kill(-(pid as i32),signal);}}}
 pub struct GroupGuard{pid:Option<u32>}
-impl GroupGuard{pub fn new(pid:u32)->Self{Self{pid:Some(pid)}}pub fn kill(&mut self){if let Some(pid)=self.pid.take(){kill_group(pid,libc::SIGKILL);}}}
+impl GroupGuard{pub fn new(pid:u32)->Self{Self{pid:Some(pid)}}pub fn kill(&mut self){if let Some(pid)=self.pid.take(){#[cfg(unix)]kill_group(pid,libc::SIGKILL);#[cfg(windows)]let _=pid;}}}
 impl Drop for GroupGuard{fn drop(&mut self){self.kill();}}
+#[cfg(unix)]
 pub async fn terminate_group(pid:u32){kill_group(pid,libc::SIGTERM);tokio::time::sleep(Duration::from_millis(200)).await;kill_group(pid,libc::SIGKILL);}
+#[cfg(windows)]
+pub async fn terminate_group(pid:u32){
+    // Windows keeps the child handle alive while waiting, preventing PID reuse.
+    // taskkill /T terminates its process tree without borrowing Child::wait.
+    let binary=std::env::var_os("SystemRoot").map(PathBuf::from)
+        .unwrap_or_else(||PathBuf::from(r"C:\Windows")).join("System32").join("taskkill.exe");
+    let mut cmd=Command::new(binary);
+    cmd.args(["/F","/T","/PID",&pid.to_string()]);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+    let _=tokio::time::timeout(Duration::from_secs(5),cmd.status()).await;
+}
 async fn drain<R:AsyncRead+Unpin>(mut r:R,limit:usize)->Result<(Vec<u8>,bool)>{let mut bytes=Vec::new();let mut buf=[0u8;8192];let mut truncated=false;loop{let n=r.read(&mut buf).await?;if n==0{break;}let take=n.min(limit.saturating_sub(bytes.len()));bytes.extend_from_slice(&buf[..take]);truncated|=take<n;}Ok((bytes,truncated))}
 pub struct Captured{pub code:Option<i32>,pub stdout:Vec<u8>,pub stderr:Vec<u8>}
 pub async fn capture(mut cmd:Command,input:Option<Vec<u8>>,limit:usize,seconds:u64)->Result<Captured>{
-    cmd.stdin(if input.is_some(){Stdio::piped()}else{Stdio::null()}).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
+    cmd.stdin(if input.is_some(){Stdio::piped()}else{Stdio::null()}).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]cmd.process_group(0);
     let mut child=cmd.spawn().context("Cannot start configured executable")?;let pid=child.id().context("Missing process ID")?;let mut group=GroupGuard::new(pid);
     let mut out=tokio::spawn(drain(child.stdout.take().context("stdout missing")?,limit));let mut err=tokio::spawn(drain(child.stderr.take().context("stderr missing")?,limit));
     let writer=if let Some(input)=input{let mut stdin=child.stdin.take().context("stdin missing")?;Some(tokio::spawn(async move{stdin.write_all(&input).await?;stdin.shutdown().await}))}else{None};
-    let status=match tokio::time::timeout(Duration::from_secs(seconds),child.wait()).await{Ok(result)=>result?,Err(_)=>{terminate_group(pid).await;let _=child.wait().await;out.abort();err.abort();if let Some(w)=writer{w.abort();}bail!("Command timed out after {seconds}s");}};
+    let status=match tokio::time::timeout(Duration::from_secs(seconds),child.wait()).await{Ok(result)=>result?,Err(_)=>{terminate_group(pid).await;#[cfg(windows)]let _=child.kill().await;let _=child.wait().await;out.abort();err.abort();if let Some(w)=writer{w.abort();}bail!("Command timed out after {seconds}s");}};
     group.kill();
     let output=tokio::time::timeout(Duration::from_secs(2),&mut out).await;
     let error=tokio::time::timeout(Duration::from_secs(2),&mut err).await;
@@ -27,7 +41,12 @@ pub async fn capture(mut cmd:Command,input:Option<Vec<u8>>,limit:usize,seconds:u
     Ok(Captured{code:status.code(),stdout,stderr})
 }
 
-pub fn clean_environment(cmd:&mut Command,path:&str){cmd.env_clear().env("PATH",path).env("LANG","C.UTF-8").env("LC_ALL","C.UTF-8").env("TERM","dumb");}
+pub fn clean_environment(cmd:&mut Command,path:&str){
+    cmd.env_clear().env("PATH",path).env("LANG","C.UTF-8").env("LC_ALL","C.UTF-8").env("TERM","dumb");
+    #[cfg(windows)]for key in ["SystemRoot","WINDIR","TEMP","TMP","USERPROFILE"]{
+        if let Some(value)=std::env::var_os(key){cmd.env(key,value);}
+    }
+}
 #[derive(Clone,Debug)]pub struct JobSummaryContract{pub host_path:PathBuf,pub exposed_path:String}
 pub fn job_summary_host_path(config:&Config,workspace:&str,project:&str,job_id:&str)->Result<PathBuf>{if job_id.is_empty()||job_id.len()>128||!job_id.bytes().all(|b|b.is_ascii_alphanumeric()||b"-_".contains(&b)){bail!("Invalid job ID for summary contract");}let cache=config.security.data_dir.join("exec-cache").join(workspace).join(project);crate::util::private_dir(&cache)?;Ok(cache.join(format!("job-summary-{job_id}.json")))}
 pub fn job_summary_contract(config:&Config,workspace:&str,project:&str,job_id:&str)->Result<JobSummaryContract>{
@@ -38,7 +57,10 @@ fn simple_program(program:&str)->bool{!program.is_empty()&&program.len()<=64&&pr
 fn validate_job_environment(environment:&BTreeMap<String,String>)->Result<()>{if environment.len()>64{bail!("environment accepts at most 64 variables");}let reserved=["HOME","PATH","CARGO_HOME","XDG_CACHE_HOME","LANG","LC_ALL","TERM","ENDLESSVIBE_JOB_SUMMARY"];let mut total=0usize;for(name,value)in environment{if !crate::config::valid_environment_name(name)||name.len()>128{bail!("environment variable names must match [A-Za-z_][A-Za-z0-9_]* and be at most 128 bytes");}if reserved.contains(&name.as_str()){bail!("environment variable {name} is reserved by EndlessVibe");}if value.contains('\0')||value.len()>65536{bail!("environment variable {name} contains NUL or exceeds 65536 bytes");}total=total.saturating_add(name.len()+value.len());}if total>131072{bail!("environment exceeds 131072 bytes");}Ok(())}
 fn validate_job_network(config:&Config,development:bool,requested:bool)->Result<()>{if requested&&config.execution.backend=="bubblewrap"&&!development&&!config.execution.allow_network{bail!("network access is disabled for isolated projects; use execution_profile=development for a trusted development project or enable global execution.allow_network");}Ok(())}
 pub fn effective_project_execution(config:&Config,project:&Project,job_environment:&BTreeMap<String,String>,job_network:Option<bool>)->Result<(BTreeMap<String,String>,bool,String,String)>{let mut environment=project.config.environment_map()?;for(name,value)in job_environment{environment.insert(name.clone(),value.clone());}validate_job_environment(&environment)?;let profile=project.config.execution_profile.clone();let network=job_network.unwrap_or_else(||project.config.development());validate_job_network(config,project.config.development(),network)?;let source=if job_network.is_some(){"job_override"}else if project.config.development(){"development_profile"}else{"isolated_profile"}.to_owned();Ok((environment,network,profile,source))}
+#[cfg(unix)]
 fn existing_unix_socket(path:&Path)->Option<PathBuf>{use std::os::unix::fs::FileTypeExt;let canonical=std::fs::canonicalize(path).ok()?;std::fs::metadata(&canonical).ok()?.file_type().is_socket().then_some(canonical)}
+#[cfg(windows)]
+fn existing_unix_socket(_path:&Path)->Option<PathBuf>{None}
 fn discover_docker_socket()->Option<PathBuf>{if let Ok(host)=std::env::var("DOCKER_HOST"){if let Some(path)=host.strip_prefix("unix://"){if let Some(socket)=existing_unix_socket(Path::new(path)){return Some(socket);}}}for path in [Path::new("/var/run/docker.sock"),Path::new("/run/docker.sock")]{if let Some(socket)=existing_unix_socket(path){return Some(socket);}}if let Some(runtime)=std::env::var_os("XDG_RUNTIME_DIR"){if let Some(socket)=existing_unix_socket(&PathBuf::from(runtime).join("docker.sock")){return Some(socket);}}None}
 fn add_programs(out:&mut Vec<String>,items:&[&str]){for item in items{if !out.iter().any(|p|p==item){out.push((*item).to_owned());}}}
 fn read_small_manifest(path:&Path)->Option<String>{let meta=std::fs::metadata(path).ok()?;if meta.len()>512*1024{return None;}std::fs::read_to_string(path).ok()}
@@ -78,7 +100,12 @@ pub fn detect_command_programs(project:&Project,cwd:&str,program:&str,args:&[Str
     }
     out.sort();out.dedup();out
 }
-fn configured_executable(path:&str,program:&str)->Option<PathBuf>{for dir in path.split(':'){let p=Path::new(dir).join(program);if p.is_file(){return Some(p);}}None}
+fn configured_executable(path:&str,program:&str)->Option<PathBuf>{
+    for dir in std::env::split_paths(path){let p=dir.join(program);
+        if p.is_file(){return Some(p);}
+        #[cfg(windows)]{let exe=p.with_extension("exe");if exe.is_file(){return Some(exe);}}
+    }None
+}
 fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
     if !simple_program(program){bail!("program must be a simple executable name; use args for arguments");}
     configured_executable(path,program).with_context(||format!("Executable {program} not found in configured PATH"))
@@ -96,7 +123,8 @@ fn pre_exec_nproc_limit(backend:&str,max_processes:u64)->Option<u64>{
 const DIAGNOSTIC_PROGRAMS:[&str;6]=["cargo","rustc","initdb","postgres","pg_isready","createdb"];
 fn configured_probe_programs(config:&Config)->Vec<String>{let mut programs=config.execution.allowed_programs.clone();programs.extend(config.execution.required_programs.iter().cloned());programs.sort();programs.dedup();programs}
 fn diagnostic_programs(config:&Config)->Vec<String>{let mut programs=configured_probe_programs(config);programs.extend(DIAGNOSTIC_PROGRAMS.map(str::to_owned));programs.sort();programs.dedup();programs}
-fn host_executable(program:&str)->Option<String>{let path=std::env::var_os("PATH")?;for dir in std::env::split_paths(&path){let candidate=dir.join(program);if candidate.is_file(){return Some(candidate.to_string_lossy().into_owned());}}None}
+fn host_executable(program:&str)->Option<String>{let path=std::env::var_os("PATH")?;for dir in std::env::split_paths(&path){let candidate=dir.join(program);if candidate.is_file(){return Some(candidate.to_string_lossy().into_owned());}
+        #[cfg(windows)]{let exe=candidate.with_extension("exe");if exe.is_file(){return Some(exe.to_string_lossy().into_owned());}}}None}
 fn versioned_bin_candidate(root:&Path,program:&str,prefix:Option<&str>)->Option<PathBuf>{let mut dirs=std::fs::read_dir(root).ok()?.filter_map(|e|e.ok()).map(|e|e.path()).filter(|p|p.is_dir()&&prefix.is_none_or(|prefix|p.file_name().and_then(|n|n.to_str()).is_some_and(|n|n.starts_with(prefix)))).collect::<Vec<_>>();dirs.sort();dirs.reverse();for dir in dirs{for bin in [dir.join("bin"),dir.clone()]{let candidate=bin.join(program);if candidate.is_file(){return Some(candidate);}}}None}
 fn discover_host_executable(program:&str)->Option<PathBuf>{
     if let Some(path)=host_executable(program){return Some(PathBuf::from(path));}
@@ -117,7 +145,7 @@ fn cargo_registry_under(home:&Path)->Option<PathBuf>{let registry=home.join(".ca
 fn discover_host_cargo_registry()->Option<PathBuf>{std::env::var_os("HOME").and_then(|home|cargo_registry_under(Path::new(&home)))}
 fn needs_cargo_registry(programs:&[String])->bool{programs.iter().any(|program|program=="cargo"||program=="rustc")}
 fn execution_environment(config:&Config,programs:&[String])->(String,Vec<(PathBuf,PathBuf)>){
-    let mut path_entries=config.execution.path.split(':').filter(|p|!p.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    let mut path_entries=std::env::split_paths(&config.execution.path).map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>();
     let mut mounts=config.execution.readonly_mounts.iter().map(|m|(m.source.clone(),m.target.clone())).collect::<Vec<_>>();
     if config.execution.auto_discover_toolchains{
         for program in programs{
@@ -130,6 +158,7 @@ fn execution_environment(config:&Config,programs:&[String])->(String,Vec<(PathBu
     (path_entries.join(":"),mounts)
 }
 fn bubblewrap_base_command(config:&Config,programs:&[String],share_network:bool)->Result<(Command,String)>{
+    if !cfg!(target_os="linux"){bail!("Bubblewrap is available only on Linux");}
     if !config.execution.bubblewrap.is_file(){bail!("bubblewrap is missing; install sys-apps/bubblewrap on Gentoo, or explicitly opt into unsafe host execution");}
     let (path,mounts)=execution_environment(config,programs);let mut c=Command::new(&config.execution.bubblewrap);clean_environment(&mut c,"/usr/bin:/bin");
     c.args(["--die-with-parent","--new-session","--unshare-all","--clearenv"]);
@@ -207,10 +236,10 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
         "disabled"=>bail!("Command execution backend is disabled"),
         "host"=>{
             if !config.execution.acknowledge_unsafe_host_execution{bail!("Host execution has not been explicitly authorized");}
-            let executable=if shell{PathBuf::from("/bin/bash")}else{validated_executable(&config.execution.path,program)?};
+            let executable=if shell{validated_executable(&config.execution.path,if cfg!(windows){"powershell"}else{"bash"})?}else{validated_executable(&config.execution.path,program)?};
             let mut c=Command::new(executable);clean_environment(&mut c,&config.execution.path);c.current_dir(host_cwd);
             // Explicit host mode is not a sandbox; no service token/key is inherited.
-            if let Some(home)=std::env::var_os("HOME"){c.env("HOME",home);}c.envs(environment).env("ENDLESSVIBE_JOB_SUMMARY",summary_path);c.args(args);c
+            if let Some(home)=std::env::var_os("HOME").or_else(||std::env::var_os("USERPROFILE")){c.env("HOME",home);}c.envs(environment).env("ENDLESSVIBE_JOB_SUMMARY",summary_path);c.args(args);c
         }
         "bubblewrap"=>{
             let cache=config.security.data_dir.join("exec-cache").join(&w.workspace_id).join(&w.config.id);crate::util::private_dir(&cache)?;
@@ -235,14 +264,27 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     };
     if config.execution.backend=="host"{for(name,value)in git_identity(config){command.env(name,value);}}
     if !shell&&program=="git"&&config.execution.backend=="host"{command.env("GIT_MERGE_AUTOEDIT","no").env("GIT_EDITOR","true");}
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).process_group(0);
-    let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);let processes=pre_exec_nproc_limit(&config.execution.backend,config.execution.max_processes);let cpu=config.limits.command_timeout_seconds+5;
-    // SAFETY: only async-signal-safe Linux syscalls are used in this pre_exec closure.
-    unsafe{command.pre_exec(move||{
-        for (resource,value) in [(libc::RLIMIT_AS,address_space),(libc::RLIMIT_CPU,cpu)]{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(resource,&lim)!=0{return Err(std::io::Error::last_os_error());}}
-        if let Some(value)=processes{let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};if libc::setrlimit(libc::RLIMIT_NPROC,&lim)!=0{return Err(std::io::Error::last_os_error());}}
-        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong)!=0{return Err(std::io::Error::last_os_error());}Ok(())
-    });}
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]command.process_group(0);
+    #[cfg(unix)]{
+        let address_space=config.execution.memory_limit_mb.saturating_mul(1024*1024);
+        let processes=pre_exec_nproc_limit(&config.execution.backend,config.execution.max_processes);
+        let cpu=config.limits.command_timeout_seconds+5;
+        // SAFETY: only async-signal-safe syscalls are used in this pre_exec closure.
+        unsafe{command.pre_exec(move||{
+            for (resource,value) in [(libc::RLIMIT_AS,address_space),(libc::RLIMIT_CPU,cpu)]{
+                let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};
+                if libc::setrlimit(resource,&lim)!=0{return Err(std::io::Error::last_os_error());}
+            }
+            if let Some(value)=processes{
+                let lim=libc::rlimit{rlim_cur:value as libc::rlim_t,rlim_max:value as libc::rlim_t};
+                if libc::setrlimit(libc::RLIMIT_NPROC,&lim)!=0{return Err(std::io::Error::last_os_error());}
+            }
+            #[cfg(target_os="linux")]
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong,0 as libc::c_ulong)!=0{return Err(std::io::Error::last_os_error());}
+            Ok(())
+        });}
+    }
     Ok(command)
 }
 
@@ -305,5 +347,6 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn job_environment_accepts_external_service_variables_and_reserves_runtime_keys(){let mut env=BTreeMap::new();env.insert("TEST_DATABASE_URL".into(),"postgres://user:password@127.0.0.1:19031/test".into());assert!(validate_job_environment(&env).is_ok());env.insert("PATH".into(),"/tmp".into());assert!(validate_job_environment(&env).is_err());let mut invalid=BTreeMap::new();invalid.insert("1BAD".into(),"x".into());assert!(validate_job_environment(&invalid).is_err());}
     #[test]fn bubblewrap_network_is_per_job_and_project_profile(){let mut c=Config::default();assert!(validate_job_network(&c,false,false).is_ok());assert!(validate_job_network(&c,false,true).is_err());assert!(validate_job_network(&c,true,true).is_ok());c.execution.allow_network=true;assert!(validate_job_network(&c,false,true).is_ok());}
     #[test]fn project_docker_socket_access_requires_separate_opt_in(){let c=Config::default();assert!(!c.docker.allow_project_socket);assert!(!c.docker.enabled);let mut d=c.clone();d.docker.enabled=true;d.docker.allowed_containers.push("endlessvibe".into());assert!(!d.docker.allow_project_socket);assert!(d.validate().is_ok());}
+    #[cfg(unix)]
     #[test]fn docker_socket_detection_rejects_regular_files(){let d=tempfile::tempdir().unwrap();let regular=d.path().join("docker.sock");std::fs::write(&regular,b"not a socket").unwrap();assert!(existing_unix_socket(&regular).is_none());let socket=d.path().join("real.sock");let _listener=std::os::unix::net::UnixListener::bind(&socket).unwrap();assert_eq!(existing_unix_socket(&socket),Some(socket));}
 }

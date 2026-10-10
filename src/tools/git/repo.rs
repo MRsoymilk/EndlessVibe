@@ -1,7 +1,9 @@
 use crate::{runtime::Runtime,tools::{process,types::LogArgs},util,workspace::Project};
 use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
-use std::{fs::OpenOptions,io::{Read,Write},os::unix::fs::{MetadataExt,OpenOptionsExt},path::PathBuf};
+use std::{fs::OpenOptions,io::{Read,Write},path::PathBuf};
+#[cfg(unix)] use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)] use std::os::windows::fs::OpenOptionsExt;
 use tokio::process::Command;
 
 #[derive(Clone,Default)]pub(super) struct Environment{pub(super) index:Option<PathBuf>,pub(super) objects:Option<PathBuf>}
@@ -9,7 +11,10 @@ use tokio::process::Command;
 pub(super) fn repo(w:&Project)->Result<PathBuf>{
     w.root.unchanged_root()?;let dir=w.root.path.join(".git");let md=std::fs::symlink_metadata(&dir).context("Project is not a standalone Git repository; linked worktrees and subdirectory repositories are not supported by this release")?;
     if !md.is_dir()||md.file_type().is_symlink(){bail!(".git must be a real directory (linked worktrees/bare repositories are not supported)");}
+    #[cfg(unix)]
     if dir.to_string_lossy().contains([':', '\n', '\r']){bail!("Git repository paths containing ':' or newlines are not supported");}
+    #[cfg(windows)]
+    if dir.to_string_lossy().chars().skip(2).any(|c|matches!(c,':'|'\n'|'\r')){bail!("Git repository paths containing alternate data streams or newlines are not supported");}
     Ok(dir)
 }
 
@@ -18,19 +23,28 @@ pub(super) async fn preflight(rt:&Runtime,w:&Project)->Result<()>{
     for part in ["config","HEAD","index","objects","refs","packed-refs","shallow"]{let path=dir.join(part);if let Ok(md)=std::fs::symlink_metadata(&path){if md.file_type().is_symlink(){bail!("Git metadata symlinks are not supported: {part}");}}}
     for part in ["commondir","objects/info/alternates","objects/info/http-alternates"]{if dir.join(part).exists(){bail!("External/shared Git metadata is not supported: {part}");}}
     let path=dir.join("config");let mut data=Vec::new();
-    if path.exists(){let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path)?;let md=file.metadata()?;if !md.is_file()||md.nlink()!=1||md.len()>262144{bail!("Unsafe/oversized Git config");}file.take(262145).read_to_end(&mut data)?;if data.len()>262144{bail!("Oversized Git config");}}
+    if path.exists(){let mut options=OpenOptions::new();options.read(true);
+        #[cfg(unix)] options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);
+        #[cfg(windows)] options.custom_flags(0x0020_0000);
+        let file=options.open(&path)?;let md=file.metadata()?;
+        if !md.is_file()||!crate::platform::single_link(&md)||md.len()>262144||std::fs::symlink_metadata(&path)?.file_type().is_symlink(){bail!("Unsafe/oversized Git config");}
+        file.take(262145).read_to_end(&mut data)?;if data.len()>262144{bail!("Oversized Git config");}}
     let mut temp=tempfile::Builder::new().prefix("git-config-").tempfile_in(rt.config.security.data_dir.join("tmp"))?;temp.write_all(&data)?;temp.flush()?;
-    let mut cmd=Command::new(&rt.config.git.executable);process::clean_environment(&mut cmd,"/usr/bin:/bin");cmd.current_dir(rt.config.security.data_dir.join("empty-home")).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null").args(["config","--null","--no-includes","--file"]).arg(temp.path()).arg("--list");
+    let mut cmd=Command::new(&rt.config.git.executable);process::clean_environment(&mut cmd,&rt.config.execution.path);cmd.current_dir(rt.config.security.data_dir.join("empty-home")).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).args(["config","--null","--no-includes","--file"]).arg(temp.path()).arg("--list");
     let result=process::capture(cmd,None,524288,5).await?;if result.code!=Some(0){bail!("Git config cannot be safely parsed");}
     for line in result.stdout.split(|b|*b==0).filter(|b|!b.is_empty()){let key=String::from_utf8_lossy(line.split(|b|*b==b'\n').next().unwrap_or_default()).to_ascii_lowercase();if ["include.","includeif.","filter.","diff.","merge.","alias.","credential.","gpg.","lfs."].iter().any(|p|key.starts_with(*p))||(key.starts_with("remote.")&&key.ends_with(".promisor"))||(key.starts_with("extensions.")&&key!="extensions.objectformat")||matches!(key.as_str(),"core.fsmonitor"|"core.sparsecheckout"|"core.sparsecheckoutcone"){bail!("Repository config key '{key}' needs manual review; helper/filter/include/sparse/partial-clone configurations are not supported by the dedicated Git tools. Existing config was not changed.");}}
     Ok(())
 }
 
 pub(super) fn command(rt:&Runtime,w:&Project,env:&Environment)->Result<Command>{
-    let gitdir=repo(w)?;let mut c=Command::new(&rt.config.git.executable);process::clean_environment(&mut c,"/usr/bin:/bin");
-    c.current_dir(&w.root.path).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_ATTR_NOSYSTEM","1").env("GIT_LITERAL_PATHSPECS","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_REPLACE_OBJECTS","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_AUTHOR_NAME",&rt.config.git.author_name).env("GIT_AUTHOR_EMAIL",&rt.config.git.author_email).env("GIT_COMMITTER_NAME",&rt.config.git.author_name).env("GIT_COMMITTER_EMAIL",&rt.config.git.author_email);
+    let gitdir=repo(w)?;let mut c=Command::new(&rt.config.git.executable);process::clean_environment(&mut c,&rt.config.execution.path);
+    c.current_dir(&w.root.path).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).env("GIT_ATTR_NOSYSTEM","1").env("GIT_LITERAL_PATHSPECS","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_REPLACE_OBJECTS","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_AUTHOR_NAME",&rt.config.git.author_name).env("GIT_AUTHOR_EMAIL",&rt.config.git.author_email).env("GIT_COMMITTER_NAME",&rt.config.git.author_name).env("GIT_COMMITTER_EMAIL",&rt.config.git.author_email);
     c.arg("--no-pager").arg("--git-dir").arg(&gitdir).arg("--work-tree").arg(&w.root.path);
-    for setting in ["core.hooksPath=/dev/null","core.fsmonitor=false","commit.gpgSign=false","tag.gpgSign=false","core.attributesFile=/dev/null","diff.external=","core.quotePath=false","submodule.recurse=false","protocol.allow=never","core.gitProxy=/bin/false","core.sshCommand=/bin/false"]{c.arg("-c").arg(setting);}
+    let null=crate::platform::null_device();
+    let hooks=format!("core.hooksPath={null}");let attrs=format!("core.attributesFile={null}");
+    let deny=if cfg!(windows){"cmd /c exit 1"}else{"/bin/false"};
+    let git_proxy=format!("core.gitProxy={deny}");let ssh_command=format!("core.sshCommand={deny}");
+    for setting in [hooks.as_str(),"core.fsmonitor=false","commit.gpgSign=false","tag.gpgSign=false",attrs.as_str(),"diff.external=","core.quotePath=false","submodule.recurse=false","protocol.allow=never",git_proxy.as_str(),ssh_command.as_str()]{c.arg("-c").arg(setting);}
     if let Some(index)=&env.index{c.env("GIT_INDEX_FILE",index);}if let Some(objects)=&env.objects{c.env("GIT_OBJECT_DIRECTORY",objects).env("GIT_ALTERNATE_OBJECT_DIRECTORIES",gitdir.join("objects"));}Ok(c)
 }
 

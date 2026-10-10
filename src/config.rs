@@ -21,14 +21,14 @@ impl Default for Limits { fn default() -> Self { Self { max_file_bytes: 2 * 1024
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Execution { pub backend: String, pub acknowledge_unsafe_host_execution: bool, pub allow_shell: bool, pub allow_network: bool, pub auto_discover_toolchains: bool, pub bubblewrap: PathBuf, pub path: String, pub allowed_programs: Vec<String>, pub required_programs: Vec<String>, pub readonly_mounts: Vec<ReadOnlyMount>, pub memory_limit_mb: u64, pub max_processes: u64 }
-impl Default for Execution { fn default() -> Self { Self { backend: "bubblewrap".into(), acknowledge_unsafe_host_execution: false, allow_shell: false, allow_network: false, auto_discover_toolchains: true, bubblewrap: "/usr/bin/bwrap".into(), path: "/usr/local/bin:/usr/bin:/bin".into(), allowed_programs: ["cargo", "rustc", "cmake", "ninja", "make", "ctest", "python3", "git", "rg"].map(str::to_owned).to_vec(), required_programs: vec![], readonly_mounts: vec![], memory_limit_mb: 8192, max_processes: 256 } } }
+impl Default for Execution { fn default() -> Self { Self { backend: if cfg!(target_os="linux"){"bubblewrap".into()}else{"disabled".into()}, acknowledge_unsafe_host_execution: false, allow_shell: false, allow_network: false, auto_discover_toolchains: true, bubblewrap: "/usr/bin/bwrap".into(), path: default_execution_path(), allowed_programs: ["cargo", "rustc", "cmake", "ninja", "make", "ctest", "python3", "git", "rg"].map(str::to_owned).to_vec(), required_programs: vec![], readonly_mounts: vec![], memory_limit_mb: 8192, max_processes: 256 } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadOnlyMount { pub source: PathBuf, pub target: PathBuf }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Git { pub executable: PathBuf, pub author_name: String, pub author_email: String }
-impl Default for Git { fn default() -> Self { Self { executable: "/usr/bin/git".into(), author_name: "EndlessVibe".into(), author_email: "endlessvibe@localhost".into() } } }
+impl Default for Git { fn default() -> Self { Self { executable: if cfg!(windows){"git".into()}else{"/usr/bin/git".into()}, author_name: "EndlessVibe".into(), author_email: "endlessvibe@localhost".into() } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Docker { pub enabled:bool, pub socket:PathBuf, pub allowed_containers:Vec<String>, pub allow_start:bool, pub allow_stop:bool, pub allow_restart:bool, pub allow_project_socket:bool }
@@ -51,9 +51,23 @@ pub fn valid_environment_name(name:&str)->bool{let mut bytes=name.bytes();matche
 pub fn parse_environment_entries(entries:&[String])->Result<BTreeMap<String,String>>{if entries.len()>64{bail!("project environment accepts at most 64 entries");}let reserved=["HOME","PATH","CARGO_HOME","XDG_CACHE_HOME","LANG","LC_ALL","TERM","ENDLESSVIBE_JOB_SUMMARY"];let mut out=BTreeMap::new();let mut total=0usize;for entry in entries{let(name,value)=entry.split_once('=').context("project environment entries must use NAME=VALUE")?;if !valid_environment_name(name)||name.len()>128{bail!("project environment names must match [A-Za-z_][A-Za-z0-9_]* and be at most 128 bytes");}if reserved.contains(&name){bail!("project environment variable {name} is reserved by EndlessVibe");}if value.contains('\0')||value.len()>65536{bail!("project environment variable {name} contains NUL or exceeds 65536 bytes");}total=total.saturating_add(entry.len());if out.insert(name.to_owned(),value.to_owned()).is_some(){bail!("project environment contains duplicate variable {name}");}}if total>131072{bail!("project environment exceeds 131072 bytes");}Ok(out)}
 impl ProjectConfig{pub fn development(&self)->bool{matches!(self.execution_profile.as_str(),"development"|"trusted_host")}pub fn trusted_host(&self)->bool{self.execution_profile=="trusted_host"}pub fn environment_map(&self)->Result<BTreeMap<String,String>>{parse_environment_entries(&self.environment)}}
 
+#[cfg(target_os="linux")]
 pub fn default_config_path() -> PathBuf { env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config")).join("endlessvibe/config.toml") }
+#[cfg(target_os="linux")]
 pub fn default_state_dir() -> PathBuf { env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("endlessvibe") }
-fn home() -> PathBuf { env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")) }
+#[cfg(target_os="macos")]
+pub fn default_config_path() -> PathBuf { env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join("Library/Application Support")).join("EndlessVibe/config.toml") }
+#[cfg(target_os="macos")]
+pub fn default_state_dir() -> PathBuf { env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join("Library/Application Support")).join("EndlessVibe/state") }
+#[cfg(windows)]
+pub fn default_config_path() -> PathBuf { env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData/Roaming")).join("EndlessVibe/config.toml") }
+#[cfg(windows)]
+pub fn default_state_dir() -> PathBuf { env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData/Local")).join("EndlessVibe") }
+fn home() -> PathBuf { env::var_os("HOME").or_else(||env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")) }
+fn default_execution_path()->String{
+    if cfg!(windows){env::var("PATH").unwrap_or_else(|_|"C:\\Windows\\System32;C:\\Windows".into())}
+    else{"/usr/local/bin:/usr/bin:/bin".into()}
+}
 pub fn valid_id(s: &str) -> bool { !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') }
 
 impl Config {
@@ -83,7 +97,9 @@ impl Config {
         if !(1..=100_000).contains(&self.limits.search_max_files) || !(4096..=1024 * 1024 * 1024).contains(&self.limits.search_max_bytes){bail!("search limits must be 1..100000 files and 4096..1073741824 bytes");}
         if !matches!(self.execution.backend.as_str(), "bubblewrap" | "host" | "disabled") { bail!("execution.backend must be bubblewrap, host, or disabled"); }
         if self.execution.backend == "host" && !self.execution.acknowledge_unsafe_host_execution { bail!("Host execution requires acknowledge_unsafe_host_execution=true; it has all permissions of the service account"); }
-        if self.execution.path.split(':').any(|p| p.is_empty() || !Path::new(p).is_absolute()) { bail!("execution.path must contain only absolute PATH entries"); }
+        if !cfg!(target_os="linux")&&self.execution.backend=="bubblewrap"{bail!("bubblewrap is Linux-only; choose host with explicit acknowledgement or disabled");}
+        let paths=env::split_paths(&self.execution.path).collect::<Vec<_>>();
+        if paths.is_empty()||paths.iter().any(|p|p.as_os_str().is_empty()||!p.is_absolute()){bail!("execution.path must contain only absolute PATH entries");}
         let valid_program=|program:&str|!program.is_empty()&&program.len()<=64&&program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b));
         let mut programs=HashSet::new();for program in &self.execution.allowed_programs{if !valid_program(program)||!programs.insert(program){bail!("execution.allowed_programs must contain unique simple executable names");}}
         let mut required=HashSet::new();for program in &self.execution.required_programs{if !valid_program(program)||!required.insert(program){bail!("execution.required_programs must contain unique simple executable names");}}
@@ -93,7 +109,7 @@ impl Config {
         if !self.docker.socket.is_absolute()||self.docker.socket.components().any(|c|matches!(c,std::path::Component::ParentDir))||self.docker.allowed_containers.len()>64||self.docker.allowed_containers.iter().any(|name|!valid_docker_container(name)) { bail!("Docker socket must be an absolute path without '..'; allowlist supports at most 64 exact, simple container names"); }
         let mut docker_names=HashSet::new();if self.docker.allowed_containers.iter().any(|name|!docker_names.insert(name)){bail!("Docker allowed_containers must be unique");}
         if self.docker.enabled&&self.docker.allowed_containers.is_empty(){bail!("Docker MCP requires at least one explicitly allowed container name");}
-        if !self.git.executable.is_absolute() || self.git.author_name.trim().is_empty() || self.git.author_email.trim().is_empty() || self.git.author_name.contains(['\n', '\r', '\0']) || self.git.author_email.contains(['\n', '\r', '\0']) { bail!("Invalid Git executable or author identity"); }
+        if !self.git.executable.is_absolute() && !(cfg!(windows)&&self.git.executable==Path::new("git")) || self.git.author_name.trim().is_empty() || self.git.author_email.trim().is_empty() || self.git.author_name.contains(['\n', '\r', '\0']) || self.git.author_email.contains(['\n', '\r', '\0']) { bail!("Invalid Git executable or author identity"); }
         let mut ids = HashSet::new();
         for w in &self.workspaces {
             if !valid_id(&w.id) || !ids.insert(w.id.clone()) || !w.path.is_absolute() { bail!("Workspaces need unique simple IDs and absolute root paths"); }
@@ -118,7 +134,7 @@ impl Config {
     #[test]fn search_resource_limits_are_bounded(){let mut c=Config::default();assert!(c.validate().is_ok());c.limits.search_max_files=0;assert!(c.validate().is_err());c.limits.search_max_files=100001;assert!(c.validate().is_err());c.limits.search_max_files=5000;c.limits.search_max_bytes=1024*1024*1024+1;assert!(c.validate().is_err());}
     #[test]fn transfer_is_disabled_by_default(){let mut c=Config::default();assert!(!c.transfer.enabled);assert_eq!(c.transfer.listen.port(),20002);c.transfer.display_name.clear();assert!(c.validate().is_err());}
     #[test]fn docker_requires_exact_allowlist_and_is_disabled_by_default(){let mut c=Config::default();assert!(!c.docker.enabled);assert!(!c.docker.allow_project_socket);c.docker.enabled=true;assert!(c.validate().is_err());c.docker.allowed_containers=vec!["endlessvibe".into()];assert!(c.validate().is_ok());c.docker.allowed_containers.push("../other".into());assert!(c.validate().is_err());c.docker.allowed_containers.pop();c.docker.allowed_containers.push("endlessvibe".into());assert!(c.validate().is_err());}
-    #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, "bubblewrap"); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
+    #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, if cfg!(target_os="linux"){"bubblewrap"}else{"disabled"}); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }
     #[test] fn ids_are_bounded() { assert!(valid_id("BAfter")); assert!(!valid_id("../BAfter")); assert!(!valid_id("")); }

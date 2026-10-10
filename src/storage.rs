@@ -2,7 +2,7 @@ use crate::store::Store;
 use anyhow::{bail,Context,Result};
 use serde::Deserialize;
 use serde_json::{json,Value};
-use std::{fs,os::unix::fs::MetadataExt,path::Path};
+use std::{fs,path::Path};
 
 const MAX_SCAN_NODES:usize=20_000;
 pub const EXEC_CACHE_CONFIRM:&str="CLEAR_EXEC_CACHE";
@@ -35,7 +35,7 @@ fn scan(path:&Path,budget:&mut usize)->Result<SizeInfo>{
 fn scan_one(path:&Path)->Result<Value>{let mut budget=MAX_SCAN_NODES;Ok(scan(path,&mut budget)?.json())}
 fn file_bytes(path:&Path)->Result<u64>{match fs::symlink_metadata(path){Ok(md)if md.is_file()&&!md.file_type().is_symlink()=>Ok(md.len()),Ok(_)=>Ok(0),Err(error)if error.kind()==std::io::ErrorKind::NotFound=>Ok(0),Err(error)=>Err(error).with_context(||format!("Read storage file {}",path.display()))}}
 
-pub fn clear_execution_cache(data_dir:&Path)->Result<Value>{let cache=data_dir.join("exec-cache");let md=fs::symlink_metadata(&cache).with_context(||format!("Read {}",cache.display()))?;if !md.is_dir()||md.file_type().is_symlink()||md.uid()!=unsafe{libc::geteuid()}{bail!("Execution cache root must be an owned real directory (symlinks are refused)");}let before=scan_one(&cache)?;let estimated=before["bytes"].as_u64().unwrap_or(0);let mut entries=0u64;for item in fs::read_dir(&cache)?{let path=item?.path();let md=fs::symlink_metadata(&path)?;if md.is_dir()&&!md.file_type().is_symlink(){fs::remove_dir_all(&path).with_context(||format!("Remove cached directory {}",path.display()))?;}else{fs::remove_file(&path).with_context(||format!("Remove cached file {}",path.display()))?;}entries+=1;}let after=scan_one(&cache)?;Ok(json!({"scope":"exec_cache","cleared":true,"removed_top_level_entries":entries,"estimated_reclaim_bytes_at_least":estimated.saturating_sub(after["bytes"].as_u64().unwrap_or(0)),"estimate_was_truncated":before["truncated"],"cache_after":after,"note":"Cache contents only; existing projects, source files, Git data, backups and database were not deleted. Future builds may need to rebuild."}))}
+pub fn clear_execution_cache(data_dir:&Path)->Result<Value>{let cache=data_dir.join("exec-cache");let md=fs::symlink_metadata(&cache).with_context(||format!("Read {}",cache.display()))?;if !md.is_dir()||md.file_type().is_symlink()||!crate::platform::owned_by_service(&md){bail!("Execution cache root must be an owned real directory (symlinks are refused)");}let before=scan_one(&cache)?;let estimated=before["bytes"].as_u64().unwrap_or(0);let mut entries=0u64;for item in fs::read_dir(&cache)?{let path=item?.path();let md=fs::symlink_metadata(&path)?;if md.is_dir()&&!md.file_type().is_symlink(){fs::remove_dir_all(&path).with_context(||format!("Remove cached directory {}",path.display()))?;}else{fs::remove_file(&path).with_context(||format!("Remove cached file {}",path.display()))?;}entries+=1;}let after=scan_one(&cache)?;Ok(json!({"scope":"exec_cache","cleared":true,"removed_top_level_entries":entries,"estimated_reclaim_bytes_at_least":estimated.saturating_sub(after["bytes"].as_u64().unwrap_or(0)),"estimate_was_truncated":before["truncated"],"cache_after":after,"note":"Cache contents only; existing projects, source files, Git data, backups and database were not deleted. Future builds may need to rebuild."}))}
 
 pub fn snapshot(data_dir:&Path,db:&Store,retained_jobs:usize)->Result<Value>{
     let main=data_dir.join("state.sqlite3");
@@ -65,6 +65,8 @@ pub fn snapshot(data_dir:&Path,db:&Store,retained_jobs:usize)->Result<Value>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[cfg(unix)]
     #[test]fn clearing_exec_cache_preserves_other_state_and_never_follows_symlinks(){let t=tempfile::tempdir().unwrap();let state=t.path().join("state");let cache=state.join("exec-cache");let outside=t.path().join("outside");std::fs::create_dir_all(cache.join("w/p/cargo/target")).unwrap();std::fs::create_dir_all(&outside).unwrap();std::fs::write(cache.join("w/p/cargo/target/build.o"),vec![2u8;8192]).unwrap();std::fs::write(outside.join("KEEP.txt"),b"preserve").unwrap();std::fs::write(state.join("state.sqlite3"),b"db").unwrap();std::fs::create_dir_all(state.join("backups")).unwrap();std::fs::write(state.join("backups/old"),b"backup").unwrap();std::os::unix::fs::symlink(&outside,cache.join("symlink-to-outside")).unwrap();let result=clear_execution_cache(&state).unwrap();assert_eq!(result["cleared"],true);assert!(result["estimated_reclaim_bytes_at_least"].as_u64().unwrap()>=8192);assert_eq!(std::fs::read_dir(&cache).unwrap().count(),0);assert_eq!(std::fs::read(outside.join("KEEP.txt")).unwrap(),b"preserve");assert_eq!(std::fs::read(state.join("state.sqlite3")).unwrap(),b"db");assert_eq!(std::fs::read(state.join("backups/old")).unwrap(),b"backup");std::fs::remove_dir(&cache).unwrap();std::os::unix::fs::symlink(&outside,&cache).unwrap();assert!(clear_execution_cache(&state).is_err());assert!(outside.join("KEEP.txt").exists());}
+    #[cfg(unix)]
     #[test]fn scan_is_bounded_and_does_not_follow_symlinks(){let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("a"),b"1234").unwrap();std::os::unix::fs::symlink(d.path().join("a"),d.path().join("link")).unwrap();let mut budget=100;let value=scan(d.path(),&mut budget).unwrap();assert_eq!(value.bytes,4);assert_eq!(value.nodes,3);assert!(!value.truncated);}
 }

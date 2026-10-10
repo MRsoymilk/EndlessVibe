@@ -1,6 +1,6 @@
 use anyhow::{bail,Context,Result};
 use endlessvibe::{config::{self,Config,ProjectConfig,WorkspaceConfig},runtime::Runtime,security::auth::Auth,server,store::Store,tools::process,util,workspace};
-use std::{os::unix::fs::MetadataExt,path::{Path,PathBuf},sync::Arc};
+use std::{path::{Path,PathBuf},sync::Arc};
 
 #[derive(Default)]struct Cli{config:Option<PathBuf>,init:bool,workspaces:Vec<String>,add_projects:Vec<String>,public_url:Option<String>,bind:Option<String>,read_only:bool,no_exec:bool,allow_shell:bool,unsafe_host:bool,check_sandbox:bool,issue_token:bool,revoke_all:bool,rotate_key:bool,audit:bool,status:bool,stop:bool,restart:bool}
 fn arguments()->Result<Option<Cli>>{
@@ -23,11 +23,16 @@ fn service_state(settings:&Config)->Result<ServiceState>{
     if let Some(identity)=util::read_service_identity(&settings.security.data_dir)?{if util::process_identity_alive(identity){return Ok(ServiceState::Running(identity));}util::clear_service_identity(&settings.security.data_dir,identity)?;}
     match util::single_instance(&settings.security.data_dir.join("service.lock")){Ok(_)=>Ok(ServiceState::Stopped),Err(_)=>Ok(ServiceState::LegacyRunning)}
 }
+#[cfg(target_os="linux")]
 async fn stop_service(settings:&Config)->Result<bool>{
     let identity=match service_state(settings)?{ServiceState::Stopped=>{println!("EndlessVibe is not running");return Ok(false);},ServiceState::LegacyRunning=>bail!("A running EndlessVibe instance holds service.lock but has no service.pid. It predates built-in process control; stop it once using the previous method, then future --stop/--restart commands will work."),ServiceState::Running(identity)=>identity};
     if unsafe{libc::kill(identity.pid,libc::SIGTERM)}!=0{let error=std::io::Error::last_os_error();if error.raw_os_error()==Some(libc::ESRCH){util::clear_service_identity(&settings.security.data_dir,identity)?;println!("EndlessVibe is not running (removed stale service.pid)");return Ok(false);}return Err(error).context("Send SIGTERM to EndlessVibe");}
     let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(15);while util::process_identity_alive(identity)&&tokio::time::Instant::now()<deadline{tokio::time::sleep(std::time::Duration::from_millis(50)).await;}
     if util::process_identity_alive(identity){bail!("EndlessVibe PID {} did not exit within 15 seconds; refusing to force-kill it",identity.pid);}util::clear_service_identity(&settings.security.data_dir,identity)?;println!("Stopped EndlessVibe PID {}",identity.pid);Ok(true)
+}
+#[cfg(not(target_os="linux"))]
+async fn stop_service(_settings:&Config)->Result<bool>{
+    bail!("--stop and --restart require Linux PID start-time verification; on macOS/Windows stop the service with the OS service manager or Ctrl-C")
 }
 fn validate_process_control(c:&Cli)->Result<()> {
     let count=[c.status,c.stop,c.restart].into_iter().filter(|v|*v).count();if count>1{bail!("Use only one of --status, --stop or --restart");}
@@ -58,7 +63,7 @@ fn project_arg(cfg:&Config,value:&str,read_only:bool,no_exec:bool)->Result<(usiz
 fn workspace_table_offsets(text:&str)->Vec<usize>{let mut out=Vec::new();let mut offset=0;for line in text.split_inclusive('\n'){if line.trim()=="[[workspaces]]"{out.push(offset);}offset+=line.len();}out}
 fn insert_project_text(text:&mut String,workspace_index:usize,project:&ProjectConfig)->Result<()>{let offsets=workspace_table_offsets(text);let insert=if workspace_index+1<offsets.len(){offsets[workspace_index+1]}else{text.len()};let mut block=String::new();if insert>0&&!text[..insert].ends_with('\n'){block.push('\n');}block.push_str("\n[[workspaces.projects]]\n");block.push_str(&toml::to_string(project)?);text.insert_str(insert,&block);Ok(())}
 fn replace_config(path:&Path,bytes:&[u8])->Result<()>{
-    let md=std::fs::symlink_metadata(path).with_context(||format!("Read metadata for {}",path.display()))?;if !md.is_file()||md.file_type().is_symlink()||md.nlink()!=1||md.uid()!=unsafe{libc::geteuid()}{bail!("Config must be a regular, single-link file owned by the service user");}
+    let md=std::fs::symlink_metadata(path).with_context(||format!("Read metadata for {}",path.display()))?;if !md.is_file()||md.file_type().is_symlink()||!endlessvibe::platform::single_link(&md)||!endlessvibe::platform::owned_by_service(&md){bail!("Config must be a regular, single-link file owned by the service user");}
     let parent=path.parent().context("Config needs a parent directory")?;let name=path.file_name().and_then(|v|v.to_str()).unwrap_or("config.toml");let temp=parent.join(format!(".{name}.{}.tmp",util::random_secret()?));
     util::private_create(&temp,bytes)?;if let Err(e)=std::fs::rename(&temp,path){let _=std::fs::remove_file(&temp);return Err(e).with_context(||format!("Replace {}",path.display()));}Ok(())
 }
@@ -92,9 +97,10 @@ fn initialize(c:&Cli,path:&std::path::Path)->Result<()>{
 #[tokio::main]
 async fn main()->Result<()>{
     // Credentials, jobs and backups must not become group/world-readable, including SQLite sidecars.
-    unsafe{libc::umask(0o077);}
+    #[cfg(unix)]unsafe{libc::umask(0o077);}
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"endlessvibe=info,rmcp=warn".into())).init();
-    let Some(cli)=arguments()? else{return Ok(());};if unsafe{libc::geteuid()}==0{bail!("Run EndlessVibe as a non-root user; root service execution is refused");}validate_process_control(&cli)?;let path=cli.config.clone().unwrap_or_else(config::default_config_path);let path=if path.is_absolute(){path}else{std::env::current_dir()?.join(path)};
+    let Some(cli)=arguments()? else{return Ok(());};
+    #[cfg(unix)]if unsafe{libc::geteuid()}==0{bail!("Run EndlessVibe as a non-root user; root service execution is refused");}validate_process_control(&cli)?;let path=cli.config.clone().unwrap_or_else(config::default_config_path);let path=if path.is_absolute(){path}else{std::env::current_dir()?.join(path)};
     if cli.status||cli.stop||cli.restart{let settings=Config::load(&path)?;if cli.status{match service_state(&settings)?{ServiceState::Stopped=>println!("stopped"),ServiceState::Running(identity)=>println!("running pid={} start_ticks={}",identity.pid,identity.start_ticks),ServiceState::LegacyRunning=>println!("running legacy_instance=true pid_file=false")};return Ok(());}if cli.stop{return stop_service(&settings).await.map(|_|());}if cli.restart{let _=stop_service(&settings).await?;println!("Starting EndlessVibe with {}",path.display());}}
     if cli.init{if !cli.add_projects.is_empty(){bail!("Use --workspace with --init; --add-project modifies an existing config");}if cli.check_sandbox{bail!("--check-sandbox probes an existing config; do not combine it with --init");}return initialize(&cli,&path);}
     if !cli.add_projects.is_empty(){return add_projects(&cli,&path);}
@@ -133,7 +139,9 @@ async fn main()->Result<()>{
 }
 async fn shutdown_signal(){
     let ctrl=async{if let Err(e)=tokio::signal::ctrl_c().await{tracing::error!(error=%e,"Cannot install Ctrl-C handler");}};
+    #[cfg(unix)]
     let term=async{match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()){Ok(mut signal)=>{signal.recv().await;},Err(e)=>{tracing::error!(error=%e,"Cannot install SIGTERM handler");std::future::pending::<()>().await;}}};
+    #[cfg(windows)]let term=std::future::pending::<()>();
     tokio::select!{_=ctrl=>{},_=term=>{}};
 }
 

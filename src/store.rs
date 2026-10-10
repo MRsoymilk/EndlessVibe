@@ -11,12 +11,7 @@ pub struct Store { connection: Mutex<Connection> }
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if !path.exists() { crate::util::private_create(path, b"")?; }
-        {
-            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-            let f=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
-            let m=f.metadata()?;
-            if !m.is_file() || m.nlink()!=1 || m.uid()!=unsafe{libc::geteuid()} || m.mode()&0o077!=0 { anyhow::bail!("Database must be an owner-only regular file"); }
-        }
+        crate::platform::validate_private_file(path).context("Database must be an owner-only regular file")?;
         let mut c = Connection::open(path)?;
         c.busy_timeout(Duration::from_secs(5))?;
         c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;

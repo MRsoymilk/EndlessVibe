@@ -10,6 +10,8 @@ license = "MIT"
 anyhow = "1"
 axum = { version = "0.8", features = ["form", "json", "query"] }
 base64 = "0.22"
+cap-std = "3"
+fs4 = "0.13"
 getrandom = "0.2"
 libc = "0.2"
 regex = "1"

@@ -18,7 +18,7 @@ impl Workspace{
     pub fn project(&self,id:&str)->Result<Arc<Project>>{self.projects.get(id).cloned().ok_or_else(||crate::error::coded_details("PROJECT_NOT_AUTHORIZED",false,format!("workspace {} has no project {id}",self.config.id),json!({"workspace":self.config.id,"project":id})))}
     pub fn projects_summary(&self)->Value{json!({"workspace":self.config.id,"projects":self.projects.values().map(|p|p.summary()).collect::<Vec<_>>()})}
 }
-fn same_root(a:&Root,b:&Root)->Result<bool>{use std::os::unix::fs::MetadataExt;let a=a.metadata(".")?;let b=b.metadata(".")?;Ok(a.dev()==b.dev()&&a.ino()==b.ino())}
+fn same_root(a:&Root,b:&Root)->Result<bool>{let a=a.metadata(".")?;let b=b.metadata(".")?;Ok(crate::platform::same_file(&a,&b))}
 fn legacy(w:&WorkspaceConfig)->bool{w.allow_write.is_some()||w.allow_exec.is_some()||w.allow_git_commit.is_some()||w.allow_git_mutation.is_some()||w.allow_git_push.is_some()}
 fn project_config(id:String,path:PathBuf,w:&WorkspaceConfig)->ProjectConfig{ProjectConfig{id,path,allow_write:w.allow_write.unwrap_or(false),allow_exec:w.allow_exec.unwrap_or(false),allow_git_commit:w.allow_git_commit.unwrap_or(false),allow_git_mutation:w.allow_git_mutation.unwrap_or(false),allow_git_push:w.allow_git_push.unwrap_or(false),execution_profile:w.execution_profile.clone().unwrap_or_else(crate::config::default_project_profile),environment:w.environment.clone()}}
 fn insert_project(map:&mut BTreeMap<String,Arc<Project>>,workspace_id:&str,root_path:&Path,config:ProjectConfig,legacy_overlap:bool)->Result<()>{
