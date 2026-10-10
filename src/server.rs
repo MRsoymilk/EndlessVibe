@@ -46,6 +46,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/config",get(web::config))
         .route("/api/nodes",get(web::node_discoveries))
         .route("/api/nodes/read",post(web::node_read))
+        .route("/api/nodes/write",post(web::node_write))
         .route("/api/nodes/pending",get(web::node_pending))
         .route("/api/nodes/peers",get(web::node_peers))
         .route("/api/nodes/pair",post(web::node_pair_start))

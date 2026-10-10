@@ -1,5 +1,5 @@
 use super::{secure::{Peer,Wire},TransferManager};
-use crate::{runtime::Runtime,tools::{filesystem,git,types::*},util};
+use crate::{runtime::Runtime,tools::{filesystem,git,tasks,types::*},util};
 use anyhow::{bail,Context,Result};
 use serde::{de::DeserializeOwned,Deserialize,Serialize};
 use schemars::JsonSchema;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[derive(Clone,Debug,Serialize,Deserialize,JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeCallArgs{pub node_id:String,pub tool:String,#[serde(default)]pub arguments:Value}
-pub fn readonly(tool:&str)->bool{matches!(tool,"list_workspaces"|"list_projects"|"inspect_project"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log")}
+pub fn readonly(tool:&str)->bool{matches!(tool,"list_workspaces"|"list_projects"|"inspect_project"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"|"get_task_checkpoint"|"continue_task"|"list_task_checkpoints")}
 pub fn writable(tool:&str)->bool{matches!(tool,"write_file"|"apply_patch"|"create_directory"|"run_command"|"get_job"|"get_job_output"|"cancel_job"|"git_commit")}
 fn permission(tool:&str)->Option<&'static str>{match tool{"write_file"|"apply_patch"|"create_directory"=>Some("write"),"run_command"|"get_job"|"get_job_output"|"cancel_job"=>Some("execute"),"git_commit"=>Some("git"),t if readonly(t)=>Some("read"),_=>None}}
 fn args<T:DeserializeOwned>(v:&Value)->Result<T>{serde_json::from_value(v.clone()).context("Invalid remote tool parameters")}
@@ -36,6 +36,9 @@ async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&st
  "git_status"=>{read_grant(&peer,w,p)?;rt.project_exact(w,p)?;rt.asynchronous_project("transfer_git_status",w,p,move|rt,project|async move{git::status(&rt,&project).await}).await}
  "git_diff"=>{read_grant(&peer,w,p)?;let a:DiffArgs=args(&v)?;rt.project_exact(w,p)?;rt.asynchronous_project("transfer_git_diff",w,p,move|rt,project|async move{git::diff(&rt,&project,a).await}).await}
  "git_log"=>{read_grant(&peer,w,p)?;let a:LogArgs=args(&v)?;rt.project_exact(w,p)?;rt.asynchronous_project("transfer_git_log",w,p,move|rt,project|async move{git::log(&rt,&project,a).await}).await}
+ "get_task_checkpoint"=>{let a:TaskArgs=args(&v)?;tasks::get(&rt.db,a)}
+ "continue_task"=>{let a:ContinueTaskArgs=args(&v)?;tasks::continue_recovery(&rt.db,a)}
+ "list_task_checkpoints"=>{let query:ListTaskCheckpointsArgs=args(&v)?;if query.workspace.as_deref()!=Some(w)||query.project.as_deref()!=Some(p){bail!("Remote checkpoint query must use exact authorized Project");}tasks::list(&rt.db,query)}
  "write_file"=>{let a:WriteArgs=args(&v)?;rt.sync_project("transfer_write_file",w,p,move|rt,project|filesystem::write(&rt,&project,a)).await}
  "apply_patch"=>{let a:PatchArgs=args(&v)?;rt.sync_project("transfer_apply_patch",w,p,move|rt,project|filesystem::patch(&rt,&project,a)).await}
  "create_directory"=>{let a:MakeDirectoryArgs=args(&v)?;rt.sync_project("transfer_create_directory",w,p,move|_,project|filesystem::mkdir(&project,a)).await}

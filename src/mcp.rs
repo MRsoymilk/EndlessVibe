@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 pub const SDK_VERSION:&str="3.5.0";
 /// Bump whenever any exposed MCP tool name, argument schema, security metadata or semantics change.
-pub const TOOL_SCHEMA_REVISION:&str="2026-10-10.1";
+pub const TOOL_SCHEMA_REVISION:&str="2026-10-10.2";
 pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push","docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart","node_list","node_read","node_write"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
 const MCP_TEXT_MIRROR_MAX_BYTES:usize=2048;
@@ -104,7 +104,7 @@ impl EndlessVibeMcp{
     #[tool(meta=tool_meta("node_list"),description="List local discovered Transfer nodes and trusted paired nodes. Discovery is unauthenticated; only paired nodes may be called. Uses local-only state, does not expose pairing credentials.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
     fn node_list(&self)->CallToolResult{let op=empty(&self.rt,"node_list");let result=self.rt.transfer.peers().map(|mut p|{p["discovery"]=self.rt.transfer.discoveries();p});answer_logged(&self.rt,op,result)}
 
-    #[tool(meta=tool_meta("node_read"),description="Read a paired child Project through encrypted Transfer. Provide node_id, tool (list_workspaces, list_projects, inspect_project, list_directory, read_file, search_code, git_status, git_diff or git_log) and the same arguments as the corresponding local tool. Each call is authorized again by the child; local behavior and SHA/diff constraints are unchanged.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    #[tool(meta=tool_meta("node_read"),description="Read a paired child Project through encrypted Transfer. Provide node_id, tool (list_workspaces, list_projects, inspect_project, list_directory, read_file, search_code, git_status, git_diff, git_log, get_task_checkpoint, continue_task or list_task_checkpoints) and the same arguments as the corresponding local tool. Each call is authorized again by the child; local behavior and SHA/diff constraints are unchanged.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
     async fn node_read(&self,Parameters(a):Parameters<NodeCallArgs>)->CallToolResult{let op=begin(&self.rt,"node_read","","",&a);let result=if !router::readonly(&a.tool){Err(anyhow::anyhow!("node_read accepts only read-only tools"))}else{self.rt.transfer.call_node(&a.node_id,&a.tool,a.arguments).await};answer_logged(&self.rt,op,result)}
 
     #[tool(meta=tool_meta("node_write"),description="Forward an explicitly supported Project mutation or Job query to a paired child. Child rechecks per-Project grants and local permissions. Timed-out mutations must never be replayed blindly.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]

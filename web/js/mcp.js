@@ -7,7 +7,8 @@ const toolGroups=[
   ["命令",["run_command","run_shell"]],
   ["任务",["get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","list_task_checkpoints"]],
   ["Git",["git_status","git_diff","git_log","git_commit","git_push"]],
-  ["Docker",["docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart"]]
+  ["Docker",["docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart"]],
+  ["Transfer Nodes",["node_list","node_read","node_write"]]
 ];
 
 export function renderToolTree(id,tools){

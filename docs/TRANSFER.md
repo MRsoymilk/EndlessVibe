@@ -35,6 +35,14 @@ The parent exposes `node_write` for explicitly supported remote operations: `wri
 
 A remote command returns its durable child-owned Job ID. Query it with `node_write` and `tool=get_job` or `get_job_output` using exact child workspace/project. Network timeout does not imply the Job failed, and **must not automatically replay mutations**. Use the original idempotency `request_id` if reconciling the same command.
 
+## Phase 5 — Disconnection, Resume, Revocation and Recovery
+
+Parent-side `node_read` also accepts `get_task_checkpoint`, `continue_task`, and `list_task_checkpoints` to inspect existing child-owned stage checkpoints. These must include the exact granted child `workspace` and `project`; list requests without both selectors are not accepted. Jobs stay on the child and are not re-executed when the parent reconnects. The parent can poll a previously received Job ID through `node_write` (`get_job` / `get_job_output`), and submitting the *same* `request_id` and identical command on the child returns the existing Job reference, not a duplicate. If a network timeout occurs before receiving a Job ID, do not invent a new request ID; use the original one only for idempotent reconciliation.
+
+The child TLS identity, pairing token digest, Project grants and Job database survive Transfer listener restarts; parent reconnects using its pinned child certificate fingerprint and saved pairing token. Revoking the pair at the child immediately causes later calls to fail, even if the parent still has its local pairing entry. No write action is automatically retried after a connection error. The Transfer server sends bounded error responses for denied calls instead of silently dropping the connection. Paired node listings distinguish recent LAN discovery from trust: an undiscovered paired peer may still be reachable by its saved endpoint.
+
+The local Nodes Dashboard now has a guarded `POST /api/nodes/write` path and an advanced Project-operation panel. It requires an explicit confirmation, exact selected Workspace/Project, and accepts only the same write whitelist as `node_write`. The parent records a request digest rather than file contents. Remote shell, arbitrary Docker tools, push and nested forwarding remain disabled.
+
 ## Planned authorization and routing invariants
 
 - Pairing must use an encrypted authenticated protocol. The discovery name and IP are untrusted hints, not identities.
