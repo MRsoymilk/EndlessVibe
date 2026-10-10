@@ -20,18 +20,18 @@ pub async fn dispatch(rt:Arc<Runtime>,transfer:Arc<TransferManager>,wire:Wire)->
  let peer=transfer.incoming_peer(&wire.node_id,&wire.token)?;
  let tool=wire.tool.as_str();if permission(tool).is_none(){bail!("Transfer tool is not authorized");}let input=wire.args.clone();
  let(w,p)=if matches!(tool,"list_workspaces"|"list_projects"){(String::new(),String::new())}else{target(&input)?};
- if writable(tool)&&!matches!(tool,"get_job"|"get_job_output"|"run_command"){
+ if writable(tool)&&!matches!(tool,"get_job"|"get_job_output"){
   // Authorization must precede both deduplication and cached result delivery.
   let grant=peer.grants.iter().find(|g|g.workspace==w&&g.project==p).context("Remote Project not granted")?;
   let local=rt.project_exact(&w,&p)?;
   let permitted=match permission(tool){Some("write")=>grant.write&&local.config.allow_write,Some("execute")=>grant.execute&&local.config.allow_exec&&local.config.allow_write,Some("git")=>grant.git&&local.config.allow_git_commit&&local.config.allow_write,_=>false};
   if !permitted{bail!("Remote operation exceeds current Project permission");}
-  match super::idempotency::claim(&rt.db,&wire.node_id,&wire.id,tool,&input)?{super::idempotency::Claim::Cached(result)=>return Ok(result),super::idempotency::Claim::New=>{}}
+  match super::idempotency::claim(&rt.db,&wire.node_id,&wire.id,tool,&input)?{super::idempotency::Claim::Cached(mut result)=>{if tool=="run_command"{result["reused"]=json!(true);}return Ok(result)},super::idempotency::Claim::New=>{}}
  }
  let summary=if matches!(tool,"write_file"|"apply_patch"){json!({"parent_node":wire.node_id,"tool":tool,"workspace":w,"project":p,"payload_sha256":util::digest(input.to_string())})}else{json!({"parent_node":wire.node_id,"arguments":input})};let operation=rt.begin_operation(&format!("transfer_{tool}"),&w,&p,summary);
  let result=dispatch_inner(rt.clone(),peer,tool,input,&w,&p).await;
  let result=rt.finish_operation(operation,result);
- if writable(tool)&&!matches!(tool,"get_job"|"get_job_output"|"run_command"){
+ if writable(tool)&&!matches!(tool,"get_job"|"get_job_output"){
   match &result{Ok(value)=>super::idempotency::complete(&rt.db,&wire.node_id,&wire.id,value)?,Err(_)=>super::idempotency::fail(&rt.db,&wire.node_id,&wire.id)?}
  }
  result
