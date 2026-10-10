@@ -121,6 +121,53 @@ async fn transfer_request_history_survives_runtime_restart_and_revocation(){
  assert!(parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo"})).await.is_err());
  resume.cancel();restart_task.await.unwrap().unwrap();
 }
+#[tokio::test]
+async fn transfer_offline_and_lost_ack_do_not_replay_mutations(){
+    let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=socket.local_addr().unwrap();drop(socket);
+    let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});
+    let parent=fixture(|c|c.transfer.enabled=true);
+    let stop=tokio_util::sync::CancellationToken::new();
+    let server=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+    let pair_id=offer["id"].as_str().unwrap().to_owned();
+    let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false};
+    child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id.clone(),grants:vec![grant]},&child.rt).unwrap();
+    parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id,grants:vec![]},&parent.rt).unwrap();
+    let node=child.rt.transfer.node_id.clone();
+    let workspace=child.rt.project("demo","demo").unwrap().root.path.clone();
+    stop.cancel();server.await.unwrap().unwrap();
+    let undelivered=json!({"workspace":"demo","project":"demo","path":"not-yet-delivered"});
+    assert!(parent.rt.transfer.call_node_with_request_id(&node,"create_directory",undelivered.clone(),Some("offline-delivery")).await.is_err());
+    assert!(!workspace.join("not-yet-delivered").exists());
+    let key=util::digest(format!("{}\0offline-delivery",parent.rt.transfer.node_id));
+    assert!(child.rt.db.get::<Value>("transfer_requests",&key).unwrap().is_none());
+    let resume=tokio_util::sync::CancellationToken::new();
+    let running=tokio::spawn(child.rt.transfer.clone().run_tls(resume.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    parent.rt.transfer.call_node_with_request_id(&node,"create_directory",undelivered,Some("offline-delivery")).await.unwrap();
+    assert!(workspace.join("not-yet-delivered").is_dir());
+    let delivered=json!({"workspace":"demo","project":"demo","path":"already-delivered"});
+    // Emulate an application losing the response after the child commits the side effect.
+    let acknowledged=parent.rt.transfer.call_node_with_request_id(&node,"create_directory",delivered.clone(),Some("lost-ack")).await.unwrap();
+    let response_digest=util::digest(acknowledged.to_string());drop(acknowledged);
+    assert!(workspace.join("already-delivered").is_dir());
+    let before:i64=child.rt.db.transaction(|tx|Ok(tx.query_row("SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get(0))?)).unwrap();
+    assert_eq!(before,2);
+    resume.cancel();running.await.unwrap().unwrap();
+    let reboot=tokio_util::sync::CancellationToken::new();
+    let rebooted=tokio::spawn(child.rt.transfer.clone().run_tls(reboot.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let replay=parent.rt.transfer.call_node_with_request_id(&node,"create_directory",delivered,Some("lost-ack")).await.unwrap();
+    assert_eq!(util::digest(replay.to_string()),response_digest);
+    let after:i64=child.rt.db.transaction(|tx|Ok(tx.query_row("SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get(0))?)).unwrap();
+    assert_eq!(after,before);
+    let status=parent.rt.transfer.call_node(&node,"request_status",json!({"workspace":"demo","project":"demo","request_id":"lost-ack"})).await.unwrap();
+    assert_eq!(status["state"],"completed");
+    assert_eq!(status["safe_to_replay"],false);
+    reboot.cancel();rebooted.await.unwrap().unwrap();
+}
 #[test]fn transfer_operation_audit_never_persists_remote_output_or_diff(){let f=fixture(|_|{});for tool in ["node_read","node_write","node_dashboard_write","transfer_get_job_output","transfer_git_diff"]{let op=f.rt.begin_operation(tool,"demo","demo",json!({"request_hash":"digest"}));let id=op.id.unwrap();let delivered=f.rt.finish_operation(op,Ok(json!({"output":"REMOTE_SECRET_LOG","diff":"REMOTE_SECRET_PATCH"}))).unwrap();assert_eq!(delivered["output"],"REMOTE_SECRET_LOG");let stored=f.rt.db.operation(id).unwrap();assert_eq!(stored["output"]["redacted"],true);assert!(!stored.to_string().contains("REMOTE_SECRET_LOG"));assert!(!stored.to_string().contains("REMOTE_SECRET_PATCH"));}}
 #[tokio::test]
 async fn nodes_request_history_ui_assets_are_served(){
