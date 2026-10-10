@@ -76,5 +76,91 @@ impl TransferManager{
 }
 #[cfg(test)]mod tests{use super::*;
 #[tokio::test]async fn tls_pair_offer_matches_both_nodes_and_never_grants_projects(){let a=tempfile::tempdir().unwrap();let b=tempfile::tempdir().unwrap();let db_a=Arc::new(Store::open(&a.path().join("state")).unwrap());let db_b=Arc::new(Store::open(&b.path().join("state")).unwrap());let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();drop(listener);let mut child_cfg=crate::config::Transfer::default();child_cfg.enabled=true;child_cfg.listen=address;child_cfg.display_name="Child".into();let child=TransferManager::new(child_cfg,db_b).unwrap();let mut parent_cfg=crate::config::Transfer::default();parent_cfg.enabled=true;let parent=TransferManager::new(parent_cfg,db_a).unwrap();let shutdown=CancellationToken::new();let task=tokio::spawn(child.clone().run_tls(shutdown.clone(),None));tokio::time::sleep(Duration::from_millis(100)).await;let result=parent.start_pair(address).await.unwrap();assert_eq!(result["role"],"parent");let pending=child.pending().unwrap();assert_eq!(pending["pending"][0]["code"],result["code"]);assert_eq!(pending["pending"][0]["node_id"],parent.node_id);assert_eq!(child.peers().unwrap()["peers"].as_array().unwrap().len(),0);assert!(child.authorized(&parent.node_id,"invalid","w","p","read").is_err());shutdown.cancel();task.await.unwrap().unwrap();}
+
+#[tokio::test]
+async fn tls_partial_frame_and_disconnected_response_never_duplicate_mutation(){
+ use crate::config::{Config,WorkspaceConfig,ProjectConfig};
+ use crate::runtime::Runtime;
+ let child_dir=tempfile::tempdir().unwrap();
+ let parent_dir=tempfile::tempdir().unwrap();
+ let probe=TcpListener::bind("127.0.0.1:0").await.unwrap();
+ let address=probe.local_addr().unwrap();drop(probe);
+ let root=child_dir.path().join("workspace");
+ std::fs::create_dir_all(root.join("project")).unwrap();
+ let mut config=Config::default();
+ config.security.data_dir=child_dir.path().join("private_state");
+ config.execution.backend="host".into();
+ config.execution.acknowledge_unsafe_host_execution=true;
+ config.transfer.enabled=true;config.transfer.listen=address;
+ config.workspaces=vec![WorkspaceConfig{id:"demo".into(),path:root.clone(),
+  projects:vec![ProjectConfig{id:"demo".into(),path:"project".into(),
+   allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,
+   allow_git_push:false,execution_profile:crate::config::default_project_profile(),
+   environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,
+   allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];
+ util::private_dir(&config.security.data_dir).unwrap();
+ util::private_create(&config.security.data_dir.join("owner.key"),util::random_secret().unwrap().as_bytes()).unwrap();
+ let config_path=child_dir.path().join("config.toml");
+ util::private_create(&config_path,toml::to_string(&config).unwrap().as_bytes()).unwrap();
+ let rt=Runtime::new(config,&config_path).unwrap();
+ let db=Arc::new(Store::open(&parent_dir.path().join("state")).unwrap());
+ let mut parent_cfg=crate::config::Transfer::default();parent_cfg.enabled=true;
+ let parent=TransferManager::new(parent_cfg,db).unwrap();
+ let shutdown=CancellationToken::new();
+ let server=tokio::spawn(rt.transfer.clone().run_tls(shutdown.clone(),Some(rt.clone())));
+ tokio::time::sleep(Duration::from_millis(100)).await;
+ let offer=parent.start_pair(address).await.unwrap();
+ let id=offer["id"].as_str().unwrap().to_owned();
+ rt.transfer.approve_pair(PairApprove{id:id.clone(),grants:vec![Grant{
+  workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false
+ }]},&rt).unwrap();
+ parent.approve_pair(PairApprove{id,grants:vec![]},&rt).unwrap();
+ let peer:Peer=parent.db.get(PAIRS,&rt.transfer.node_id).unwrap().unwrap();
+ let connector=TlsConnector::from(tls_client_config(Some(peer.cert_sha.clone())).unwrap());
+
+ // A valid TLS session that drops midway through a length-prefixed JSON message
+ // must never reach dispatch or create any durable request claim.
+ let sock=TcpStream::connect(address).await.unwrap();
+ let mut partial=connector.connect(ServerName::try_from("endlessvibe.local").unwrap().to_owned(),sock).await.unwrap();
+ partial.write_u32(128).await.unwrap();
+ partial.write_all(b"{\"kind\":\"call\"").await.unwrap();
+ partial.flush().await.unwrap();
+ drop(partial);
+ tokio::time::sleep(Duration::from_millis(30)).await;
+ let count=rt.db.transaction(|tx|Ok(tx.query_row(
+  "SELECT COUNT(*) FROM operation_log WHERE tool LIKE 'transfer_%'",[],|r|r.get::<_,i64>(0))?)).unwrap();
+ assert_eq!(count,0);
+
+ // Send a complete authenticated write and physically close TCP without ever
+ // reading the reply. The child may have executed it; replay is never allowed.
+ let arguments=json!({"workspace":"demo","project":"demo","path":"created-once"});
+ let request_id="connection-dropped-after-send";
+ let wire=json!({"kind":"call","node_id":parent.node_id,"token":peer.token,
+  "tool":"create_directory","id":request_id,"args":arguments});
+ let sock=TcpStream::connect(address).await.unwrap();
+ let mut disconnected=connector.connect(ServerName::try_from("endlessvibe.local").unwrap().to_owned(),sock).await.unwrap();
+ send(&mut disconnected,&wire).await.unwrap();
+ drop(disconnected); // Deliberately do not call recv.
+ let key=util::digest(format!("{}\0{}",parent.node_id,request_id));
+ tokio::time::timeout(Duration::from_secs(3),async{
+  loop{
+   if let Some(r)=rt.db.get::<Value>("transfer_requests",&key).unwrap(){
+    if r["state"]=="completed"{break;}
+   }
+   tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+ }).await.expect("Child did not durably finish a write after client dropped TCP");
+ assert!(root.join("project/created-once").is_dir());
+ let before=rt.db.transaction(|tx|Ok(tx.query_row(
+  "SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get::<_,i64>(0))?)).unwrap();
+ assert_eq!(before,1);
+ let answer=parent.call_node_with_request_id(&rt.transfer.node_id,"create_directory",
+  json!({"workspace":"demo","project":"demo","path":"created-once"}),Some(request_id)).await.unwrap();
+ assert!(answer.is_object());
+ let after=rt.db.transaction(|tx|Ok(tx.query_row(
+  "SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get::<_,i64>(0))?)).unwrap();
+ assert_eq!(after,before);
+ shutdown.cancel();server.await.unwrap().unwrap();
+}
 #[test]fn retry_policy_never_replays_mutations(){for tool in ["read_file","list_directory","git_status","get_task_checkpoint","continue_task","get_job","get_job_output"]{assert!(retryable_tool(tool),"{tool}");}for tool in ["write_file","apply_patch","create_directory","run_command","cancel_job","git_commit","git_push","run_shell"]{assert!(!retryable_tool(tool),"{tool}");}}
 #[test]fn code_is_stable_and_permissions_fail_closed(){assert_eq!(code("cert","token"),code("cert","token"));assert_ne!(code("cert","token"),code("cert2","token"));assert!(!lan("8.8.8.8:20002".parse().unwrap()));assert!(lan("127.0.0.1:20002".parse().unwrap()));}}

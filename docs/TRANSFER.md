@@ -55,6 +55,28 @@ Request IDs are permanent deduplication keys, not disposable log entries. To bou
 
 Do not use a new request ID to "fix" an uncertain remote mutation without first checking the target Project, Git state or Job. A server restart does not automatically resume or replay unfinished filesystem/Git actions.
 
+## Phase 7 — Indexed History, Local Metrics, and TCP Fault Verification
+
+SQLite schema v4 adds the `idx_transfer_history_scope_created` partial expression index for
+`request_history`, scoped by authenticated parent node, Workspace, Project, immutable
+creation time and request key. Migrations preserve existing persisted requests. The
+history cursor remains Project-scoped and never replaces per-request authorization.
+
+The local-only Dashboard endpoint `GET /api/nodes/metrics` returns aggregate counts of
+persisted requests by state, review-required requests, and recent `transfer_*` operation
+outcomes over the previous 24 hours. The Nodes page shows total requests, completed
+requests, review-required requests and the success rate for finished calls. This
+endpoint is intentionally **not** routed on the public MCP server; results contain
+no pairing tokens, request arguments, file data, or raw Job output.
+
+Fault-injection tests open real pinned-TLS TCP connections: one connection stops
+midway through a length-prefixed JSON request, and another sends a complete
+authorized mutation then closes before reading its response. The first must not
+create a request or side effect; the second must persist its result, allowing
+a reconnect with the same request ID to return the cached result without
+creating a second operation. These tests do not simulate arbitrary packet loss
+or network latency; the fail-closed rule for uncertain mutations remains unchanged.
+
 ## Planned authorization and routing invariants
 
 - Pairing must use an encrypted authenticated protocol. The discovery name and IP are untrusted hints, not identities.
