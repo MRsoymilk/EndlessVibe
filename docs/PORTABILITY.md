@@ -56,6 +56,21 @@ Job Objects do not restrict file access, registry, network or user security
 tokens: this is a resource-containment stage, NOT a Windows AppContainer
 sandbox. Host mode still requires explicit unsafe-host authorization.
 
+### Windows AppContainer identity verification
+
+The Windows-only AppContainer prototype creates an unpredictable one-time
+profile with no network capabilities and uses the Win32 extended startup
+attributes to launch a suspended, low-privilege process. Native tests inspect
+its access token and confirm that it actually has AppContainer identity.
+Temporary profiles are deleted after their process has exited.
+
+This is an isolated-identity verification layer, not yet a selectable
+execution backend. In particular, it does not mount or grant access to any
+Project directory and must not be treated as equivalent to a working
+sandboxed Cargo command runner. A separate staging mechanism is required
+before authorizing Project code execution; broad ACL grants to the original
+Project must not be made implicitly.
+
 ### Windows MSVC toolchain in host jobs
 
 When a Windows host job executes cargo, rustc, cmake, or ninja, EndlessVibe
