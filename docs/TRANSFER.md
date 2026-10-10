@@ -1,5 +1,14 @@
 # EndlessVibe Transfer / Parent–Child Nodes
 
+## LAN-only deployment (no public ChatGPT endpoint)
+
+To operate entirely through the encrypted LAN node mesh, initialize a new instance with `--init --lan-only --workspace ID=/absolute/path`. An already initialized instance may be converted **in place** by stopping EndlessVibe and running `endlessvibe --lan-only` (optionally with `--config PATH`). Existing owner keys, Workspace/Project grants, and configuration comments are preserved.
+
+In this mode, `[server].lan_only = true`, local MCP binds to `127.0.0.1:20000`, and `server.public_url = "http://127.0.0.1:20000"` is **only an internal OAuth resource identifier**, not a public ChatGPT URL. `[security].allow_http_loopback = true` is used for the loopback OAuth service only. The Dashboard remains at `127.0.0.1:20001` and is not exposed over LAN. Transfer is enabled for TLS 1.3 at TCP `20002`, with optional multicast discovery via UDP `20003`. Configure Windows/macOS/Linux firewalls for a trusted private network.
+
+On each computer, open `http://127.0.0.1:20001/nodes` locally, select the other node or enter its LAN IP and Transfer port, verify matching codes, and independently approve the peer and exact Project grants. Do **not** expose the loopback MCP service over a plain HTTP proxy: remote MCP HTTP clients require a separate HTTPS-protected deployment.
+
+---
 ## Phase 1 — LAN Discovery
 
 `[transfer]` is disabled by default. Enabling it starts an independent UDP multicast discovery service on `239.255.77.77:20003`, announcing only the stable node ID, display name and declared transfer port. These packets are **not authenticated**; discovery results are **never authorization**. The node ID is generated once and persisted in the private SQLite store. Offline peers are identified by stale `last_seen` timestamps. A local-only `GET /api/nodes` endpoint exposes the discovered nodes. Cross-subnet/isolated-Wi-Fi installations require a later manual-address option. A separate TLS 1.3 listener uses the configured `transfer.listen` endpoint; multicast discovery is only an unauthenticated location hint, never an identity.

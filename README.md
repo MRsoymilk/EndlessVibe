@@ -169,6 +169,37 @@ Authentication: OAuth 2.0
 
 详见 [OAuth 接入](docs/OAUTH.md) 与 [Cloudflare Tunnel](docs/DOCKER_TUNNEL.md)。
 
+## 局域网模式（无需公网 ChatGPT URL）
+
+仅在局域网连接多台 EndlessVibe 时，可使用 **`--lan-only`**。该模式启用独立的 **TLS 1.3 Transfer 节点通信**，不会将未加密的 MCP/OAuth 直接暴露到局域网。
+
+**Windows 新安装**（工作空间目录必须已存在）：
+
+```powershell
+.\target\debug\endlessvibe.exe --init --lan-only --workspace "project=D:\project"
+```
+
+**Windows 已执行过 `--init` 的现有安装**（不删除配置或 owner.key）：
+
+```powershell
+# 先停止正在运行的 EndlessVibe，然后只执行一次转换
+.\target\debug\endlessvibe.exe --lan-only
+
+# 正常启动
+.\target\debug\endlessvibe.exe
+```
+
+LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限与 Owner Key。原公网地址签发的 OAuth Token 不再对新的本机资源有效。
+
+- 本机 MCP（OAuth）：`http://127.0.0.1:20000/mcp`，**只监听 loopback**，不是供局域网设备直接调用的 HTTP 地址。
+- 本机 Dashboard：`http://127.0.0.1:20001/nodes`，**只允许本机访问**。
+- 局域网通信：TCP **20002 / TLS 1.3**；自动发现：UDP **20003 / multicast**。仅在可信 LAN 内放行所需端口。
+- 双方必须分别在本机 Nodes 页面核对验证码、批准配对和授权 Project。自动发现不等于授权。
+
+`--lan-only` 不允许同时设置 `--public-url` 或 `--bind`。如需其他设备直接通过 MCP HTTP 接入，仍须使用 HTTPS 保护的地址；**不要在局域网通过纯 HTTP 发送 OAuth Bearer Token**。
+
+详见 [LAN Transfer 节点配对](docs/TRANSFER.md)。
+
 ## Usage
 
 ### Read and edit files

@@ -169,6 +169,37 @@ Replace the example origin with your configured `server.public_url`. Your revers
 
 See [OAuth](docs/OAUTH.md) and [Cloudflare Tunnel](docs/DOCKER_TUNNEL.md).
 
+## LAN-only mode (no public ChatGPT URL)
+
+Use **`--lan-only`** to connect EndlessVibe instances via **TLS 1.3 Transfer pairing** without exposing MCP or OAuth over plaintext LAN HTTP.
+
+**New Windows installation** (the directory must already exist):
+
+```powershell
+.\target\debug\endlessvibe.exe --init --lan-only --workspace "project=D:\project"
+```
+
+**Existing Windows installation** (no need to delete the config or owner key):
+
+```powershell
+# Stop the running EndlessVibe instance, then convert the config once
+.\target\debug\endlessvibe.exe --lan-only
+
+# Start normally
+.\target\debug\endlessvibe.exe
+```
+
+The setting persists in `config.toml`, preserving all Workspace/Project grants and the owner key. Tokens issued for the previous public OAuth resource become invalid.
+
+- Local MCP (OAuth): `http://127.0.0.1:20000/mcp`, **loopback only**, not an HTTP endpoint for other LAN computers.
+- Local Dashboard: `http://127.0.0.1:20001/nodes`, **loopback only**.
+- Node Transfer: **TCP 20002 / TLS 1.3**; discovery: **UDP 20003 / multicast**. Open these only on a trusted LAN.
+- Both devices must compare the verification code, approve pairing, and grant access to specific Projects in their local Nodes page. Discovery alone is not authorization.
+
+Do not combine `--lan-only` with `--public-url` or `--bind`. Direct MCP HTTP access from another computer still requires an HTTPS-protected endpoint; **never transmit OAuth bearer tokens over plaintext LAN HTTP**.
+
+See [LAN Transfer pairing](docs/TRANSFER.md).
+
 ## Usage
 
 ### Read and edit a file
