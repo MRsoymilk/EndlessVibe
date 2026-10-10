@@ -46,6 +46,69 @@ let old=parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","
 child.rt.transfer.revoke_pair(&parent.rt.transfer.node_id).unwrap();assert!(parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.is_err());
 resume.cancel();running.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn transfer_request_history_survives_runtime_restart_and_revocation(){
+ let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+ let address=socket.local_addr().unwrap();drop(socket);
+ let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});
+ let parent=fixture(|c|c.transfer.enabled=true);
+ let parent_id=parent.rt.transfer.node_id.clone();
+ let node_id=child.rt.transfer.node_id.clone();
+ let stop=tokio_util::sync::CancellationToken::new();
+ let server_task=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+ tokio::time::sleep(Duration::from_millis(100)).await;
+ let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+ let pair_id=offer["id"].as_str().unwrap().to_string();
+ let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false};
+ child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id.clone(),grants:vec![grant]},&child.rt).unwrap();
+ parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id,grants:vec![]},&parent.rt).unwrap();
+ let good=json!({"workspace":"demo","project":"demo","path":"restored-directory"});
+ parent.rt.transfer.call_node_with_request_id(&node_id,"create_directory",good.clone(),Some("confirmed-create")).await.unwrap();
+ let bad=json!({"workspace":"demo","project":"demo","path":"../outside-project"});
+ assert!(parent.rt.transfer.call_node_with_request_id(&node_id,"create_directory",bad.clone(),Some("rejected-create")).await.is_err());
+ let failed=parent.rt.transfer.call_node(&node_id,"request_status",json!({"workspace":"demo","project":"demo","request_id":"rejected-create"})).await.unwrap();
+ assert_eq!(failed["state"],"failed");
+
+ // Simulate the durable record left by a process killed after claiming a write,
+ // then actually stop the TLS listener and recreate the whole Runtime/Store.
+ let interrupted_id="crash-during-write";
+ let interrupted_args=json!({"workspace":"demo","project":"demo","path":"recovery.txt","expected_sha256":"MISSING","content":"sensitive payload"});
+ let digest=util::digest(format!("write_file\0{}",interrupted_args));
+ let kv_key=util::digest(format!("{parent_id}\0{interrupted_id}"));
+ let now=util::now();
+ let record=json!({"fingerprint":digest,"state":"started","result":null,
+  "workspace":"demo","project":"demo","tool":"write_file",
+  "error":null,"job_id":null,"request_id":interrupted_id,"peer_node_id":parent_id,
+  "created":now,"updated":now});
+ child.rt.db.put("transfer_requests",&kv_key,&record,0).unwrap();
+ let unknown=parent.rt.transfer.call_node(&node_id,"request_status",json!({"workspace":"demo","project":"demo","request_id":interrupted_id})).await.unwrap();
+ assert_eq!(unknown["state"],"uncertain");
+ let config=(*child.rt.config).clone();
+ let config_path=child.rt.config_path.clone();
+ stop.cancel();server_task.await.unwrap().unwrap();
+ drop(child.rt);
+ let restarted=Runtime::new(config,&config_path).unwrap();
+ assert_eq!(restarted.transfer.node_id,node_id);
+ let resume=tokio_util::sync::CancellationToken::new();
+ let restart_task=tokio::spawn(restarted.transfer.clone().run_tls(resume.clone(),Some(restarted.clone())));
+ tokio::time::sleep(Duration::from_millis(100)).await;
+ let state=parent.rt.transfer.call_node(&node_id,"request_status",json!({"workspace":"demo","project":"demo","request_id":interrupted_id})).await.unwrap();
+ assert_eq!(state["state"],"interrupted");
+ assert_eq!(state["safe_to_replay"],false);
+ assert_eq!(state["recovery_action"],"inspect_project_before_new_request");
+ let history=parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":20})).await.unwrap();
+ let rows=history["requests"].as_array().unwrap();
+ assert!(rows.iter().any(|r|r["request_id"]=="confirmed-create"&&r["state"]=="completed"));
+ assert!(rows.iter().any(|r|r["request_id"]=="rejected-create"&&r["state"]=="failed"));
+ assert!(rows.iter().any(|r|r["request_id"]==interrupted_id&&r["state"]=="interrupted"));
+ assert!(parent.rt.transfer.call_node_with_request_id(&node_id,"write_file",interrupted_args,Some(interrupted_id)).await.is_err());
+ assert!(!restarted.project("demo","demo").unwrap().root.path.join("recovery.txt").exists());
+ parent.rt.transfer.call_node_with_request_id(&node_id,"create_directory",good,Some("confirmed-create")).await.unwrap();
+ restarted.transfer.revoke_pair(&parent_id).unwrap();
+ assert!(parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo"})).await.is_err());
+ resume.cancel();restart_task.await.unwrap().unwrap();
+}
 #[test]fn transfer_operation_audit_never_persists_remote_output_or_diff(){let f=fixture(|_|{});for tool in ["node_read","node_write","node_dashboard_write","transfer_get_job_output","transfer_git_diff"]{let op=f.rt.begin_operation(tool,"demo","demo",json!({"request_hash":"digest"}));let id=op.id.unwrap();let delivered=f.rt.finish_operation(op,Ok(json!({"output":"REMOTE_SECRET_LOG","diff":"REMOTE_SECRET_PATCH"}))).unwrap();assert_eq!(delivered["output"],"REMOTE_SECRET_LOG");let stored=f.rt.db.operation(id).unwrap();assert_eq!(stored["output"]["redacted"],true);assert!(!stored.to_string().contains("REMOTE_SECRET_LOG"));assert!(!stored.to_string().contains("REMOTE_SECRET_PATCH"));}}
 #[tokio::test]
 async fn nodes_request_history_ui_assets_are_served(){
