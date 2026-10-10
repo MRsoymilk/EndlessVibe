@@ -111,6 +111,7 @@ fn validated_executable(path:&str,program:&str)->Result<PathBuf>{
     configured_executable(path,program).with_context(||format!("Executable {program} not found in configured PATH"))
 }
 
+#[cfg(any(unix, test))]
 fn pre_exec_nproc_limit(backend:&str,max_processes:u64)->Option<u64>{
     // RLIMIT_NPROC is counted against every thread/process owned by the real UID.
     // Applying it to bwrap before namespace creation can make bwrap's clone() fail
