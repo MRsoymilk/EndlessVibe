@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 #[derive(Clone,Debug,Serialize,Deserialize,JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct NodeCallArgs{pub node_id:String,pub tool:String,#[serde(default)]pub arguments:Value}
+pub struct NodeCallArgs{pub node_id:String,pub tool:String,#[serde(default)]pub arguments:Value,#[serde(default)]pub request_id:Option<String>}
 pub fn readonly(tool:&str)->bool{matches!(tool,"list_workspaces"|"list_projects"|"inspect_project"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"|"get_task_checkpoint"|"continue_task"|"list_task_checkpoints")}
 pub fn writable(tool:&str)->bool{matches!(tool,"write_file"|"apply_patch"|"create_directory"|"run_command"|"get_job"|"get_job_output"|"cancel_job"|"git_commit")}
 fn permission(tool:&str)->Option<&'static str>{match tool{"write_file"|"apply_patch"|"create_directory"=>Some("write"),"run_command"|"get_job"|"get_job_output"|"cancel_job"=>Some("execute"),"git_commit"=>Some("git"),t if readonly(t)=>Some("read"),_=>None}}
@@ -20,9 +20,21 @@ pub async fn dispatch(rt:Arc<Runtime>,transfer:Arc<TransferManager>,wire:Wire)->
  let peer=transfer.incoming_peer(&wire.node_id,&wire.token)?;
  let tool=wire.tool.as_str();if permission(tool).is_none(){bail!("Transfer tool is not authorized");}let input=wire.args.clone();
  let(w,p)=if matches!(tool,"list_workspaces"|"list_projects"){(String::new(),String::new())}else{target(&input)?};
+ if writable(tool)&&!matches!(tool,"get_job"|"get_job_output"){
+  // Authorization must precede both deduplication and cached result delivery.
+  let grant=peer.grants.iter().find(|g|g.workspace==w&&g.project==p).context("Remote Project not granted")?;
+  let local=rt.project_exact(&w,&p)?;
+  let permitted=match permission(tool){Some("write")=>grant.write&&local.config.allow_write,Some("execute")=>grant.execute&&local.config.allow_exec&&local.config.allow_write,Some("git")=>grant.git&&local.config.allow_git_commit&&local.config.allow_write,_=>false};
+  if !permitted{bail!("Remote operation exceeds current Project permission");}
+  match super::idempotency::claim(&rt.db,&wire.node_id,&wire.id,tool,&input)?{super::idempotency::Claim::Cached(result)=>return Ok(result),super::idempotency::Claim::New=>{}}
+ }
  let summary=if matches!(tool,"write_file"|"apply_patch"){json!({"parent_node":wire.node_id,"tool":tool,"workspace":w,"project":p,"payload_sha256":util::digest(input.to_string())})}else{json!({"parent_node":wire.node_id,"arguments":input})};let operation=rt.begin_operation(&format!("transfer_{tool}"),&w,&p,summary);
  let result=dispatch_inner(rt.clone(),peer,tool,input,&w,&p).await;
- rt.finish_operation(operation,result)
+ let result=rt.finish_operation(operation,result);
+ if writable(tool)&&!matches!(tool,"get_job"|"get_job_output"){
+  if let Ok(ref value)=result{super::idempotency::complete(&rt.db,&wire.node_id,&wire.id,value)?;}
+ }
+ result
 }
 async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&str)->Result<Value>{
  if let Some(right)=permission(tool){if !matches!(tool,"list_workspaces"|"list_projects"){let grant=peer.grants.iter().find(|g|g.workspace==w&&g.project==p).context("Remote Project not granted")?;let local=rt.project_exact(w,p)?;let allowed=match right{"read"=>grant.read,"write"=>grant.write&&local.config.allow_write,"execute"=>grant.execute&&local.config.allow_exec&&local.config.allow_write,"git"=>grant.git&&local.config.allow_git_commit&&local.config.allow_write,_=>false};if !allowed{bail!("Remote operation exceeds child Project grant or current local permissions");}}}
