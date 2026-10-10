@@ -43,7 +43,7 @@ pub fn private_read(path: &Path, max: usize) -> Result<Vec<u8>> {
     #[cfg(windows)] options.custom_flags(0x0020_0000); // refuse reparse-point traversal
     let f = options.open(path)?;
     let md = f.metadata()?;
-    if !md.is_file() || !crate::platform::single_link(&md) { bail!("Credential/state file changed during open"); }
+    if !md.is_file() || !crate::platform::single_link(&f) { bail!("Credential/state file changed during open"); }
     let mut bytes = Vec::new(); f.take((max + 1) as u64).read_to_end(&mut bytes)?; if bytes.len() > max { bail!("State file too large"); } Ok(bytes)
 }
 
@@ -72,7 +72,7 @@ pub fn process_identity_alive(identity:ProcessIdentity)->bool{process_start_tick
 fn service_pid_path(state_dir:&Path)->PathBuf{state_dir.join("service.pid")}
 pub fn read_service_identity(state_dir:&Path)->Result<Option<ProcessIdentity>>{
     let path=service_pid_path(state_dir);let md=match std::fs::symlink_metadata(&path){Ok(md)=>md,Err(error)if error.kind()==std::io::ErrorKind::NotFound=>return Ok(None),Err(error)=>return Err(error.into())};
-    if !md.is_file()||md.file_type().is_symlink()||!crate::platform::single_link(&md)||!crate::platform::owned_by_service(&md)||!crate::platform::private_permissions(&md){bail!("service.pid must be an owner-only regular file");}
+    if !md.is_file()||md.file_type().is_symlink()||!crate::platform::single_link_path(&path)||!crate::platform::owned_by_service(&md)||!crate::platform::private_permissions(&md){bail!("service.pid must be an owner-only regular file");}
     let text=String::from_utf8(private_read(&path,128)?)?;let mut fields=text.split_whitespace();let pid:i32=fields.next().context("service.pid is missing PID")?.parse()?;let start_ticks:u64=fields.next().context("service.pid is missing process start time")?.parse()?;if fields.next().is_some(){bail!("service.pid has unexpected fields");}Ok(Some(ProcessIdentity{pid,start_ticks}))
 }
 pub fn clear_service_identity(state_dir:&Path,expected:ProcessIdentity)->Result<()>{

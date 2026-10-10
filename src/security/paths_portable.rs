@@ -54,6 +54,15 @@ pub fn relative(value: &str, allow_root: bool) -> Result<PathBuf> {
     Ok(path.to_owned())
 }
 impl Root {
+    pub fn same_directory(&self, other: &Self) -> Result<bool> {
+        let a = self.directory.try_clone()?.into_std_file();
+        let b = other.directory.try_clone()?.into_std_file();
+        Ok(crate::platform::same_file(&a, &b))
+    }
+    pub fn has_single_link(&self, path: &str) -> Result<bool> {
+        let path = relative(path, false)?;
+        Ok(self.file(&path).is_ok())
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let path = path.canonicalize().context("Resolve workspace root")?;
         if path.parent().is_none() { bail!("Filesystem root cannot be a Workspace"); }
@@ -66,10 +75,14 @@ impl Root {
         Ok(Self { directory, path })
     }
     pub fn unchanged_root(&self) -> Result<()> {
-        let original = self.directory.try_clone()?.into_std_file().metadata()?;
+        let original = self.directory.try_clone()?.into_std_file();
         let current = std::fs::symlink_metadata(&self.path)?;
-        if !current.is_dir() || current.file_type().is_symlink()
-            || !crate::platform::same_file(&original, &current) {
+        if !current.is_dir() || current.file_type().is_symlink() {
+            bail!("Workspace root moved or was replaced; reauthorize it");
+        }
+        // Compare pinned handles: Windows std::fs::Metadata has no stable file ID.
+        let current = Dir::open_ambient_dir(&self.path, ambient_authority())?.into_std_file();
+        if !crate::platform::same_file(&original, &current) {
             bail!("Workspace root moved or was replaced; reauthorize it");
         }
         Ok(())
@@ -100,7 +113,7 @@ impl Root {
         self.check_components(path, false)?;
         let f = self.directory.open(path)?.into_std();
         let metadata = f.metadata()?;
-        if !metadata.is_file() || !crate::platform::single_link(&metadata) {
+        if !metadata.is_file() || !crate::platform::single_link(&f) {
             bail!("Only regular, single-link files are accessible");
         }
         Ok(f)

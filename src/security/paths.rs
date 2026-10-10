@@ -28,6 +28,14 @@ pub fn relative(s: &str, allow_root: bool) -> Result<PathBuf> {
     Ok(p.to_owned())
 }
 impl Root {
+    pub fn same_directory(&self, other: &Self) -> Result<bool> {
+        Ok(crate::platform::same_file(&self.directory, &other.directory))
+    }
+    pub fn has_single_link(&self, path: &str) -> Result<bool> {
+        let path = relative(path, false)?;
+        let file = open_beneath(&self.directory, &path, libc::O_PATH)?;
+        Ok(file.metadata()?.is_file() && crate::platform::single_link(&file))
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let path = path.canonicalize()?;
         if path.parent().is_none() { bail!("Filesystem root cannot be a workspace"); }

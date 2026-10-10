@@ -5,7 +5,9 @@ use std::{path::Path, sync::Mutex, time::Duration};
 
 mod migrations;
 mod retention;
-pub(crate) use retention::{prune_common,TRANSFER_RESULT_CACHE_SECONDS};
+pub(crate) use retention::prune_common;
+#[cfg(test)]
+pub(crate) use retention::TRANSFER_RESULT_CACHE_SECONDS;
 
 pub struct Store { connection: Mutex<Connection> }
 impl Store {
@@ -130,7 +132,7 @@ impl Store {
             Ok(serde_json::json!({"window_seconds":bucket_seconds*buckets as u64,"bucket_seconds":bucket_seconds,"generated_at":now,"totals":{"requests":requests.iter().sum::<u64>(),"successes":successes.iter().sum::<u64>(),"failures":failures.iter().sum::<u64>(),"http_requests":http_requests.iter().sum::<u64>(),"rx_bytes":rx_bytes.iter().sum::<u64>(),"tx_bytes":tx_bytes.iter().sum::<u64>()},"latency":{"tool_ms":percentile_summary(tool_latency_ms),"queue_wait_ms":percentile_summary(queue_wait_ms)},"counters":{"project_busy":project_busy,"jobs":{"timed_out":timed_out,"cancelled":cancelled,"interrupted":interrupted},"git":{"commit":{"succeeded":git_commit_success,"failed":git_commit_failed},"push":{"succeeded":git_push_success,"failed":git_push_failed}}},"points":points}))
         })
     }
-    pub fn compact_database(&self)->Result<serde_json::Value>{let mut conn=self.connection.lock().map_err(|_|anyhow::anyhow!("Database mutex poisoned"))?;let before_pages:u64=conn.query_row("PRAGMA page_count",[],|r|r.get(0))?;let page_size:u64=conn.query_row("PRAGMA page_size",[],|r|r.get(0))?;conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;let after_pages:u64=conn.query_row("PRAGMA page_count",[],|r|r.get(0))?;Ok(serde_json::json!({"compacted":true,"before_bytes":before_pages.saturating_mul(page_size),"after_bytes":after_pages.saturating_mul(page_size),"reclaimed_logical_bytes":before_pages.saturating_sub(after_pages).saturating_mul(page_size),"message":"SQLite compacted; VACUUM only affects the database, not execution cache or backups"}))}
+    pub fn compact_database(&self)->Result<serde_json::Value>{let conn=self.connection.lock().map_err(|_|anyhow::anyhow!("Database mutex poisoned"))?;let before_pages:u64=conn.query_row("PRAGMA page_count",[],|r|r.get(0))?;let page_size:u64=conn.query_row("PRAGMA page_size",[],|r|r.get(0))?;conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;let after_pages:u64=conn.query_row("PRAGMA page_count",[],|r|r.get(0))?;Ok(serde_json::json!({"compacted":true,"before_bytes":before_pages.saturating_mul(page_size),"after_bytes":after_pages.saturating_mul(page_size),"reclaimed_logical_bytes":before_pages.saturating_sub(after_pages).saturating_mul(page_size),"message":"SQLite compacted; VACUUM only affects the database, not execution cache or backups"}))}
     pub fn prune_auth(&self) -> Result<()> { self.transaction(|tx| { retention::prune_common(tx,crate::util::now())?; Ok(()) }) }
     pub fn storage_metadata(&self,retained_jobs:usize)->Result<serde_json::Value>{
         self.transaction(|tx|{

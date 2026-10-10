@@ -21,7 +21,7 @@ pub async fn commit(rt:&Runtime,w:&Project,a:CommitArgs)->Result<Value>{
     let mut create=vec!["commit-tree".into(),tree];if p.head!="UNBORN"{create.push("-p".into());create.push(p.head.clone());}
     let commit_id=oid(good(rt,w,create,&Environment::default(),Some(format!("{}\n",a.message.trim()).into_bytes())).await?)?;
     let merged=p._temp.path().join("merged-index");let index_path=gitdir.join("index");
-    if index_path.exists(){let md=std::fs::symlink_metadata(&index_path)?;if !md.is_file()||md.file_type().is_symlink()||!crate::platform::single_link(&md)||md.len()>64*1024*1024{bail!("Unsafe/oversized Git index");}std::fs::copy(&index_path,&merged)?;}else{let env=Environment{index:Some(merged.clone()),objects:None};good(rt,w,args(&["read-tree","--empty"]),&env,None).await?;}
+    if index_path.exists(){let md=std::fs::symlink_metadata(&index_path)?;if !md.is_file()||md.file_type().is_symlink()||!crate::platform::single_link_path(&index_path)||md.len()>64*1024*1024{bail!("Unsafe/oversized Git index");}std::fs::copy(&index_path,&merged)?;}else{let env=Environment{index:Some(merged.clone()),objects:None};good(rt,w,args(&["read-tree","--empty"]),&env,None).await?;}
     let merged_env=Environment{index:Some(merged.clone()),objects:None};good(rt,w,args(&["update-index","-z","--index-info"]),&merged_env,Some(index_records(&p.changes,commit_id.len()))).await?;
     let index_bytes=std::fs::read(&merged)?;lock.file.write_all(&index_bytes)?;lock.file.sync_all()?;
     let current_branch=String::from_utf8(good(rt,w,args(&["symbolic-ref","--quiet","HEAD"]),&Environment::default(),None).await?)?;if current_branch.trim()!=branch{bail!("Branch changed during commit");}

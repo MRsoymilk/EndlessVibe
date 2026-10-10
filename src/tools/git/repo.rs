@@ -27,7 +27,7 @@ pub(super) async fn preflight(rt:&Runtime,w:&Project)->Result<()>{
         #[cfg(unix)] options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);
         #[cfg(windows)] options.custom_flags(0x0020_0000);
         let file=options.open(&path)?;let md=file.metadata()?;
-        if !md.is_file()||!crate::platform::single_link(&md)||md.len()>262144||std::fs::symlink_metadata(&path)?.file_type().is_symlink(){bail!("Unsafe/oversized Git config");}
+        if !md.is_file()||!crate::platform::single_link(&file)||md.len()>262144||std::fs::symlink_metadata(&path)?.file_type().is_symlink(){bail!("Unsafe/oversized Git config");}
         file.take(262145).read_to_end(&mut data)?;if data.len()>262144{bail!("Oversized Git config");}}
     let mut temp=tempfile::Builder::new().prefix("git-config-").tempfile_in(rt.config.security.data_dir.join("tmp"))?;temp.write_all(&data)?;temp.flush()?;
     let mut cmd=Command::new(&rt.config.git.executable);process::clean_environment(&mut cmd,&rt.config.execution.path);cmd.current_dir(rt.config.security.data_dir.join("empty-home")).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).args(["config","--null","--no-includes","--file"]).arg(temp.path()).arg("--list");

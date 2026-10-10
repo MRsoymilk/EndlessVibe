@@ -73,7 +73,7 @@ fn read_checked(path:&Path,expected_revision:&str)->Result<(String,Config)>{
 }
 fn replace_config(path:&Path,bytes:&[u8])->Result<()>{
     let md=std::fs::symlink_metadata(path).with_context(||format!("Read metadata for {}",path.display()))?;
-    if !md.is_file()||md.file_type().is_symlink()||!crate::platform::single_link(&md)||!crate::platform::owned_by_service(&md){bail!("Config must be a regular, single-link file owned by the service user");}
+    if !md.is_file()||md.file_type().is_symlink()||!crate::platform::single_link_path(path)||!crate::platform::owned_by_service(&md){bail!("Config must be a regular, single-link file owned by the service user");}
     let parent=path.parent().context("Config needs a parent directory")?;
     let name=path.file_name().and_then(|v|v.to_str()).unwrap_or("config.toml");
     let temp=parent.join(format!(".{name}.{}.tmp",util::random_secret()?));
