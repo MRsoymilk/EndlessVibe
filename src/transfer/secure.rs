@@ -17,12 +17,21 @@ const PENDING:&str="transfer_pending";
 #[serde(deny_unknown_fields)]
 pub struct Grant{pub workspace:String,pub project:String,pub read:bool,pub write:bool,pub execute:bool,pub git:bool}
 #[derive(Clone,Debug,Serialize,Deserialize)]
-pub struct Peer{pub node_id:String,pub name:String,pub endpoint:SocketAddr,pub cert_sha:String,pub role:String,#[serde(default)]pub token:String,#[serde(default)]pub token_hash:String,#[serde(default)]pub grants:Vec<Grant>,pub paired_at:u64}
+pub struct Peer{pub node_id:String,pub name:String,pub endpoint:SocketAddr,pub cert_sha:String,pub role:String,#[serde(default)]pub token:String,#[serde(default)]pub token_hash:String,#[serde(default)]pub pairing_id:String,#[serde(default)]pub grants:Vec<Grant>,pub paired_at:u64}
 #[derive(Clone,Debug,Serialize,Deserialize)]
-pub struct Pending{pub id:String,pub node_id:String,pub name:String,pub endpoint:SocketAddr,pub cert_sha:String,pub token_hash:String,#[serde(default)]pub token:String,pub code:String,pub role:String,pub created:u64}
+pub struct Pending{pub id:String,pub node_id:String,pub name:String,pub endpoint:SocketAddr,pub cert_sha:String,pub token_hash:String,#[serde(default)]pub token:String,pub code:String,pub role:String,#[serde(default="pending_state")]pub state:String,pub created:u64}
 #[derive(Clone,Debug,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairApprove{pub id:String,#[serde(default)]pub grants:Vec<Grant>}
+#[derive(Clone,Debug,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairReject{pub id:String}
+#[derive(Clone,Debug,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantUpdate {
+    pub expected_grants_revision: String,
+    pub grants: Vec<Grant>,
+}
 #[derive(Clone,Debug,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairStart{pub address:SocketAddr}
@@ -46,12 +55,47 @@ fn tls_client_config(pin:Option<String>)->Result<Arc<rustls::ClientConfig>>{let 
 async fn send<W:AsyncWrite+Unpin>(stream:&mut W,data:&Value)->Result<()>{let bytes=serde_json::to_vec(data)?;if bytes.len()>MAX_WIRE{bail!("Transfer request exceeds frame limit");}stream.write_u32(bytes.len() as u32).await?;stream.write_all(&bytes).await?;stream.flush().await?;Ok(())}
 async fn recv<R:AsyncRead+Unpin>(stream:&mut R)->Result<Value>{let length=stream.read_u32().await? as usize;if length==0||length>MAX_WIRE{bail!("Transfer frame length exceeds limit");}let mut bytes=vec![0u8;length];stream.read_exact(&mut bytes).await?;Ok(serde_json::from_slice(&bytes)?)}
 fn code(cert:&str,token:&str)->String{let hash=util::digest(format!("transfer-pair-v1|{cert}|{token}"));let n=u32::from_str_radix(&hash[..8],16).unwrap_or_default()%1_000_000;format!("{n:06}")}
+fn pending_state()->String{"pending".into()}
 fn valid_node(id:&str)->bool{id.len()==24&&id.bytes().all(|v|v.is_ascii_hexdigit())}
+fn valid_pair_id(id:&str)->bool{id.len()==24&&id.bytes().all(|v|v.is_ascii_hexdigit())}
+fn same_hash(left:&str,right:&str)->bool{
+    left.len()==64&&right.len()==64&&bool::from(subtle::ConstantTimeEq::ct_eq(left.as_bytes(),right.as_bytes()))
+}
 fn lan(address:SocketAddr)->bool{match address.ip(){IpAddr::V4(ip)=>ip.is_private()||ip.is_loopback()||ip.is_link_local(),IpAddr::V6(ip)=>ip.is_loopback()||ip.is_unique_local()||ip.is_unicast_link_local()}}
 fn safe_id(id:&str)->bool{!id.is_empty()&&id.len()<=64&&id.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b))}
+fn grants_revision(peer:&Peer)->Result<String>{
+    // Include the pairing's secret-derived fingerprint so a revision from an
+    // earlier pairing cannot be reused to authorize a new pairing.
+    Ok(util::digest(serde_json::to_vec(&(
+        peer.node_id.as_str(),peer.token_hash.as_str(),peer.cert_sha.as_str(),&peer.grants
+    ))?))
+}
+fn validate_grants(rt:&crate::runtime::Runtime,grants:&[Grant])->Result<()> {
+    use std::collections::HashSet;
+    if grants.len()>32 { bail!("Too many Project grants (maximum 32)"); }
+    let mut seen=HashSet::new();
+    for g in grants {
+        if !safe_id(&g.workspace)||!safe_id(&g.project) {
+            bail!("Invalid Project grant");
+        }
+        if !seen.insert((g.workspace.as_str(),g.project.as_str())) {
+            bail!("Duplicate Project grant for {}/{}",g.workspace,g.project);
+        }
+        if !(g.read||g.write||g.execute||g.git) {
+            bail!("Each selected Project must grant at least one permission");
+        }
+        let project=rt.project_exact(&g.workspace,&g.project)?;
+        if ((g.write||g.execute||g.git)&&!project.config.allow_write)
+            || (g.execute&&!project.config.allow_exec)
+            || (g.git&&!project.config.allow_git_commit) {
+            bail!("Grant exceeds the child's existing Project permissions");
+        }
+    }
+    Ok(())
+}
 // Retry only calls without side effects. A lost response to a mutation must never replay it.
 fn retryable_tool(tool:&str)->bool{crate::transfer::router::readonly(tool)||matches!(tool,"get_job"|"get_job_output")}
-fn public(p:&Pending)->Value{json!({"id":p.id,"node_id":p.node_id,"name":p.name,"endpoint":p.endpoint,"code":p.code,"role":p.role,"expires_at":p.created+PAIR_TTL,"requires_local_confirmation":true})}
+fn public(p:&Pending)->Value{json!({"id":p.id,"node_id":p.node_id,"name":p.name,"endpoint":p.endpoint,"code":p.code,"role":p.role,"state":p.state,"expires_at":p.created+PAIR_TTL,"requires_local_confirmation":p.role=="child"&&p.state=="pending"})}
 async fn request(address:SocketAddr,pin:Option<String>,wire:Value,timeout_seconds:u64)->Result<(Value,String)>{
  if !lan(address){bail!("Transfer only permits private or loopback LAN addresses");}
  let client=TlsConnector::from(tls_client_config(pin)?);
@@ -59,12 +103,222 @@ async fn request(address:SocketAddr,pin:Option<String>,wire:Value,timeout_second
  tokio::time::timeout(Duration::from_secs(timeout_seconds),connect).await.context("Transfer peer connection timed out")?
 }
 impl TransferManager{
- pub fn pending(&self)->Result<Value>{let now=util::now();let items:Vec<Pending>=self.db.transaction(|tx|{let mut q=tx.prepare("SELECT value FROM kv WHERE namespace=?1 AND (expires=0 OR expires>?2) ORDER BY rowid DESC LIMIT 50")?;let rows=q.query_map(rusqlite::params![PENDING,now],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;rows.into_iter().map(|s|Ok(serde_json::from_str(&s)?)).collect()})?;Ok(json!({"pending":items.iter().map(public).collect::<Vec<_>>()}))}
- pub fn peers(&self)->Result<Value>{let items:Vec<Peer>=self.db.transaction(|tx|{let mut q=tx.prepare("SELECT value FROM kv WHERE namespace=?1 ORDER BY rowid DESC LIMIT 50")?;let rows=q.query_map([PAIRS],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;rows.into_iter().map(|s|Ok(serde_json::from_str(&s)?)).collect()})?;let discovered=self.discoveries();Ok(json!({"peers":items.iter().map(|p|{let seen=discovered["peers"].as_array().and_then(|items|items.iter().find(|d|d["node_id"]==p.node_id));json!({"node_id":p.node_id,"name":p.name,"endpoint":p.endpoint,"role":p.role,"paired_at":p.paired_at,"grants":p.grants,"discovery_online":seen.and_then(|v|v["online"].as_bool()).unwrap_or(false),"discovered_last_seen":seen.and_then(|v|v["last_seen"].as_u64())})}).collect::<Vec<_>>()}))}
- pub async fn start_pair(&self,address:SocketAddr)->Result<Value>{if !self.config.enabled{bail!("Transfer is disabled");}if !lan(address){bail!("Pair target must be a private LAN IP address");}let id=util::digest(util::random_secret()?)[..24].to_owned();let token=util::random_secret()?;let hello=json!({"kind":"pair_hello","node_id":self.node_id,"name":self.config.display_name,"id":id,"token":token});let(v,cert_sha)=request(address,None,hello,12).await?;if v["ok"]!=true{bail!("Pair offer refused: {}",v["error"].as_str().unwrap_or("unknown"));}let peer=v["node_id"].as_str().context("Pair response lacked node ID")?;if !valid_node(peer)||peer==self.node_id{bail!("Invalid remote Node ID");}let pairing_code=code(&cert_sha,&token);if v["code"].as_str()!=Some(&pairing_code){bail!("Pair verification code mismatch");}let pending=Pending{id,node_id:peer.into(),name:v["name"].as_str().unwrap_or("Remote").to_owned(),endpoint:address,cert_sha,token_hash:util::digest(&token),token,code:pairing_code,role:"parent".into(),created:util::now()};self.db.put(PENDING,&pending.id,&pending,pending.created+PAIR_TTL)?;Ok(public(&pending))}
- pub fn receive_pair(&self,wire:&Wire,address:SocketAddr,cert_sha:&str)->Result<Value>{if !valid_node(&wire.node_id)||wire.node_id==self.node_id||wire.id.len()!=24||wire.token.len()<32||wire.name.is_empty()||wire.name.len()>64{bail!("Invalid Transfer pair offer");}if let Some(existing)=self.db.get::<String>("transfer_meta","parent_node")?{if existing!=wire.node_id{bail!("This child is already paired with a different parent");}}let item=Pending{id:wire.id.clone(),node_id:wire.node_id.clone(),name:wire.name.clone(),endpoint:address,cert_sha:cert_sha.into(),token_hash:util::digest(&wire.token),token:String::new(),code:code(cert_sha,&wire.token),role:"child".into(),created:util::now()};self.db.put(PENDING,&item.id,&item,item.created+PAIR_TTL)?;Ok(json!({"ok":true,"node_id":self.node_id,"name":self.config.display_name,"code":item.code}))}
- pub fn approve_pair(&self,request:PairApprove,rt:&crate::runtime::Runtime)->Result<Value>{let p:Pending=self.db.get(PENDING,&request.id)?.context("Pair request is missing or expired")?;if util::now().saturating_sub(p.created)>PAIR_TTL{bail!("Pair request expired");}if p.role=="child"{if request.grants.is_empty(){bail!("Child must explicitly grant at least one Project");}if request.grants.len()>32{bail!("Too many Project grants");}for g in &request.grants{if !safe_id(&g.workspace)||!safe_id(&g.project){bail!("Invalid Project grant");}let project=rt.project_exact(&g.workspace,&g.project)?;if (g.write||g.execute||g.git)&&!project.config.allow_write||(g.execute&&!project.config.allow_exec)||(g.git&&!project.config.allow_git_commit){bail!("Grant exceeds the child's existing Project permissions");}}if let Some(existing)=self.db.get::<String>("transfer_meta","parent_node")?{if existing!=p.node_id{bail!("Child already paired with a different parent");}}}
- let peer=Peer{node_id:p.node_id.clone(),name:p.name.clone(),endpoint:p.endpoint,cert_sha:p.cert_sha,role:p.role.clone(),token:p.token,token_hash:p.token_hash,grants:if p.role=="child"{request.grants}else{vec![]},paired_at:util::now()};self.db.transaction(|tx|{if peer.role=="child"{crate::store::put(tx,"transfer_meta","parent_node",&peer.node_id,0)?;}crate::store::put(tx,PAIRS,&peer.node_id,&peer,0)?;crate::store::delete(tx,PENDING,&request.id)?;Ok(())})?;Ok(json!({"paired":true,"node_id":peer.node_id,"role":peer.role,"grants":peer.grants}))}
+ /// The role belongs to this installation, not to a remote peer.
+ /// Before the first pairing either role can be selected by the action taken.
+ pub fn local_role(&self)->Result<&'static str>{
+    let parent:Option<String>=self.db.get("transfer_meta","parent_node")?;
+    let (outgoing,incoming)=self.db.transaction(|tx|{
+        let mut stmt=tx.prepare("SELECT value FROM kv WHERE namespace IN (?1,?2) AND (expires=0 OR expires>?3) LIMIT 100")?;
+        let entries=stmt.query_map(rusqlite::params![PAIRS,PENDING,util::now()],|row|row.get::<_,String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut outgoing=false;
+        let mut incoming=false;
+        for raw in entries {
+            let value:Value=serde_json::from_str(&raw)?;
+            match value["role"].as_str(){
+                Some("parent")=>outgoing=true,
+                Some("child")=>incoming=true,
+                _=>{}
+            }
+        }
+        Ok((outgoing,incoming))
+    })?;
+    let incoming=incoming||parent.is_some();
+    Ok(match (outgoing,incoming){
+        (true,true)=>"mixed",
+        (true,false)=>"parent",
+        (false,true)=>"child",
+        (false,false)=>"unassigned"
+    })
+ }
+ fn pending_records(&self)->Result<Vec<Pending>>{
+    self.db.transaction(|tx|{
+        let mut stmt=tx.prepare("SELECT value FROM kv WHERE namespace=?1 AND (expires=0 OR expires>?2) ORDER BY rowid DESC LIMIT 50")?;
+        let rows=stmt.query_map(rusqlite::params![PENDING,util::now()],|row|row.get::<_,String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(|raw|Ok(serde_json::from_str(&raw)?)).collect()
+    })
+ }
+ pub fn pending(&self)->Result<Value>{
+    Ok(json!({"pending":self.pending_records()?.iter().map(public).collect::<Vec<_>>()}))
+ }
+ /// Poll the child's pinned TLS endpoint for its decision. The parent never
+ /// grants itself trust merely because it sent a pairing request.
+ pub async fn reconcile_pending(&self)->Result<Value>{
+    let mut queries=tokio::task::JoinSet::new();
+    for pending in self.pending_records()?.into_iter()
+        .filter(|p|p.role=="parent"&&p.state=="pending").take(16)
+    {
+        let wire=json!({"kind":"pair_status","id":pending.id,
+            "node_id":self.node_id,"token":pending.token});
+        let endpoint=pending.endpoint;
+        let pin=pending.cert_sha.clone();
+        queries.spawn(async move{
+            (pending,request(endpoint,Some(pin),wire,3).await)
+        });
+    }
+    while let Some(result)=queries.join_next().await{
+        let Ok((pending,Ok((reply,fingerprint))))=result else{continue};
+        if fingerprint!=pending.cert_sha
+            || reply["ok"]!=true
+            || reply["node_id"].as_str()!=Some(pending.node_id.as_str()){continue;}
+        let Some(state)=reply["state"].as_str() else{continue};
+        if !matches!(state,"approved"|"rejected"){continue;}
+        self.db.transaction(|tx|{
+            let Some(mut current):Option<Pending>=crate::store::get(tx,PENDING,&pending.id)? else{return Ok(())};
+            if current.role!="parent"||current.state!="pending"
+                ||current.node_id!=pending.node_id
+                ||current.token_hash!=pending.token_hash{return Ok(());}
+            if state=="approved" {
+                let peer=Peer{
+                    node_id:current.node_id.clone(),name:current.name.clone(),
+                    endpoint:current.endpoint,cert_sha:current.cert_sha,
+                    role:"parent".into(),token:current.token,
+                    token_hash:current.token_hash,pairing_id:current.id.clone(),
+                    grants:vec![],paired_at:util::now()
+                };
+                crate::store::put(tx,PAIRS,&peer.node_id,&peer,0)?;
+                crate::store::delete(tx,PENDING,&current.id)?;
+            } else {
+                current.state="rejected".into();
+                crate::store::put(tx,PENDING,&current.id,&current,current.created+PAIR_TTL)?;
+            }
+            Ok(())
+        })?;
+    }
+    self.pending()
+ }
+ /// Pairing status is only disclosed to the sender holding this exact
+ /// short-lived secret. A random TLS peer cannot read another request's state.
+ pub fn pairing_status(&self,wire:&Wire)->Result<Value>{
+    if !valid_node(&wire.node_id)||!valid_pair_id(&wire.id)||wire.token.len()<32{
+        bail!("Invalid pairing status request");
+    }
+    let hash=util::digest(&wire.token);
+    if let Some(p)=self.db.get::<Pending>(PENDING,&wire.id)? {
+        if p.role=="child"&&p.node_id==wire.node_id
+            && same_hash(&p.token_hash,&hash){
+            return Ok(json!({"ok":true,"node_id":self.node_id,"state":p.state}));
+        }
+    }
+    if let Some(peer)=self.db.get::<Peer>(PAIRS,&wire.node_id)? {
+        if peer.role=="child"&&peer.pairing_id==wire.id
+            && same_hash(&peer.token_hash,&hash){
+            return Ok(json!({"ok":true,"node_id":self.node_id,"state":"approved"}));
+        }
+    }
+    bail!("Pair request is missing, expired or unauthorized")
+ }
+ pub fn reject_pair(&self,id:&str)->Result<Value>{
+    if !valid_pair_id(id){bail!("Invalid pairing request ID");}
+    self.db.transaction(|tx|{
+        let mut pending:Pending=crate::store::get(tx,PENDING,id)?
+            .context("Pair request is missing or expired")?;
+        if pending.role!="child"||pending.state!="pending" {
+            bail!("Only the receiving child may reject a pending pairing");
+        }
+        pending.state="rejected".into();
+        crate::store::put(tx,PENDING,id,&pending,pending.created+PAIR_TTL)?;
+        Ok(json!({"rejected":true,"node_id":pending.node_id,"role":"child"}))
+    })
+ }
+ pub fn peers(&self)->Result<Value>{
+    let items:Vec<Peer>=self.db.transaction(|tx|{
+        let mut q=tx.prepare("SELECT value FROM kv WHERE namespace=?1 ORDER BY rowid DESC LIMIT 50")?;
+        let rows=q.query_map([PAIRS],|r|r.get::<_,String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(|s|Ok(serde_json::from_str(&s)?)).collect()
+    })?;
+    let discovered=self.discoveries();
+    let peers=items.iter().map(|p| -> Result<Value>{
+        let seen=discovered["peers"].as_array()
+            .and_then(|items|items.iter().find(|d|d["node_id"]==p.node_id));
+        Ok(json!({
+            "node_id":p.node_id,"name":p.name,"endpoint":p.endpoint,
+            "role":p.role,"paired_at":p.paired_at,"grants":p.grants,
+            "grants_revision":grants_revision(p)?,
+            "discovery_online":seen.and_then(|v|v["online"].as_bool()).unwrap_or(false),
+            "discovered_last_seen":seen.and_then(|v|v["last_seen"].as_u64())
+        }))
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(json!({"peers":peers}))
+}
+ pub async fn start_pair(&self,address:SocketAddr)->Result<Value>{if !self.config.enabled{bail!("Transfer is disabled");}if matches!(self.local_role()?,"child"|"mixed"){bail!("A child cannot initiate pairing as a parent");}if !lan(address){bail!("Pair target must be a private LAN IP address");}let id=util::digest(util::random_secret()?)[..24].to_owned();let token=util::random_secret()?;let hello=json!({"kind":"pair_hello","node_id":self.node_id,"name":self.config.display_name,"id":id,"token":token});let(v,cert_sha)=request(address,None,hello,12).await?;if v["ok"]!=true{bail!("Pair offer refused: {}",v["error"].as_str().unwrap_or("unknown"));}let peer=v["node_id"].as_str().context("Pair response lacked node ID")?;if !valid_node(peer)||peer==self.node_id{bail!("Invalid remote Node ID");}if self.db.get::<Peer>(PAIRS,peer)?.is_some(){bail!("This child is already paired");}let pairing_code=code(&cert_sha,&token);if v["code"].as_str()!=Some(&pairing_code){bail!("Pair verification code mismatch");}let pending=Pending{id,node_id:peer.into(),name:v["name"].as_str().unwrap_or("Remote").to_owned(),endpoint:address,cert_sha,token_hash:util::digest(&token),token,code:pairing_code,role:"parent".into(),state:pending_state(),created:util::now()};self.db.put(PENDING,&pending.id,&pending,pending.created+PAIR_TTL)?;Ok(public(&pending))}
+ pub fn receive_pair(&self,wire:&Wire,address:SocketAddr,cert_sha:&str)->Result<Value>{
+ if !self.config.enabled{bail!("Transfer is disabled");}
+ if matches!(self.local_role()?,"parent"|"mixed"){bail!("A parent cannot accept child-side pairing requests");}
+ if !valid_node(&wire.node_id)||wire.node_id==self.node_id||!valid_pair_id(&wire.id)
+    ||wire.token.len()<32||wire.name.is_empty()||wire.name.len()>64{
+    bail!("Invalid Transfer pair offer");
+ }
+ if self.db.get::<Peer>(PAIRS,&wire.node_id)?.is_some(){bail!("This parent is already paired");}
+ if let Some(existing)=self.db.get::<String>("transfer_meta","parent_node")?{
+    if existing!=wire.node_id{bail!("This child is already paired with a different parent");}
+ }
+ if self.pending_records()?.iter().any(|p|p.role=="child"&&p.state=="pending"&&p.node_id!=wire.node_id){
+    bail!("Another parent's pairing request is already awaiting a decision");
+ }
+ if let Some(existing)=self.db.get::<Pending>(PENDING,&wire.id)?{
+    if existing.node_id!=wire.node_id||!same_hash(&existing.token_hash,&util::digest(&wire.token))
+        ||existing.state!="pending"{
+        bail!("Pair request ID was already used");
+    }
+    return Ok(json!({"ok":true,"node_id":self.node_id,"name":self.config.display_name,"code":existing.code}));
+ }let item=Pending{id:wire.id.clone(),node_id:wire.node_id.clone(),name:wire.name.clone(),endpoint:address,cert_sha:cert_sha.into(),token_hash:util::digest(&wire.token),token:String::new(),code:code(cert_sha,&wire.token),role:"child".into(),state:pending_state(),created:util::now()};self.db.put(PENDING,&item.id,&item,item.created+PAIR_TTL)?;Ok(json!({"ok":true,"node_id":self.node_id,"name":self.config.display_name,"code":item.code}))}
+ pub fn approve_pair(&self,request:PairApprove,rt:&crate::runtime::Runtime)->Result<Value>{
+ let p:Pending=self.db.get(PENDING,&request.id)?.context("Pair request is missing or expired")?;
+ if util::now().saturating_sub(p.created)>PAIR_TTL{bail!("Pair request expired");}
+ if p.role!="child"||p.state!="pending"{bail!("Only the receiving child can approve a pending request");}
+ validate_grants(rt,&request.grants)?;
+ if let Some(existing)=self.db.get::<String>("transfer_meta","parent_node")?{
+    if existing!=p.node_id{bail!("Child already paired with a different parent");}
+ }
+ let peer=Peer{node_id:p.node_id.clone(),name:p.name.clone(),endpoint:p.endpoint,cert_sha:p.cert_sha,role:p.role.clone(),token:p.token,token_hash:p.token_hash,pairing_id:p.id.clone(),grants:request.grants,paired_at:util::now()};self.db.transaction(|tx|{
+    let current:Pending=crate::store::get(tx,PENDING,&request.id)?
+        .context("Pair request is missing or expired")?;
+    if current.role!="child"||current.state!="pending"
+        ||current.token_hash!=peer.token_hash{
+        bail!("Pair request has already been decided");
+    }
+    if let Some(parent)=crate::store::get::<String>(tx,"transfer_meta","parent_node")?{
+        if parent!=peer.node_id{bail!("Child already paired with a different parent");}
+    }
+    crate::store::put(tx,"transfer_meta","parent_node",&peer.node_id,0)?;
+    crate::store::put(tx,PAIRS,&peer.node_id,&peer,0)?;
+    crate::store::delete(tx,PENDING,&request.id)?;
+    Ok(())
+ })?;Ok(json!({"paired":true,"node_id":peer.node_id,"role":peer.role,"grants":peer.grants}))}
+ /// Replace grants for an already paired parent from this child node's local
+ /// dashboard. Empty grants are valid (paired but no Project permissions).
+ /// Every change is explicit; newly registered Projects are never auto-granted.
+ pub fn update_peer_grants(
+    &self,node_id:&str,request:GrantUpdate,rt:&crate::runtime::Runtime
+ )->Result<Value>{
+    if !valid_node(node_id){bail!("Invalid Node ID");}
+    if !self.config.enabled{bail!("Transfer is disabled");}
+    if request.expected_grants_revision.len()!=64
+        || !request.expected_grants_revision.bytes().all(|b|b.is_ascii_hexdigit()){
+        bail!("Expected grants revision is required; refresh Nodes before editing");
+    }
+    validate_grants(rt,&request.grants)?;
+    self.db.transaction(|tx|{
+        let mut peer:Peer=crate::store::get(tx,PAIRS,node_id)?.context("Node is not paired")?;
+        if peer.role!="child"{
+            bail!("Only this child's local dashboard may edit its parent Project grants");
+        }
+        if grants_revision(&peer)?!=request.expected_grants_revision{
+            return Err(crate::error::coded("GRANTS_CONFLICT",true,
+                "Project grants changed or the node was re-paired; refresh Nodes and retry"));
+        }
+        peer.grants=request.grants;
+        crate::store::put(tx,PAIRS,node_id,&peer,0)?;
+        Ok(json!({
+            "updated":true,"node_id":node_id,
+            "grants":peer.grants,
+            "grants_revision":grants_revision(&peer)?
+        }))
+    })
+ }
  pub fn revoke_pair(&self,node_id:&str)->Result<Value>{if !valid_node(node_id){bail!("Invalid Node ID");}self.db.transaction(|tx|{let item:Option<Peer>=crate::store::get(tx,PAIRS,node_id)?;if let Some(ref p)=item{if p.role=="child"{crate::store::delete(tx,"transfer_meta","parent_node")?;}crate::store::delete(tx,PAIRS,node_id)?;}Ok(json!({"revoked":item.is_some(),"node_id":node_id}))})}
  pub fn incoming_peer(&self,node_id:&str,token:&str)->Result<Peer>{let peer:Peer=self.db.get(PAIRS,node_id)?.context("Transfer peer is not paired")?;if peer.role!="child"{bail!("This peer cannot control local Projects");}let hash=util::digest(token);if token.len()<32||!bool::from(subtle::ConstantTimeEq::ct_eq(hash.as_bytes(),peer.token_hash.as_bytes())){bail!("Invalid Transfer peer credential");}Ok(peer)}
  pub async fn call_node(&self,node_id:&str,tool:&str,args:Value)->Result<Value>{self.call_node_with_request_id(node_id,tool,args,None).await}
@@ -102,6 +356,7 @@ impl TransferManager{
        let digest=util::digest(&cert);
        let response=match wire.kind.as_str(){
         "pair_hello"=>manager.receive_pair(&wire,addr,&digest),
+        "pair_status"=>manager.pairing_status(&wire),
         "call"=>{
          let rt=rt.context("Transfer Project routing is not active")?;
          crate::transfer::router::dispatch(rt,manager.clone(),wire)
@@ -178,7 +433,8 @@ async fn tls_partial_frame_and_disconnected_response_never_duplicate_mutation(){
  rt.transfer.approve_pair(PairApprove{id:id.clone(),grants:vec![Grant{
   workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false
  }]},&rt).unwrap();
- parent.approve_pair(PairApprove{id,grants:vec![]},&rt).unwrap();
+ assert!(parent.approve_pair(PairApprove{id,grants:vec![]},&rt).is_err());
+ parent.reconcile_pending().await.unwrap();
  let peer:Peer=parent.db.get(PAIRS,&rt.transfer.node_id).unwrap().unwrap();
  let connector=TlsConnector::from(tls_client_config(Some(peer.cert_sha.clone())).unwrap());
 

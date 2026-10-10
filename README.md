@@ -194,7 +194,8 @@ LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限
 - 本机 MCP（OAuth）：`http://127.0.0.1:20000/mcp`，**只监听 loopback**，不是供局域网设备直接调用的 HTTP 地址。
 - 本机 Dashboard：`http://127.0.0.1:20001/nodes`，**只允许本机访问**。
 - 局域网通信：TCP **20002 / TLS 1.3**；自动发现：UDP **20003 / multicast**。仅在可信 LAN 内放行所需端口。
-- 双方必须分别在本机 Nodes 页面核对验证码、批准配对和授权 Project。自动发现不等于授权。
+- 父节点在 Nodes 页面主动发起配对请求，双方核对同一个六位验证码后，**仅子节点点击“同意”或“拒绝”**，父节点自动完成配对，不必二次批准。配对默认**不授予任何 Project 权限**；自动发现不等于授权。
+- 后续在 Windows 的 **Projects** 页面添加 Project（支持配置热重载），然后在 **Nodes → Trusted Nodes → 管理 Project 授权** 明确勾选权限并保存。**新增项目不会自动开放给 Linux**；授权修改立即生效，无需重新配对，且可以随时撤销。
 
 `--lan-only` 不允许同时设置 `--public-url` 或 `--bind`。如需其他设备直接通过 MCP HTTP 接入，仍须使用 HTTPS 保护的地址；**不要在局域网通过纯 HTTP 发送 OAuth Bearer Token**。
 

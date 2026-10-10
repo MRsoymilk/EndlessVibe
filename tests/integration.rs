@@ -47,8 +47,339 @@ async fn brand_icon_is_a_real_png_on_dashboard_and_public_oauth_routes(){
  assert_eq!(manifest["icons"][0]["sizes"].as_str().unwrap(),format!("{width}x{height}"));
  assert!(include_str!("../src/security/auth.rs").contains("class=\"brand-icon oauth-icon\""));
 }
+#[tokio::test]
+async fn child_one_click_approval_finalizes_parent_without_project_grants(){
+    let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=socket.local_addr().unwrap();drop(socket);
+    let child=fixture(|c|{
+        c.transfer.enabled=true;
+        c.transfer.listen=address;
+        c.workspaces[0].projects.clear();
+    });
+    let parent=fixture(|c|c.transfer.enabled=true);
+    let stop=tokio_util::sync::CancellationToken::new();
+    let tls=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+    let id=offer["id"].as_str().unwrap().to_owned();
+    assert_eq!(parent.rt.transfer.local_role().unwrap(),"parent");
+    assert_eq!(child.rt.transfer.local_role().unwrap(),"child");
+    assert_eq!(parent.rt.transfer.discoveries()["local_role"],"parent");
+    assert_eq!(child.rt.transfer.discoveries()["local_role"],"child");
+    assert_eq!(child.rt.transfer.pending().unwrap()["pending"][0]["code"],offer["code"]);
+    assert_eq!(child.rt.transfer.pending().unwrap()["pending"][0]["requires_local_confirmation"],true);
+    assert!(parent.rt.transfer.peers().unwrap()["peers"].as_array().unwrap().is_empty());
+    assert!(child.rt.transfer.peers().unwrap()["peers"].as_array().unwrap().is_empty());
+    assert!(child.rt.transfer.start_pair(address).await.is_err());
+
+    // Even with the correct offer ID, the parent is not permitted to approve itself.
+    let bad=Request::builder().method("POST").uri("/api/nodes/approve")
+        .header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json")
+        .header(header::ORIGIN,"http://localhost:20001")
+        .body(Body::from(json!({"id":id}).to_string())).unwrap();
+    let parent_app=server::create_dashboard_router(parent.rt.clone());
+    assert_eq!(parent_app.oneshot(bad).await.unwrap().status(),StatusCode::BAD_REQUEST);
+    assert_eq!(parent.rt.transfer.reconcile_pending().await.unwrap()["pending"][0]["state"],"pending");
+
+    // The Dashboard sends only the pairing ID, with no Project grant selection.
+    let child_app=server::create_dashboard_router(child.rt.clone());
+    let accept=Request::builder().method("POST").uri("/api/nodes/approve")
+        .header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json")
+        .header(header::ORIGIN,"http://localhost:20001")
+        .body(Body::from(json!({"id":id}).to_string())).unwrap();
+    assert_eq!(child_app.oneshot(accept).await.unwrap().status(),StatusCode::OK);
+
+    let forged=endlessvibe::transfer::secure::Wire{
+        kind:"pair_status".into(),node_id:parent.rt.transfer.node_id.clone(),
+        name:String::new(),id:id.clone(),token:"wrong-secret".repeat(4),
+        tool:String::new(),args:Value::Null
+    };
+    assert!(child.rt.transfer.pairing_status(&forged).is_err());
+    assert_eq!(parent.rt.transfer.reconcile_pending().await.unwrap()["pending"].as_array().unwrap().len(),0);
+    let trusted=parent.rt.transfer.peers().unwrap();
+    assert_eq!(trusted["peers"][0]["role"],"parent");
+    assert_eq!(trusted["peers"][0]["node_id"],child.rt.transfer.node_id);
+    assert_eq!(child.rt.transfer.peers().unwrap()["peers"][0]["role"],"child");
+    assert!(child.rt.transfer.peers().unwrap()["peers"][0]["grants"].as_array().unwrap().is_empty());
+    let visible=parent.rt.transfer.call_node(&child.rt.transfer.node_id,"list_workspaces",json!({})).await.unwrap();
+    assert!(visible["workspaces"].as_array().unwrap().is_empty());
+    stop.cancel();tls.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn child_rejection_propagates_to_parent_without_creating_trust(){
+    let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=socket.local_addr().unwrap();drop(socket);
+    let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});
+    let parent=fixture(|c|c.transfer.enabled=true);
+    let stop=tokio_util::sync::CancellationToken::new();
+    let tls=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+    let id=offer["id"].as_str().unwrap().to_owned();
+    let app=server::create_dashboard_router(child.rt.clone());
+    let reject=Request::builder().method("POST").uri("/api/nodes/reject")
+        .header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json")
+        .header(header::ORIGIN,"http://localhost:20001")
+        .body(Body::from(json!({"id":id}).to_string())).unwrap();
+    let response=app.clone().oneshot(reject).await.unwrap();
+    assert_eq!(response.status(),StatusCode::OK);
+    assert_eq!(json_body(response).await["rejected"],true);
+    assert_eq!(parent.rt.transfer.reconcile_pending().await.unwrap()["pending"][0]["state"],"rejected");
+    assert!(child.rt.transfer.peers().unwrap()["peers"].as_array().unwrap().is_empty());
+    assert!(parent.rt.transfer.peers().unwrap()["peers"].as_array().unwrap().is_empty());
+
+    // A declined request cannot later be approved or turned into a live peer.
+    let accept=Request::builder().method("POST").uri("/api/nodes/approve")
+        .header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json")
+        .header(header::ORIGIN,"http://localhost:20001")
+        .body(Body::from(json!({"id":id}).to_string())).unwrap();
+    assert_eq!(app.oneshot(accept).await.unwrap().status(),StatusCode::BAD_REQUEST);
+    assert!(parent.rt.transfer.call_node(&child.rt.transfer.node_id,"list_workspaces",json!({})).await.is_err());
+    stop.cancel();tls.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn child_can_pair_before_registering_any_project(){
+    let f=fixture(|c|{c.transfer.enabled=true;c.workspaces[0].projects.clear();});
+    assert!(f.rt.projects_snapshot().is_empty());
+    let parent="abcdef123456abcdef123456";
+    let token="a".repeat(44);
+    let offer=endlessvibe::transfer::secure::Wire{
+        kind:"pair_hello".into(),node_id:parent.into(),name:"Linux Parent".into(),
+        id:"123456789012345678901234".into(),token:token.clone(),
+        tool:String::new(),args:Value::Null
+    };
+    f.rt.transfer.receive_pair(&offer,"127.0.0.1:23456".parse().unwrap(),"test-certificate").unwrap();
+    let app=server::create_dashboard_router(f.rt.clone());
+    let req=Request::builder().method("POST").uri("/api/nodes/approve")
+        .header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json")
+        .header(header::ORIGIN,"http://localhost:20001")
+        .body(Body::from(json!({"id":offer.id,"grants":[]}).to_string())).unwrap();
+    let response=app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(),StatusCode::OK);
+    let result=json_body(response).await;
+    assert_eq!(result["paired"],true);
+    assert_eq!(result["role"],"child");
+    assert!(result["grants"].as_array().unwrap().is_empty());
+    assert_eq!(f.rt.transfer.pending().unwrap()["pending"].as_array().unwrap().len(),0);
+    let peers=f.rt.transfer.peers().unwrap();
+    assert_eq!(peers["peers"][0]["role"],"child");
+    assert_eq!(peers["peers"][0]["grants_revision"].as_str().unwrap().len(),64);
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","read").is_err());
+}
+
+#[tokio::test]
+async fn child_can_add_project_and_grant_it_after_pairing_without_repair(){
+    let f=fixture(|c|{c.transfer.enabled=true;c.workspaces[0].projects.clear();});
+    let parent="abcdef123456abcdef123456";
+    let token="a".repeat(44);
+    let offer=endlessvibe::transfer::secure::Wire{
+        kind:"pair_hello".into(),node_id:parent.into(),name:"Linux Parent".into(),
+        id:"123456789012345678901234".into(),token:token.clone(),
+        tool:String::new(),args:Value::Null
+    };
+    f.rt.transfer.receive_pair(&offer,"127.0.0.1:23456".parse().unwrap(),"test-certificate").unwrap();
+    let app=server::create_dashboard_router(f.rt.clone());
+    let request=|method:&str,url:&str,payload:Value|{
+        Request::builder().method(method).uri(url).header(header::HOST,"localhost")
+            .header(header::CONTENT_TYPE,"application/json")
+            .header(header::ORIGIN,"http://localhost:20001")
+            .body(Body::from(payload.to_string())).unwrap()
+    };
+    let approved=app.clone().oneshot(request("POST","/api/nodes/approve",
+        json!({"id":offer.id,"grants":[]}))).await.unwrap();
+    assert_eq!(approved.status(),StatusCode::OK);
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","read").is_err());
+
+    // A Project can be registered and hot-loaded after the pairing is already complete.
+    let project_path=f._dir.path().join("workspace/project");
+    let before=endlessvibe::config_edit::revision(&f.rt.config_path).unwrap();
+    let added=f.rt.dashboard_add_project(endlessvibe::config_edit::AddProjectRequest{
+        expected_revision:before,workspace:"demo".into(),project:Some("demo".into()),
+        path:project_path.to_string_lossy().to_string(),
+        allow_write:true,allow_exec:false,allow_git_commit:false,
+        allow_git_mutation:false,allow_git_push:false,
+        execution_profile:None,environment:vec![],
+    }).unwrap();
+    assert_eq!(added["requires_restart"],false);
+    assert!(f.rt.project_exact("demo","demo").is_ok());
+    // Registration is not authorization.
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","read").is_err());
+    let path=format!("/api/nodes/peers/{parent}/grants");
+    let first=f.rt.transfer.peers().unwrap()["peers"][0]["grants_revision"]
+        .as_str().unwrap().to_owned();
+    let read_only=json!([{"workspace":"demo","project":"demo",
+        "read":true,"write":false,"execute":false,"git":false}]);
+
+    // Reject privilege escalation and keep previously empty grants unchanged.
+    let elevated=json!([{"workspace":"demo","project":"demo",
+        "read":true,"write":false,"execute":true,"git":false}]);
+    let denied=app.clone().oneshot(request("PUT",&path,json!({
+        "expected_grants_revision":first,"grants":elevated
+    }))).await.unwrap();
+    assert_eq!(denied.status(),StatusCode::BAD_REQUEST);
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","read").is_err());
+
+    let accepted=app.clone().oneshot(request("PUT",&path,json!({
+        "expected_grants_revision":first,"grants":read_only
+    }))).await.unwrap();
+    assert_eq!(accepted.status(),StatusCode::OK);
+    let saved=json_body(accepted).await;
+    let current=saved["grants_revision"].as_str().unwrap().to_owned();
+    assert_ne!(first,current);
+    assert_eq!(saved["grants"][0]["workspace"],"demo");
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","read").is_ok());
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","write").is_err());
+    let revived=endlessvibe::transfer::TransferManager::new(
+        f.rt.config.transfer.clone(),f.rt.db.clone()).unwrap();
+    assert!(revived.authorized(parent,&token,"demo","demo","read").is_ok());
+
+    // Stale edits must not overwrite a grant update.
+    let stale=app.clone().oneshot(request("PUT",&path,json!({
+        "expected_grants_revision":first,"grants":[]
+    }))).await.unwrap();
+    assert_eq!(stale.status(),StatusCode::CONFLICT);
+    assert_eq!(json_body(stale).await["code"],"GRANTS_CONFLICT");
+    // Duplicates must not be silently accepted.
+    let duplicates=app.clone().oneshot(request("PUT",&path,json!({
+        "expected_grants_revision":current,"grants":[read_only[0],read_only[0]]
+    }))).await.unwrap();
+    assert_eq!(duplicates.status(),StatusCode::BAD_REQUEST);
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","read").is_ok());
+
+    // Removing all grants keeps TLS pairing intact, but revokes Project access immediately.
+    let revoked=app.clone().oneshot(request("PUT",&path,json!({
+        "expected_grants_revision":current,"grants":[]
+    }))).await.unwrap();
+    assert_eq!(revoked.status(),StatusCode::OK);
+    assert!(json_body(revoked).await["grants"].as_array().unwrap().is_empty());
+    assert!(f.rt.transfer.authorized(parent,&token,"demo","demo","read").is_err());
+    assert_eq!(f.rt.transfer.peers().unwrap()["peers"].as_array().unwrap().len(),1);
+
+    // Local dashboard CSRF protection remains in effect for grant changes.
+    let remote=Request::builder().method("PUT").uri(&path)
+        .header(header::HOST,"192.168.1.20")
+        .header(header::CONTENT_TYPE,"application/json")
+        .header(header::ORIGIN,"http://192.168.1.20:20001")
+        .body(Body::from("{}")).unwrap();
+    assert_eq!(app.oneshot(remote).await.unwrap().status(),StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn parent_cannot_manage_the_child_side_of_peer_grants(){
+    let f=fixture(|c|c.transfer.enabled=true);
+    let parent=f.rt.transfer.clone();
+    // Simulate an outgoing pairing record by initiating a real TLS handshake
+    // with a separate temporary child, then approving the parent side.
+    let sock=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=sock.local_addr().unwrap();drop(sock);
+    let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});
+    let stop=tokio_util::sync::CancellationToken::new();
+    let server=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let pending=parent.start_pair(address).await.unwrap();
+    // A parent may never approve itself before the child accepts.
+    assert!(parent.approve_pair(endlessvibe::transfer::secure::PairApprove{
+        id:pending["id"].as_str().unwrap().into(),grants:vec![],
+    },&f.rt).is_err());
+    child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{
+        id:pending["id"].as_str().unwrap().into(),grants:vec![],
+    },&child.rt).unwrap();
+    parent.reconcile_pending().await.unwrap();
+    let peers=parent.peers().unwrap();
+    let peer=&peers["peers"][0];
+    let path=format!("/api/nodes/peers/{}/grants",peer["node_id"].as_str().unwrap());
+    let input=json!({"expected_grants_revision":peer["grants_revision"],"grants":[]});
+    let app=server::create_dashboard_router(f.rt.clone());
+    let request=Request::builder().method("PUT").uri(path)
+        .header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json")
+        .header(header::ORIGIN,"http://localhost:20001")
+        .body(Body::from(input.to_string())).unwrap();
+    let response=app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(),StatusCode::BAD_REQUEST);
+    assert!(json_body(response).await["message"].as_str().unwrap().contains("Only this child's"));
+    stop.cancel();server.await.unwrap().unwrap();
+}
+
 #[test]fn transfer_pair_grants_do_not_exceed_child_permissions(){let f=fixture(|c|c.transfer.enabled=true);let id="abcdef123456abcdef123456";let secret="a".repeat(44);let offer=endlessvibe::transfer::secure::Wire{kind:"pair_hello".into(),node_id:id.into(),name:"Parent".into(),id:"123456789012345678901234".into(),token:secret.clone(),tool:String::new(),args:Value::Null};let v=f.rt.transfer.receive_pair(&offer,"127.0.0.1:23456".parse().unwrap(),"cert").unwrap();assert_eq!(v["ok"],true);let p=endlessvibe::transfer::secure::PairApprove{id:"123456789012345678901234".into(),grants:vec![endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:false,execute:false,git:false}]};assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","read").is_err());assert_eq!(f.rt.transfer.approve_pair(p,&f.rt).unwrap()["paired"],true);assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","read").is_ok());assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","write").is_err());assert!(f.rt.transfer.authorized(id,"wrong-token","demo","demo","read").is_err());assert!(f.rt.transfer.receive_pair(&endlessvibe::transfer::secure::Wire{node_id:"123456abcdef123456abcdef".into(),..offer},"127.0.0.1:23456".parse().unwrap(),"cert").is_err());assert_eq!(f.rt.transfer.revoke_pair(id).unwrap()["revoked"],true);assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","read").is_err());}
-#[tokio::test]async fn transfer_parent_reads_child_over_pinned_tls_and_rejects_unpaired_work(){let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=socket.local_addr().unwrap();drop(socket);let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});let parent=fixture(|c|c.transfer.enabled=true);initialize_git(&child,true);let shutdown=tokio_util::sync::CancellationToken::new();let task=tokio::spawn(child.rt.transfer.clone().run_tls(shutdown.clone(),Some(child.rt.clone())));tokio::time::sleep(Duration::from_millis(100)).await;let pending=parent.rt.transfer.start_pair(address).await.unwrap();let id=pending["id"].as_str().unwrap().to_owned();assert_eq!(child.rt.transfer.pending().unwrap()["pending"][0]["code"],pending["code"]);let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:false,execute:false,git:false};child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:id.clone(),grants:vec![grant]},&child.rt).unwrap();parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id,grants:vec![]},&parent.rt).unwrap();let node_id=child.rt.transfer.node_id.clone();let ws=parent.rt.transfer.call_node(&node_id,"list_workspaces",json!({})).await.unwrap();assert_eq!(ws["workspaces"][0]["id"],"demo");let pj=parent.rt.transfer.call_node(&node_id,"list_projects",json!({"workspace":"demo"})).await.unwrap();assert_eq!(pj["projects"][0]["id"],"demo");let content=parent.rt.transfer.call_node(&node_id,"read_file",json!({"workspace":"demo","project":"demo","path":"src/main.rs"})).await.unwrap();assert!(content["content"].as_str().unwrap().contains("hello"));let git=parent.rt.transfer.call_node(&node_id,"git_status",json!({"workspace":"demo","project":"demo"})).await.unwrap();assert_eq!(git["branch"],"main");assert!(parent.rt.transfer.call_node(&node_id,"apply_patch",json!({"workspace":"demo","project":"demo"})).await.is_err());let app=server::create_dashboard_router(parent.rt.clone());let request=Request::builder().method("POST").uri("/api/nodes/read").header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json").header(header::ORIGIN,"http://localhost:20001").body(Body::from(json!({"node_id":node_id,"tool":"read_file","arguments":{"workspace":"demo","project":"demo","path":"src/main.rs"}}).to_string())).unwrap();let response=app.clone().oneshot(request).await.unwrap();assert_eq!(response.status(),StatusCode::OK);shutdown.cancel();task.await.unwrap().unwrap();assert!(parent.rt.transfer.call_node(&node_id,"read_file",json!({"workspace":"demo","project":"demo","path":"src/main.rs"})).await.is_err());}
+#[tokio::test]
+async fn paired_tls_nodes_discover_new_project_only_after_child_grants_it() {
+    let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=socket.local_addr().unwrap();drop(socket);
+    let child=fixture(|c|{
+        c.transfer.enabled=true;
+        c.transfer.listen=address;
+        c.workspaces[0].projects.clear();
+    });
+    let parent=fixture(|c|c.transfer.enabled=true);
+    let stop=tokio_util::sync::CancellationToken::new();
+    let tls=tokio::spawn(child.rt.transfer.clone().run_tls(
+        stop.clone(),Some(child.rt.clone())
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+    let id=offer["id"].as_str().unwrap().to_owned();
+    let parent_id=parent.rt.transfer.node_id.clone();
+    child.rt.transfer.approve_pair(
+        endlessvibe::transfer::secure::PairApprove{id:id.clone(),grants:vec![]},
+        &child.rt
+    ).unwrap();
+    parent.rt.transfer.reconcile_pending().await.unwrap();
+    let child_id=child.rt.transfer.node_id.clone();
+    assert!(parent.rt.transfer.call_node(&child_id,"list_workspaces",json!({}))
+        .await.unwrap()["workspaces"].as_array().unwrap().is_empty());
+    let args=json!({"workspace":"demo","project":"demo","path":"src/main.rs"});
+    assert!(parent.rt.transfer.call_node(&child_id,"read_file",args.clone()).await.is_err());
+
+    // Register the Project after TLS pairing; registration alone is not a grant.
+    let project_path=child._dir.path().join("workspace/project");
+    let result=child.rt.dashboard_add_project(endlessvibe::config_edit::AddProjectRequest{
+        expected_revision:endlessvibe::config_edit::revision(&child.rt.config_path).unwrap(),
+        workspace:"demo".into(),project:Some("demo".into()),
+        path:project_path.to_string_lossy().to_string(),
+        allow_write:false,allow_exec:false,allow_git_commit:false,
+        allow_git_mutation:false,allow_git_push:false,
+        execution_profile:None,environment:vec![],
+    }).unwrap();
+    assert_eq!(result["requires_restart"],false);
+    assert!(parent.rt.transfer.call_node(&child_id,"list_workspaces",json!({}))
+        .await.unwrap()["workspaces"].as_array().unwrap().is_empty());
+
+    let rev=child.rt.transfer.peers().unwrap()["peers"][0]["grants_revision"]
+        .as_str().unwrap().to_owned();
+    let grant=endlessvibe::transfer::secure::Grant{
+        workspace:"demo".into(),project:"demo".into(),
+        read:true,write:false,execute:false,git:false,
+    };
+    child.rt.transfer.update_peer_grants(&parent_id,
+        endlessvibe::transfer::secure::GrantUpdate{
+            expected_grants_revision:rev,grants:vec![grant],
+        },&child.rt
+    ).unwrap();
+    let workspaces=parent.rt.transfer.call_node(&child_id,"list_workspaces",
+        json!({})).await.unwrap();
+    assert_eq!(workspaces["workspaces"][0]["id"],"demo");
+    let content=parent.rt.transfer.call_node(&child_id,"read_file",args.clone())
+        .await.unwrap();
+    assert!(content["content"].as_str().unwrap().contains("hello"));
+
+    let rev=child.rt.transfer.peers().unwrap()["peers"][0]["grants_revision"]
+        .as_str().unwrap().to_owned();
+    child.rt.transfer.update_peer_grants(&parent_id,
+        endlessvibe::transfer::secure::GrantUpdate{
+            expected_grants_revision:rev,grants:vec![],
+        },&child.rt
+    ).unwrap();
+    assert!(parent.rt.transfer.call_node(&child_id,"read_file",args).await.is_err());
+    assert!(parent.rt.transfer.call_node(&child_id,"list_workspaces",
+        json!({})).await.unwrap()["workspaces"].as_array().unwrap().is_empty());
+
+    stop.cancel();
+    tls.await.unwrap().unwrap();
+}
+#[tokio::test]async fn transfer_parent_reads_child_over_pinned_tls_and_rejects_unpaired_work(){let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=socket.local_addr().unwrap();drop(socket);let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});let parent=fixture(|c|c.transfer.enabled=true);initialize_git(&child,true);let shutdown=tokio_util::sync::CancellationToken::new();let task=tokio::spawn(child.rt.transfer.clone().run_tls(shutdown.clone(),Some(child.rt.clone())));tokio::time::sleep(Duration::from_millis(100)).await;let pending=parent.rt.transfer.start_pair(address).await.unwrap();let id=pending["id"].as_str().unwrap().to_owned();assert_eq!(child.rt.transfer.pending().unwrap()["pending"][0]["code"],pending["code"]);let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:false,execute:false,git:false};child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:id.clone(),grants:vec![grant]},&child.rt).unwrap();parent.rt.transfer.reconcile_pending().await.unwrap();let node_id=child.rt.transfer.node_id.clone();let ws=parent.rt.transfer.call_node(&node_id,"list_workspaces",json!({})).await.unwrap();assert_eq!(ws["workspaces"][0]["id"],"demo");let pj=parent.rt.transfer.call_node(&node_id,"list_projects",json!({"workspace":"demo"})).await.unwrap();assert_eq!(pj["projects"][0]["id"],"demo");let content=parent.rt.transfer.call_node(&node_id,"read_file",json!({"workspace":"demo","project":"demo","path":"src/main.rs"})).await.unwrap();assert!(content["content"].as_str().unwrap().contains("hello"));let git=parent.rt.transfer.call_node(&node_id,"git_status",json!({"workspace":"demo","project":"demo"})).await.unwrap();assert_eq!(git["branch"],"main");assert!(parent.rt.transfer.call_node(&node_id,"apply_patch",json!({"workspace":"demo","project":"demo"})).await.is_err());let app=server::create_dashboard_router(parent.rt.clone());let request=Request::builder().method("POST").uri("/api/nodes/read").header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json").header(header::ORIGIN,"http://localhost:20001").body(Body::from(json!({"node_id":node_id,"tool":"read_file","arguments":{"workspace":"demo","project":"demo","path":"src/main.rs"}}).to_string())).unwrap();let response=app.clone().oneshot(request).await.unwrap();assert_eq!(response.status(),StatusCode::OK);shutdown.cancel();task.await.unwrap().unwrap();assert!(parent.rt.transfer.call_node(&node_id,"read_file",json!({"workspace":"demo","project":"demo","path":"src/main.rs"})).await.is_err());}
 #[tokio::test]async fn transfer_parent_mutates_and_polls_child_jobs_over_tls(){
 let sock=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=sock.local_addr().unwrap();drop(sock);
 let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});let parent=fixture(|c|c.transfer.enabled=true);initialize_git(&child,true);
@@ -56,7 +387,7 @@ let stop=tokio_util::sync::CancellationToken::new();let tls=tokio::spawn(child.r
 let offer=parent.rt.transfer.start_pair(address).await.unwrap();let id=offer["id"].as_str().unwrap().to_owned();
 let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:true,git:true};
 child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:id.clone(),grants:vec![grant]},&child.rt).unwrap();
-parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id,grants:vec![]},&parent.rt).unwrap();
+parent.rt.transfer.reconcile_pending().await.unwrap();
 let node=child.rt.transfer.node_id.clone();let w=json!({"workspace":"demo","project":"demo","path":"src/main.rs"});
 let original=parent.rt.transfer.call_node(&node,"read_file",w.clone()).await.unwrap();
 let h=original["sha256"].as_str().unwrap();
@@ -107,7 +438,7 @@ async fn transfer_request_history_survives_runtime_restart_and_revocation(){
  let pair_id=offer["id"].as_str().unwrap().to_string();
  let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false};
  child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id.clone(),grants:vec![grant]},&child.rt).unwrap();
- parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id,grants:vec![]},&parent.rt).unwrap();
+ parent.rt.transfer.reconcile_pending().await.unwrap();
  let good=json!({"workspace":"demo","project":"demo","path":"restored-directory"});
  parent.rt.transfer.call_node_with_request_id(&node_id,"create_directory",good.clone(),Some("confirmed-create")).await.unwrap();
  let bad=json!({"workspace":"demo","project":"demo","path":"../outside-project"});
@@ -186,7 +517,7 @@ async fn transfer_offline_and_lost_ack_do_not_replay_mutations(){
     let pair_id=offer["id"].as_str().unwrap().to_owned();
     let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false};
     child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id.clone(),grants:vec![grant]},&child.rt).unwrap();
-    parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id,grants:vec![]},&parent.rt).unwrap();
+    parent.rt.transfer.reconcile_pending().await.unwrap();
     let node=child.rt.transfer.node_id.clone();
     let workspace=child.rt.project("demo","demo").unwrap().root.path.clone();
     stop.cancel();server.await.unwrap().unwrap();

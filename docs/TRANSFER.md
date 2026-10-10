@@ -24,17 +24,35 @@ display_name = "EndlessVibe"
 
 ## Phase 2 — TLS Pairing and Authorization
 
-The independent TLS 1.3 listener uses a persistent, self-signed per-node certificate stored in the service's private SQLite state. The parent starts pairing by POSTing `{"address":"192.168.1.20:20002"}` to its local `/api/nodes/pair`. The parent receives the child's TLS certificate fingerprint and an out-of-band six-digit verification code. The child gets a pending pairing request under `/api/nodes/pending`. Operators MUST compare the **same code in both local dashboards** and approve separately; encrypted transport by itself does not trust the discovered node. Only RFC1918/loopback/link-local IP endpoints are permitted; public internet addresses are refused.
+The independent TLS 1.3 listener uses a persistent, self-signed per-node certificate stored in the service's private SQLite state. The parent starts pairing by POSTing `{"address":"192.168.1.20:20002"}` to its local `/api/nodes/pair`. The parent receives the child's TLS certificate fingerprint and a six-digit verification code. The child receives the request and the **same code** under `/api/nodes/pending`. The operator MUST compare the code shown by the parent with the code shown to the child, then click **Accept** or **Reject only on the child's Dashboard**. The parent does not have a separate approval step: it queries `pair_status` over the child's pinned TLS connection and completes pairing only after the child accepts. Encrypted transport alone does not authenticate an unpaired node. Only RFC1918/loopback/link-local IP endpoints are permitted; public internet addresses are refused.
 
-The child approves with local `POST /api/nodes/approve`, specifying the exact Project grant (`workspace`, `project`, `read`, `write`, `execute`, `git`). Parent approval stores the child certificate fingerprint and a random 256-bit bearer token; child approval stores only the token digest and exact grants. The child refuses a second distinct parent until the first is revoked. Peer records survive service restarts, and `DELETE /api/nodes/peers/{node_id}` revokes local access. The parent cannot elevate privileges above the child's own Project permissions. Pairing requests expire in 5 minutes. The browser-facing APIs are loopback-only, not part of the public MCP endpoint.
+The child's local Dashboard calls `POST /api/nodes/approve` with `{"id":"<pairing_id>"}` or `POST /api/nodes/reject` with the same ID. **The default is no Project grants.** The UI never asks the child to configure grants while approving a connection. Once paired, the child's Trusted Nodes panel can grant/revoke individual Projects separately; newly registered Projects are never auto-granted. Existing API clients may explicitly pass an optional `grants` array to approve, but the Dashboard sends none. The parent automatically stores the child's pinned certificate fingerprint and its randomly generated bearer token after authenticated status confirmation; the child stores only the token digest. Requests and rejection decisions expire in 5 minutes. The child refuses a second distinct parent until the first is revoked, and the parent cannot elevate privileges above the child's existing Project permissions. Peer records survive service restarts. `DELETE /api/nodes/peers/{node_id}` revokes local access. All Dashboard APIs are loopback-only, not part of the public MCP endpoint.
 
 **Trust model:** During first pairing the TLS server certificate has no pre-existing trust anchor; the human comparison of the short code is therefore mandatory to rule out a local active MITM. After approval the parent pins the server certificate fingerprint and refuses unexpected key changes. An approved child accepts remote operations only with the matching parent ID and token plus its per-project grant. Protect the local Dashboard (e.g. do not expose 20001 to LAN) and use verified SAS comparison. Do not mistake multicast advertisements for cryptographic identity.
 
 ## Phase 3 — Nodes Dashboard and Remote Read-Only Routing
 
-The local `http://127.0.0.1:20001/nodes` page shows discovered nodes, explicit manual-IP pairing, pending six-digit codes, child Project-grant checkboxes, approved peers and a simple remote Project browser. Transfer can be enabled or disabled from `/config` with `PUT /api/config/transfer` (full revision check; restart required). The Dashboard remains loopback-only and the dedicated Transfer socket uses TLS 1.3.
+The local `http://127.0.0.1:20001/nodes` page distinguishes the local **Parent** and **Child** roles (or an unassigned node before its first request). Only a parent may initiate requests; a child sees incoming parent requests, verification codes, and one-click **Accept / Reject** controls. Parent-side pairing status is reconciled automatically every few seconds even when the parent Dashboard is closed. The page also includes discovered nodes, approved peers with a **Manage Project grants** editor on children, and a parent-only remote Project browser. Transfer can be enabled or disabled from `/config` with `PUT /api/config/transfer` (full revision check; restart required). The Dashboard remains loopback-only and the dedicated Transfer socket uses TLS 1.3.
 
 `node_list` and `node_read` are the parent's MCP tools; the latter supports `list_workspaces`, `list_projects`, `inspect_project`, `list_directory`, `read_file`, `search_code`, `git_status`, `git_diff`, and `git_log` using the same parameter objects as the local equivalents. The parent is allowed only approved peers with their previously pinned TLS certificate fingerprint. The child verifies the parent token for every request, filters Workspace/Project listings by exact grants, and then invokes its existing local Project locks and filesystem/Git helpers. Arbitrary tool names, nested forwarding, paths outside the Project, and remote mutation attempts are rejected.
+
+To update grants after pairing, the **child's local Dashboard only** accepts:
+
+```http
+PUT /api/nodes/peers/{parent_node_id}/grants
+Content-Type: application/json
+```
+
+```json
+{
+  "expected_grants_revision": "64-character revision from GET /api/nodes/peers",
+  "grants": [
+    {"workspace":"project","project":"example","read":true,"write":false,"execute":false,"git":false}
+  ]
+}
+```
+
+This atomically **replaces** the full grant list. Set `"grants":[]` to revoke all Project permissions while retaining pairing. New Projects never become authorized automatically; permission changes are checked against the child’s current Project settings. A stale revision returns HTTP 409 to prevent lost updates. Every new remote request checks the latest grants. The paired parent cannot request extra grants from the child over Transfer.
 
 For browser use the parent exposes loopback-only `POST /api/nodes/read` with `{\"node_id\":\"...\",\"tool\":\"read_file\",\"arguments\":{\"workspace\":\"...\",\"project\":\"...\",\"path\":\"src/main.rs\"}}`.
 
