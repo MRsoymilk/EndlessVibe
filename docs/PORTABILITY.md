@@ -41,6 +41,21 @@ for the same desktop logon session and Windows account. Sessions managed by
 external service supervisors should still be controlled by those supervisors.
 No host-command execution backend needs to be enabled for process control.
 
+### Windows Job Object resource containment
+
+Windows command Jobs now start their child suspended, attach a native Job
+Object, then resume the original thread. Each task uses the configured
+execution.memory_limit_mb and execution.max_processes to cap aggregate Job
+memory and active processes. Closing the Job Object terminates remaining
+children, including on cancellation, timeout, and completed commands.
+Assignment failures abort the suspended process rather than running outside
+the resource limits. The old taskkill-based cleanup is not needed for these
+managed command Jobs.
+
+Job Objects do not restrict file access, registry, network or user security
+tokens: this is a resource-containment stage, NOT a Windows AppContainer
+sandbox. Host mode still requires explicit unsafe-host authorization.
+
 ### Windows MSVC toolchain in host jobs
 
 When a Windows host job executes cargo, rustc, cmake, or ninja, EndlessVibe

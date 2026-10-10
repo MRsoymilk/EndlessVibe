@@ -119,7 +119,12 @@ impl Jobs{
     fn prune(&self)->Result<()>{self.db.maintain(self.config.limits.retained_jobs).map(|_|())}
     async fn worker(&self,r:&mut JobRecord,mut cmd:tokio::process::Command,cancel:CancellationToken,timeout:u64)->Result<()>{
         if cancel.is_cancelled(){r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
-        let mut child=cmd.spawn().context("Could not start job (inspect executable, namespace support and sandbox mounts)")?;let pid=child.id().context("Missing child ID")?;let mut group=process::GroupGuard::new(pid);
+        #[cfg(windows)]
+        let (mut child,job)=crate::tools::windows_job::spawn(&mut cmd,
+            self.config.execution.memory_limit_mb,self.config.execution.max_processes)?;
+        #[cfg(not(windows))]
+        let mut child=cmd.spawn().context("Could not start job (inspect executable, namespace support and sandbox mounts)")?;
+        let pid=child.id().context("Missing child ID")?;let mut group=process::GroupGuard::new(pid);
         r.status="running".into();r.started=Some(util::now());r.started_ms=Some(util::now_millis());self.save(r,None)?;if let (Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){tracing::warn!(error=%error,job_id=%r.id,"Job is running but task checkpoint update failed");}}
         let (tx,mut rx)=mpsc::channel::<(&'static str,Vec<u8>)>(16);
         let out=tokio::spawn(pipe(child.stdout.take().context("stdout missing")?,"stdout",tx.clone()));let err=tokio::spawn(pipe(child.stderr.take().context("stderr missing")?,"stderr",tx.clone()));drop(tx);
@@ -128,10 +133,17 @@ impl Jobs{
         let status=loop{tokio::select!{
             status=&mut wait=>break status?,
             chunk=rx.recv(),if pipes_open=>{if let Some((stream,bytes))=chunk{output.append(stream,&bytes,self.config.limits.max_output_bytes);if last_save.elapsed()>=Duration::from_millis(250){r.output_bytes_total=output.total;r.output_truncated=output.offset>0;self.save(r,Some(&output))?;last_save=Instant::now();}}else{pipes_open=false;}},
-            _=cancel.cancelled()=>{forced=Some("cancelled");process::terminate_group(pid).await;break wait.await?;},
-            _=&mut deadline=>{forced=Some("timed_out");process::terminate_group(pid).await;break wait.await?;}
+            _=cancel.cancelled()=>{forced=Some("cancelled");
+                #[cfg(windows)]job.terminate();
+                #[cfg(not(windows))]process::terminate_group(pid).await;
+                break wait.await?;},
+            _=&mut deadline=>{forced=Some("timed_out");
+                #[cfg(windows)]job.terminate();
+                #[cfg(not(windows))]process::terminate_group(pid).await;
+                break wait.await?;}
         }};
         group.kill();
+        #[cfg(windows)]job.terminate();
         let _=tokio::time::timeout(Duration::from_secs(2),async{while let Some((stream,bytes))=rx.recv().await{output.append(stream,&bytes,self.config.limits.max_output_bytes);}}).await;
         out.abort();err.abort();r.exit_code=status.code();r.status=forced.unwrap_or(if status.success(){"succeeded"}else{"failed"}).into();r.finished=Some(util::now());r.output_bytes_total=output.total;r.output_truncated=output.offset>0;
         if r.status=="timed_out"{r.error=Some(format!("Execution exceeded {timeout} seconds; command termination was requested"));}else if let Some(hint)=bubblewrap_failure_hint(&r.backend,&r.status,&output.bytes){r.error=Some(hint);}self.save(r,Some(&output))
