@@ -7,6 +7,9 @@ use tokio_stream::{wrappers::BroadcastStream,StreamExt};
 
 pub async fn home()->impl IntoResponse{Html(include_str!("../web/index.html"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
+pub async fn theme_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/theme.css"))}
+pub async fn preferences_init()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/preferences-init.js"))}
+pub async fn preferences_js()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/preferences.js"))}
 pub async fn javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/app.js"))}
 pub async fn javascript_common()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/common.js"))}
 pub async fn javascript_nodes()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/nodes.js"))}

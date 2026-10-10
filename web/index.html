@@ -3,14 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0b1018">
 <link rel="icon" type="image/png" href="/assets/EndlessVibe.png">
 <link rel="apple-touch-icon" href="/assets/EndlessVibe.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <title>EndlessVibe · Dashboard</title>
 <link rel="stylesheet" href="/vendor/uPlot/uPlot.min.css">
-<link rel="stylesheet" href="/assets/app.css?v=hot-reload-11">
+<script src="/assets/js/preferences-init.js"></script>
+<link rel="stylesheet" href="/assets/app.css?v=design-2">
+<link rel="stylesheet" href="/assets/theme.css?v=design-2">
 <script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
 <script type="module" src="/assets/app.js?v=dashboard-data-14" defer></script>
 </head>
@@ -19,6 +21,7 @@
 <header class="topbar">
 <div class="brand"><img class="brand-icon" src="/assets/EndlessVibe.png" width="76" height="48" alt="" decoding="async"><div><p class="eyebrow">ENDLESSVIBE</p><h1>Dashboard</h1></div></div>
 <nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="projects" href="/projects">Projects</a><a data-nav="nodes" href="/nodes">Nodes</a><a data-nav="tasks" href="/tasks">Tasks</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="mcp" href="/mcp">MCP</a><a data-nav="config" href="/config">配置</a></nav>
+<div class="display-preferences" role="group" aria-label="主题与语言"><label class="display-preference" for="theme-select"><span class="pref-icon" aria-hidden="true">◐</span><span>主题</span><select id="theme-select" aria-label="主题"><option value="dark">深色</option><option value="light">浅色</option></select></label><label class="display-preference" for="language-select"><span class="pref-icon" aria-hidden="true">文</span><span>语言</span><select id="language-select" aria-label="语言"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
 <div id="header-status" class="header-status pending"><span class="dot"></span><span id="header-status-text">检查中</span></div>
 </header>
 

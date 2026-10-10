@@ -222,6 +222,50 @@ async fn transfer_offline_and_lost_ack_do_not_replay_mutations(){
 }
 #[test]fn transfer_operation_audit_never_persists_remote_output_or_diff(){let f=fixture(|_|{});for tool in ["node_read","node_write","node_dashboard_write","transfer_get_job_output","transfer_git_diff"]{let op=f.rt.begin_operation(tool,"demo","demo",json!({"request_hash":"digest"}));let id=op.id.unwrap();let delivered=f.rt.finish_operation(op,Ok(json!({"output":"REMOTE_SECRET_LOG","diff":"REMOTE_SECRET_PATCH"}))).unwrap();assert_eq!(delivered["output"],"REMOTE_SECRET_LOG");let stored=f.rt.db.operation(id).unwrap();assert_eq!(stored["output"]["redacted"],true);assert!(!stored.to_string().contains("REMOTE_SECRET_LOG"));assert!(!stored.to_string().contains("REMOTE_SECRET_PATCH"));}}
 #[tokio::test]
+async fn dashboard_theme_language_and_bilingual_readmes_are_available(){
+ let f=fixture(|_|{});
+ let router=server::create_dashboard_router(f.rt.clone());
+ for page in ["/","/projects","/tasks","/activity","/operations","/mcp","/config","/nodes"]{
+  let response=http(&router,"GET",page,Body::empty(),None,None,None).await;
+  assert_eq!(response.status(),StatusCode::OK,"{page}");
+  let body=to_bytes(response.into_body(),100_000).await.unwrap();
+  let html=String::from_utf8_lossy(&body);
+  for marker in ["id=\"theme-select\"","id=\"language-select\"",
+     "/assets/js/preferences-init.js","/assets/theme.css","/assets/app.js"]{
+    assert!(html.contains(marker),"{page} missing {marker}");
+  }
+ }
+ for (path,marker) in [
+   ("/assets/theme.css","html[data-theme=\"light\"]"),
+   ("/assets/js/preferences-init.js","endlessvibe.theme"),
+   ("/assets/js/preferences.js","initPreferences"),
+   ("/assets/js/preferences.js","MutationObserver"),
+   ("/assets/js/charts.js","refreshChartTheme"),
+ ]{
+  let response=http(&router,"GET",path,Body::empty(),None,None,None).await;
+  assert_eq!(response.status(),StatusCode::OK,"{path}");
+  let mime=response.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().to_owned();
+  assert!(mime.contains(if path.ends_with(".css"){"text/css"}else{"text/javascript"}));
+  let bytes=to_bytes(response.into_body(),150_000).await.unwrap();
+  assert!(String::from_utf8_lossy(&bytes).contains(marker),"{path} missing {marker}");
+ }
+ let zh=include_str!("../README.md");
+ let en=include_str!("../README.en.md");
+ assert!(zh.contains("README.en.md"));
+ assert!(en.contains("README.md"));
+ assert!(en.contains("## Quick Start"));
+ for filename in ["dashboard","projects","tasks","operations","nodes"]{
+  let zh_image=format!("docs/screenshots/{filename}.jpg");
+  let en_image=format!("docs/screenshots/{filename}-en-light.jpg");
+  assert!(zh.contains(&zh_image),"Chinese README missing {zh_image}");
+  assert!(en.contains(&en_image),"English README missing {en_image}");
+  for image in [&zh_image,&en_image]{
+   assert!(std::path::Path::new(image).exists(),"missing screenshot: {image}");
+  }
+ }
+}
+
+#[tokio::test]
 async fn nodes_request_history_ui_assets_are_served(){
  let f=fixture(|_|{});
  let router=server::create_dashboard_router(f.rt.clone());

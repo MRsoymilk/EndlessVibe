@@ -1,6 +1,8 @@
 import {$,setText,formatBytes,formatTime} from "./common.js";
+import {translate} from "./preferences.js";
 
 const plots=new Map();
+let lastMetrics=null;
 
 function chartTheme(){
   const s=getComputedStyle(document.documentElement);
@@ -22,6 +24,7 @@ function upsertPlot(key,hostId,data,series,height=270,yFormatter=null){
 function percentileText(value){if(!value||value.samples===0)return"—";return `${value.p50??0} / ${value.p95??0} / ${value.p99??0} ms`;}
 
 export function renderMetrics(data){
+  lastMetrics=data;
   const totals=data.totals||{},points=data.points||[];
   setText("activity-tool-latency",percentileText(data.latency?.tool_ms));
   setText("activity-queue-wait",percentileText(data.latency?.queue_wait_ms));
@@ -35,13 +38,19 @@ export function renderMetrics(data){
   }
   if(!points.length||!window.uPlot)return;
   const times=points.map(p=>p.time),requests=points.map(p=>p.requests),successes=points.map(p=>p.successes),failures=points.map(p=>p.failures),active=points.map(p=>p.active_jobs),rx=points.map(p=>p.rx_bytes),tx=points.map(p=>p.tx_bytes),c=chartTheme();
-  const toolSeries=[{}, {label:"Requests",stroke:c.blue,width:2,points:{show:false}}, {label:"Success",stroke:c.accent,width:2,points:{show:false}}, {label:"Failed",stroke:c.red,width:2,points:{show:false}}];
+  const toolSeries=[{}, {label:translate("Requests"),stroke:c.blue,width:2,points:{show:false}}, {label:translate("Success"),stroke:c.accent,width:2,points:{show:false}}, {label:translate("Failed"),stroke:c.red,width:2,points:{show:false}}];
   const trafficSeries=[{}, {label:"RX",stroke:c.violet,width:2,points:{show:false},value:(_,v)=>v==null?"—":formatBytes(v)}, {label:"TX",stroke:c.amber,width:2,points:{show:false},value:(_,v)=>v==null?"—":formatBytes(v)}];
-  const jobsSeries=[{}, {label:"Active Jobs",stroke:c.amber,width:2,points:{show:false}}];
+  const jobsSeries=[{}, {label:translate("Active Jobs"),stroke:c.amber,width:2,points:{show:false}}];
   upsertPlot("activity-tool","activity-tool-chart",[times,requests,successes,failures],toolSeries,285);
   upsertPlot("activity-jobs","activity-jobs-chart",[times,active],jobsSeries,285);
   upsertPlot("activity-traffic","activity-traffic-chart",[times,rx,tx],trafficSeries,285,formatBytes);
   setText("activity-updated",`更新于 ${formatTime(data.generated_at)} · ${data.bucket_seconds}s/点`);
+}
+
+export function refreshChartTheme(){
+  for(const plot of plots.values())plot.destroy();
+  plots.clear();
+  if(lastMetrics)renderMetrics(lastMetrics);
 }
 
 export function resizePlots(){
