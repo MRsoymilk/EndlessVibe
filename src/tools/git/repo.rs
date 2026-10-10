@@ -7,6 +7,20 @@ use std::{fs::OpenOptions,io::{Read,Write},path::PathBuf};
 use tokio::process::Command;
 
 #[derive(Clone,Default)]pub(super) struct Environment{pub(super) index:Option<PathBuf>,pub(super) objects:Option<PathBuf>}
+#[cfg(windows)]
+fn windows_git_path_is_unsafe(path:&std::path::Path)->bool{
+    path.components().any(|part|match part{
+        std::path::Component::Prefix(prefix)=>{
+            // Windows canonical paths can begin with \\?\F:\\; only the drive-prefix
+            // colon is valid, while ADS and embedded newlines remain forbidden.
+            let raw=prefix.as_os_str().to_string_lossy();
+            raw.contains(['\n','\r'])||
+                (!matches!(prefix.kind(),std::path::Prefix::Disk(_)|std::path::Prefix::VerbatimDisk(_))&&raw.contains(':'))
+        },
+        std::path::Component::Normal(name)=>name.to_string_lossy().contains([':', '\n', '\r']),
+        _=>false,
+    })
+}
 
 pub(super) fn repo(w:&Project)->Result<PathBuf>{
     w.root.unchanged_root()?;let dir=w.root.path.join(".git");let md=std::fs::symlink_metadata(&dir).context("Project is not a standalone Git repository; linked worktrees and subdirectory repositories are not supported by this release")?;
@@ -14,7 +28,7 @@ pub(super) fn repo(w:&Project)->Result<PathBuf>{
     #[cfg(unix)]
     if dir.to_string_lossy().contains([':', '\n', '\r']){bail!("Git repository paths containing ':' or newlines are not supported");}
     #[cfg(windows)]
-    if dir.to_string_lossy().chars().skip(2).any(|c|matches!(c,':'|'\n'|'\r')){bail!("Git repository paths containing alternate data streams or newlines are not supported");}
+    if windows_git_path_is_unsafe(&dir){bail!("Git repository paths containing alternate data streams or newlines are not supported");}
     Ok(dir)
 }
 
@@ -60,4 +74,24 @@ fn parse_status(bytes:&[u8])->Result<Vec<Value>>{let mut values=bytes.split(|b|*
 pub async fn status(rt:&Runtime,w:&Project)->Result<Value>{preflight(rt,w).await?;let raw=good(rt,w,args(&["status","--porcelain=v1","-z","--untracked-files=all","--ignore-submodules=all"]),&Environment::default(),None).await?;let mut entries=parse_status(&raw)?;let total_entries=entries.len();let truncated=total_entries>200;entries.truncate(200);Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"branch":branch(rt,w).await?,"head":head(rt,w).await?,"entries":entries,"total_entries":total_entries,"truncated":truncated,"sensitive_paths_omitted":true}))}
 pub async fn log(rt:&Runtime,w:&Project,a:LogArgs)->Result<Value>{preflight(rt,w).await?;if a.limit==0||a.limit>100{bail!("limit must be 1..100");}if head(rt,w).await?=="UNBORN"{return Ok(json!({"commits":[]}));}let values=vec!["log".into(),format!("-{}",a.limit),"--format=%H%x00%an%x00%aI%x00%s%x00".into(),"--no-decorate".into()];let raw=good(rt,w,values,&Environment::default(),None).await?;let mut out=Vec::new();let fields=raw.split(|b|*b==0).collect::<Vec<_>>();for chunk in fields.chunks(4){if chunk.len()==4{out.push(json!({"commit":String::from_utf8_lossy(chunk[0]).trim(),"author":String::from_utf8_lossy(chunk[1]),"date":String::from_utf8_lossy(chunk[2]),"subject":String::from_utf8_lossy(chunk[3])}));}}Ok(json!({"commits":out}))}
 
-#[cfg(test)]mod tests{use super::*;#[test]fn status_handles_renames_and_hides_sensitive_paths(){let v=parse_status(b" M src/main.rs\0R  new.rs\0old.rs\0?? .env\0").unwrap();assert_eq!(v.len(),2);assert_eq!(v[1]["original_path"],"old.rs");}#[test]fn object_ids_are_validated(){assert!(oid(b"bad\n".to_vec()).is_err());assert!(oid(format!("{}\n","a".repeat(40)).into_bytes()).is_ok());}}
+#[cfg(test)]mod tests{
+    use super::*;
+    #[test]fn status_handles_renames_and_hides_sensitive_paths(){
+        let v=parse_status(b" M src/main.rs\0R  new.rs\0old.rs\0?? .env\0").unwrap();
+        assert_eq!(v.len(),2);
+        assert_eq!(v[1]["original_path"],"old.rs");
+    }
+    #[test]fn object_ids_are_validated(){
+        assert!(oid(b"bad\n".to_vec()).is_err());
+        assert!(oid(format!("{}\n","a".repeat(40)).into_bytes()).is_ok());
+    }
+    #[cfg(windows)]
+    #[test]fn windows_verbatim_drive_is_not_a_git_alternate_data_stream(){
+        for path in [r"F:\project\EndlessVibe\.git",r"\\?\F:\project\EndlessVibe\.git",r"\\server\share\repo\.git"]{
+            assert!(!windows_git_path_is_unsafe(std::path::Path::new(path)),"{path}");
+        }
+        for path in [r"\\?\F:\project:stream\.git",r"F:\project\.git:stream","F:\\project\\foo\nbar\\.git"]{
+            assert!(windows_git_path_is_unsafe(std::path::Path::new(path)),"{path:?}");
+        }
+    }
+}
