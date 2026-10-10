@@ -5,6 +5,7 @@ pub const SCOPES:&[&str]=&["projects:read","files:read","files:write","commands:
 pub fn required_scopes(tool:&str)->&'static [&'static str]{
     match tool{
         "node_list"|"list_workspaces"|"list_projects"|"inspect_project"|"get_task_checkpoint"|"continue_task"|"list_task_checkpoints"=>&["projects:read"],
+        "node_write"=>&["files:write","commands:execute","git:write"],
         "node_read"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"=>&["files:read"],
         "write_file"|"apply_patch"|"create_directory"=>&["files:write"],
         "run_command"|"run_shell"=>&["commands:execute","files:write"],

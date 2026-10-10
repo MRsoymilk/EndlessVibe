@@ -29,6 +29,12 @@ The local `http://127.0.0.1:20001/nodes` page shows discovered nodes, explicit m
 
 For browser use the parent exposes loopback-only `POST /api/nodes/read` with `{\"node_id\":\"...\",\"tool\":\"read_file\",\"arguments\":{\"workspace\":\"...\",\"project\":\"...\",\"path\":\"src/main.rs\"}}`.
 
+## Phase 4 — Remote Mutations, Jobs and Git Checkpoints
+
+The parent exposes `node_write` for explicitly supported remote operations: `write_file`, `apply_patch`, `create_directory`, `run_command`, `get_job`, `get_job_output`, `cancel_job`, and `git_commit`. The request contains `node_id`, `tool`, and `arguments` with exact child `workspace` and `project`. The child re-checks the pairing grant and its current local Project permissions, preserves local file hash and Git commit/diff concurrency checks, and stores Jobs in its own SQLite database. Remote shell, push, Docker and recursive forwarding are disabled. Parent MCP requires `files:write`, `commands:execute` and `git:write`; this is an intentional conservative scope combination. File-content mutation requests are represented by digests in parent/child operation logs.
+
+A remote command returns its durable child-owned Job ID. Query it with `node_write` and `tool=get_job` or `get_job_output` using exact child workspace/project. Network timeout does not imply the Job failed, and **must not automatically replay mutations**. Use the original idempotency `request_id` if reconciling the same command.
+
 ## Planned authorization and routing invariants
 
 - Pairing must use an encrypted authenticated protocol. The discovery name and IP are untrusted hints, not identities.
