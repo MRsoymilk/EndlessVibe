@@ -14,7 +14,9 @@ pub async fn javascript_mcp()->impl IntoResponse{([(header::CONTENT_TYPE,"text/j
 pub async fn javascript_charts()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/charts.js"))}
 pub async fn uplot_javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.iife.min.js"))}
 pub async fn uplot_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.min.css"))}
-pub async fn favicon()->impl IntoResponse{StatusCode::NO_CONTENT}
+const BRAND_ICON:&[u8]=include_bytes!("../EndlessVibe.png");
+pub async fn brand_icon()->impl IntoResponse{([(header::CONTENT_TYPE,"image/png")],axum::body::Bytes::from_static(BRAND_ICON))}
+pub async fn favicon()->impl IntoResponse{brand_icon().await}
 pub async fn status(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.snapshot())}
 pub async fn metrics(State(rt):State<Arc<Runtime>>)->impl IntoResponse{match rt.db.dashboard_metrics(3600,60){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn activity(State(rt):State<Arc<Runtime>>)->impl IntoResponse{let audits=rt.db.audits(50);let jobs=rt.jobs.list(crate::tools::types::ListJobsArgs{workspace:None,project:None,task_id:None,limit:30});match(audits,jobs){(Ok(audits),Ok(jobs))=>Json(json!({"generated_at":crate::util::now(),"audits":audits,"jobs":jobs["jobs"]})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}

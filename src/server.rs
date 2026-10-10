@@ -18,7 +18,7 @@ pub fn create_router(rt:Arc<Runtime>)->Router{
     let mcp=StreamableHttpService::new(move||Ok(EndlessVibeMcp::new(tool_state.clone())),LocalSessionManager::default().into(),transport);
     let protected:Router<Arc<Runtime>>=Router::new().route_service("/mcp",mcp.clone()).route_service("/mcp/",mcp).route_layer(middleware::from_fn_with_state(rt.clone(),auth::protect));
     let oauth=Router::new().route("/.well-known/oauth-authorization-server",get(auth::oauth_metadata)).route("/.well-known/oauth-protected-resource",get(auth::protected_metadata)).route("/.well-known/oauth-protected-resource/mcp",get(auth::protected_metadata)).route("/oauth/register",post(auth::register)).route("/oauth/authorize",get(auth::authorize).post(auth::consent)).route("/oauth/token",post(auth::token)).route("/oauth/revoke",post(auth::revoke)).layer(DefaultBodyLimit::max(16384));
-    Router::new().route("/health",get(web::status)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
+    Router::new().route("/health",get(web::status)).route("/favicon.ico",get(web::favicon)).route("/assets/EndlessVibe.png",get(web::brand_icon)).route("/assets/app.css",get(web::css)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
 }
 
 pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
@@ -32,6 +32,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/config",get(web::home))
         .route("/nodes",get(web::home))
         .route("/assets/app.css",get(web::css))
+        .route("/assets/EndlessVibe.png",get(web::brand_icon))
         .route("/assets/app.js",get(web::javascript))
         .route("/assets/js/common.js",get(web::javascript_common))
         .route("/assets/js/mcp.js",get(web::javascript_mcp))
