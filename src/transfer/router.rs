@@ -15,6 +15,21 @@ fn permission(tool:&str)->Option<&'static str>{match tool{"write_file"|"apply_pa
 fn args<T:DeserializeOwned>(v:&Value)->Result<T>{serde_json::from_value(v.clone()).context("Invalid remote tool parameters")}
 fn target(v:&Value)->Result<(String,String)>{let w=v.get("workspace").and_then(Value::as_str).context("Remote request requires an exact workspace")?;let p=v.get("project").and_then(Value::as_str).context("Remote request requires an exact project")?;if w.is_empty()||p.is_empty(){bail!("Remote Project names cannot be empty");}Ok((w.into(),p.into()))}
 fn read_grant<'a>(peer:&'a Peer,w:&str,p:&str)->Result<&'a super::secure::Grant>{peer.grants.iter().find(|g|g.workspace==w&&g.project==p&&g.read).context("Remote read access was not granted for this Project")}
+
+fn enrich_job_status(rt:&Runtime,row:&mut Value,workspace:&str,project:&str){
+ let Some(job_id)=row.get("job_id").and_then(Value::as_str).map(str::to_owned)else{return;};
+ match rt.jobs.get(&job_id){
+  Ok(job) if job["workspace"]==workspace&&job["project"]==project=>{
+   row["job_status"]=job["status"].clone();
+   row["recovery_action"]=json!(if matches!(job["status"].as_str(),Some("queued"|"running")){"poll_job"}else{"inspect_job"});
+  }
+  _=>{
+   row["job_status"]=json!("unavailable");
+   row["recovery_action"]=json!("inspect_project_before_new_request");
+  }
+ }
+}
+
 pub async fn dispatch(rt:Arc<Runtime>,transfer:Arc<TransferManager>,wire:Wire)->Result<Value>{
  if wire.kind!="call"||wire.tool.len()>64||wire.tool.is_empty(){bail!("Invalid Transfer RPC");}
  let peer=transfer.incoming_peer(&wire.node_id,&wire.token)?;
@@ -50,8 +65,8 @@ async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&st
  "git_log"=>{read_grant(&peer,w,p)?;let a:LogArgs=args(&v)?;rt.project_exact(w,p)?;rt.asynchronous_project("transfer_git_log",w,p,move|rt,project|async move{git::log(&rt,&project,a).await}).await}
  "get_task_checkpoint"=>{let a:TaskArgs=args(&v)?;if a.workspace!=w||a.project!=p{bail!("Remote checkpoint request must use exact authorized Project");}tasks::get(&rt.db,a)}
  "continue_task"=>{let a:ContinueTaskArgs=args(&v)?;if a.workspace!=w||a.project!=p{bail!("Remote recovery request must use exact authorized Project");}tasks::continue_recovery(&rt.db,a)}
- "request_status"=>{let id=v.get("request_id").and_then(Value::as_str).context("request_id is required")?;{let mut state=super::idempotency::status(&rt.db,&peer.node_id,id,w,p)?;if let Some(job_id)=state["job_id"].as_str(){match rt.jobs.get(job_id){Ok(job) if job["workspace"]==w&&job["project"]==p=>{state["job_status"]=job["status"].clone();state["recovery_action"]=json!(if matches!(job["status"].as_str(),Some("queued"|"running")){"poll_job"}else{"inspect_job"});},_=>{state["job_status"]=json!("unavailable");state["recovery_action"]=json!("inspect_project_before_new_request");}}}Ok(state)}}
- "request_history"=>{let limit=v.get("limit").and_then(Value::as_u64).unwrap_or(20);if !(1..=50).contains(&limit){bail!("Transfer history limit must be 1..50");}super::idempotency::history(&rt.db,&peer.node_id,w,p,limit as usize)}
+ "request_status"=>{let id=v.get("request_id").and_then(Value::as_str).context("request_id is required")?;let mut state=super::idempotency::status(&rt.db,&peer.node_id,id,w,p)?;enrich_job_status(&rt,&mut state,w,p);Ok(state)}
+ "request_history"=>{let limit=v.get("limit").and_then(Value::as_u64).unwrap_or(20);if !(1..=50).contains(&limit){bail!("Transfer history limit must be 1..50");}let mut history=super::idempotency::history(&rt.db,&peer.node_id,w,p,limit as usize)?;if let Some(entries)=history["requests"].as_array_mut(){for entry in entries{enrich_job_status(&rt,entry,w,p);}}Ok(history)}
  "list_task_checkpoints"=>{let query:ListTaskCheckpointsArgs=args(&v)?;if query.workspace.as_deref()!=Some(w)||query.project.as_deref()!=Some(p){bail!("Remote checkpoint query must use exact authorized Project");}tasks::list(&rt.db,query)}
  "write_file"=>{let a:WriteArgs=args(&v)?;rt.sync_project("transfer_write_file",w,p,move|rt,project|filesystem::write(&rt,&project,a)).await}
  "apply_patch"=>{let a:PatchArgs=args(&v)?;rt.sync_project("transfer_apply_patch",w,p,move|rt,project|filesystem::patch(&rt,&project,a)).await}

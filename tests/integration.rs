@@ -31,6 +31,11 @@ let job=parent.rt.transfer.call_node(&node,"run_command",json!({"workspace":"dem
 let job_id=job["job_id"].as_str().unwrap().to_owned();
 for _ in 0..80{let status=parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.unwrap();if status["status"]=="succeeded"{break;}tokio::time::sleep(Duration::from_millis(40)).await;}
 let status=parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.unwrap();assert_eq!(status["status"],"succeeded");
+let recent=parent.rt.transfer.call_node(&node,"request_history",json!({"workspace":"demo","project":"demo","limit":20})).await.unwrap();
+let linked=recent["requests"].as_array().unwrap().iter().find(|r|r["request_id"]=="transfer-test-version").unwrap();
+assert_eq!(linked["state"],"completed");
+assert_eq!(linked["job_status"],"succeeded");
+assert_eq!(linked["job_id"],job_id);
 let output=parent.rt.transfer.call_node(&node,"get_job_output",json!({"workspace":"demo","project":"demo","job_id":job_id,"limit":2048})).await.unwrap();assert!(output["output"].as_str().unwrap().contains("git version"));
 let task_id=job["task_id"].as_str().unwrap();let checkpoint=parent.rt.transfer.call_node(&node,"get_task_checkpoint",json!({"workspace":"demo","project":"demo","task_id":task_id})).await.unwrap();assert_eq!(checkpoint["latest"]["status"],"succeeded");let recovery=parent.rt.transfer.call_node(&node,"continue_task",json!({"workspace":"demo","project":"demo","task_id":task_id})).await.unwrap();assert_eq!(recovery["resolved_task_id"],task_id);
 let history=parent.rt.transfer.call_node(&node,"list_task_checkpoints",json!({"workspace":"demo","project":"demo","task_id":task_id,"limit":5})).await.unwrap();assert_eq!(history["checkpoints"].as_array().unwrap().len(),1);

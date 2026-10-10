@@ -29,7 +29,9 @@ async function loadRequestHistory(peer,w,p){
   const subtitle=node("span","node-muted",String(record.tool||"unknown")+" · "+(record.updated?new Date(record.updated*1000).toLocaleString():"time unavailable"));
   meta.append(identity,subtitle);
   const actions=node("div","node-history-actions");
-  actions.append(tag,btn("Inspect",async()=>detail(w+"/"+p+" · Request "+record.request_id,await remote(peer.node_id,"request_status",{workspace:w,project:p,request_id:record.request_id}))));
+  actions.append(tag);
+  if(record.job_status){const jobTag=node("span","node-history-state","Job: "+record.job_status);jobTag.dataset.state=String(record.job_status);actions.append(jobTag);}
+  actions.append(btn("Inspect",async()=>detail(w+"/"+p+" · Request "+record.request_id,await remote(peer.node_id,"request_status",{workspace:w,project:p,request_id:record.request_id}))));
   row.append(meta,actions);list.append(row);
  }
 }
