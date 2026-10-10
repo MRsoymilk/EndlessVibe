@@ -30,6 +30,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/operations",get(web::home))
         .route("/mcp",get(web::home))
         .route("/config",get(web::home))
+        .route("/sandbox",get(web::home))
         .route("/nodes",get(web::home))
         .route("/assets/app.css",get(web::css))
         .route("/assets/theme.css",get(web::theme_css))

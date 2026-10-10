@@ -12,15 +12,15 @@
 <link rel="stylesheet" href="/vendor/uPlot/uPlot.min.css">
 <script src="/assets/js/preferences-init.js"></script>
 <link rel="stylesheet" href="/assets/app.css?v=design-2">
-<link rel="stylesheet" href="/assets/theme.css?v=design-2">
+<link rel="stylesheet" href="/assets/theme.css?v=design-3">
 <script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
-<script type="module" src="/assets/app.js?v=dashboard-data-14" defer></script>
+<script type="module" src="/assets/app.js?v=dashboard-data-15" defer></script>
 </head>
 <body>
 <main class="shell">
 <header class="topbar">
 <div class="brand"><img class="brand-icon" src="/assets/EndlessVibe.png" width="76" height="48" alt="" decoding="async"><div><p class="eyebrow">ENDLESSVIBE</p><h1>Dashboard</h1></div></div>
-<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="projects" href="/projects">Projects</a><a data-nav="nodes" href="/nodes">Nodes</a><a data-nav="tasks" href="/tasks">Tasks</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="mcp" href="/mcp">MCP</a><a data-nav="config" href="/config">配置</a></nav>
+<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="projects" href="/projects">Projects</a><a data-nav="nodes" href="/nodes">Nodes</a><a data-nav="tasks" href="/tasks">Tasks</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="mcp" href="/mcp">MCP</a><a data-nav="sandbox" href="/sandbox">沙箱</a><a data-nav="config" href="/config">配置</a></nav>
 <div class="display-preferences" role="group" aria-label="主题与语言"><label class="display-preference" for="theme-select"><span class="pref-icon" aria-hidden="true">◐</span><span>主题</span><select id="theme-select" aria-label="主题"><option value="dark">深色</option><option value="light">浅色</option></select></label><label class="display-preference" for="language-select"><span class="pref-icon" aria-hidden="true">文</span><span>语言</span><select id="language-select" aria-label="语言"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
 <div id="header-status" class="header-status pending"><span class="dot"></span><span id="header-status-text">检查中</span></div>
 </header>
@@ -123,18 +123,15 @@
 </div>
 </section>
 
-<section class="page" data-page="config">
-<div class="page-title"><div><p class="eyebrow">CONFIGURATION</p><h2>配置</h2><p>只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。</p></div><div class="config-reload-actions"><span id="config-restart-badge" class="badge-note">检查配置状态</span><button type="button" id="config-reload">Reload project config</button></div></div>
-<div id="config-reload-status" class="write-status" role="status" aria-live="polite"></div>
+<section class="page" data-page="sandbox">
+<div class="page-title"><div><p class="eyebrow">EXECUTION SECURITY</p><h2>沙箱</h2><p>查看当前运行的执行隔离等级、切换受支持的执行后端，并了解 Windows AppContainer 的开发状态。资源限制不等于安全沙箱。</p></div><span id="sandbox-runtime-os">正在检测操作系统</span></div>
 <div class="config-grid">
-<section class="config-card"><div class="config-heading"><h3>Server / Dashboard</h3><span>NETWORK</span></div><dl id="config-server" class="config-list"></dl></section>
-<section class="config-card"><div class="config-heading"><h3>Security</h3><span>AUTH</span></div><dl id="config-security" class="config-list"></dl></section>
-<section class="config-card"><div class="config-heading"><h3>Execution</h3><span>SANDBOX</span></div><dl id="config-execution" class="config-list"></dl></section>
+<section class="config-card full" id="sandbox-overview"><div class="config-heading"><h3>当前执行隔离</h3><span id="sandbox-security-level">LOADING</span></div><div class="sandbox-state-grid"><article><p class="label">当前运行</p><strong id="sandbox-running-mode">—</strong><p class="caption">已加载的服务后端</p></article><article><p class="label">已保存配置</p><strong id="sandbox-saved-mode">—</strong><p class="caption" id="sandbox-restart-note">检查配置版本</p></article><article><p class="label">资源限制</p><strong id="sandbox-job-limits">—</strong><p class="caption">Windows Job Objects / Linux 限额</p></article></div><p class="config-note" id="sandbox-security-message">正在读取执行隔离状态…</p></section>
 <section class="config-card full" id="execution-backend-card">
 <div class="config-heading"><h3>执行后端</h3><span>RESTART REQUIRED · HOST SECURITY</span></div>
-<p class="config-note">选择本机命令执行方式。Windows 和 macOS 不支持 bubblewrap；修改仅写入配置，重启 EndlessVibe 后生效。</p>
+<p class="config-note">Windows AppContainer 执行后端尚未开放；Windows Job Objects 仅限制进程资源，不提供文件与网络隔离。保存执行后端后需要重启 EndlessVibe。</p>
 <form id="execution-backend-editor" class="settings-editor">
-<div class="settings-fields"><label>执行方式<select name="backend" required><option value="disabled">disabled · 禁止命令执行</option><option value="bubblewrap">bubblewrap · Linux 沙箱</option><option value="host">host · 无沙箱（高风险）</option></select></label></div>
+<div class="settings-fields"><label>执行方式<select name="backend" required><option value="disabled">disabled · 禁止命令执行</option><option value="bubblewrap">bubblewrap · Linux 沙箱</option><option value="host">host · 无沙箱（高风险）</option><option value="appcontainer" disabled>appcontainer · Windows 隔离（开发中，暂不可选）</option></select></label></div>
 <div id="execution-host-risk" class="execution-host-risk" hidden>
 <p>高风险：host 模式不提供沙箱隔离。启用后，已获执行权限的 Project 和配对父节点可在当前服务账号权限范围内运行本机命令，包括访问该账号可读取的文件与网络。</p>
 <label class="docker-risk"><input type="checkbox" name="acknowledge_unsafe_host_execution"> 我理解无沙箱执行及远程命令的风险，并明确同意启用 host 后端</label>
@@ -143,8 +140,26 @@
 <div class="config-reload-actions"><button type="submit">保存执行后端</button><span id="execution-backend-status" class="write-status" role="status" aria-live="polite"></span></div>
 </form>
 </section>
-<section class="config-card full"><div class="config-heading"><h3>Readonly Mounts</h3><span>RESTART REQUIRED</span></div><p class="config-note">直接编辑 <code>[execution].readonly_mounts</code>。Source 必须是宿主机已存在的绝对路径；Target 必须位于 <code>/opt/...</code> 或 <code>/cache-readonly/...</code>。保存只写入配置，不会热重载，重启 EndlessVibe 后生效。</p><div id="readonly-mount-list" class="mount-editor-list"></div><div class="mount-editor-actions"><button type="button" id="readonly-mount-add">Add mount</button><button type="button" id="readonly-mount-save">Save readonly mounts</button><span id="readonly-mount-status" class="write-status" role="status" aria-live="polite"></span></div></section>
+
+<section class="config-card full" id="sandbox-capabilities"><div class="config-heading"><h3>隔离能力</h3><span>PLATFORM CAPABILITIES</span></div><div class="sandbox-stage-list">
+<article><div class="sandbox-stage-title"><strong>Job Objects</strong><span id="sandbox-job-status">检查平台</span></div><p>Windows 上限制任务的进程树、内存和进程数量。不能阻止读写服务账户可访问的文件或访问网络。</p></article>
+<article><div class="sandbox-stage-title"><strong>AppContainer</strong><span id="sandbox-appcontainer-status">开发中 · 不可选</span></div><p>已在 Windows 测试构建中验证低权限令牌、默认网络拒绝、私有文件暂存、日志读取及异常清理。尚未支持生产任务执行与任意程序的标准输出捕获，不能启用。</p></article>
+<article><div class="sandbox-stage-title"><strong>Bubblewrap</strong><span id="sandbox-bubblewrap-status">检查平台</span></div><p>Linux 专用的命名空间隔离；Windows 不支持。只有 Linux 才可以选择该执行后端。</p></article>
+</div></section>
 <section class="config-card full"><div class="config-heading"><h3>Sandbox Diagnostics</h3><span id="sandbox-updated">NOT CHECKED</span></div><p class="config-note">只探测基础 bubblewrap namespace 和程序可见性，不挂载 Project、不运行项目代码。</p><div class="config-reload-actions"><button type="button" id="sandbox-check">Check Sandbox</button><span id="sandbox-check-status" class="write-status" role="status" aria-live="polite"></span></div><dl id="config-sandbox-summary" class="config-list"></dl><div id="sandbox-program-list" class="activity-list empty-state">尚未执行 sandbox diagnostics</div></section>
+</div>
+</section>
+
+<section class="page" data-page="config">
+<div class="page-title"><div><p class="eyebrow">CONFIGURATION</p><h2>配置</h2><p>只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。</p></div><div class="config-reload-actions"><span id="config-restart-badge" class="badge-note">检查配置状态</span><button type="button" id="config-reload">Reload project config</button></div></div>
+<div id="config-reload-status" class="write-status" role="status" aria-live="polite"></div>
+<div class="config-grid">
+<section class="config-card"><div class="config-heading"><h3>Server / Dashboard</h3><span>NETWORK</span></div><dl id="config-server" class="config-list"></dl></section>
+<section class="config-card"><div class="config-heading"><h3>Security</h3><span>AUTH</span></div><dl id="config-security" class="config-list"></dl></section>
+<section class="config-card"><div class="config-heading"><h3>Execution</h3><span>SANDBOX</span></div><dl id="config-execution" class="config-list"></dl></section>
+<section class="config-card full sandbox-settings-link"><div class="config-heading"><h3>沙箱 / 执行隔离</h3><span>MANAGE SEPARATELY</span></div><p class="config-note">隔离状态、执行后端选择与沙箱诊断已移至独立页面。查看当前 Windows Job Objects 和 AppContainer 的实际可用状态。</p><a class="sandbox-nav-link" href="/sandbox">打开沙箱管理 ↗</a></section>
+<section class="config-card full"><div class="config-heading"><h3>Readonly Mounts</h3><span>RESTART REQUIRED</span></div><p class="config-note">直接编辑 <code>[execution].readonly_mounts</code>。Source 必须是宿主机已存在的绝对路径；Target 必须位于 <code>/opt/...</code> 或 <code>/cache-readonly/...</code>。保存只写入配置，不会热重载，重启 EndlessVibe 后生效。</p><div id="readonly-mount-list" class="mount-editor-list"></div><div class="mount-editor-actions"><button type="button" id="readonly-mount-add">Add mount</button><button type="button" id="readonly-mount-save">Save readonly mounts</button><span id="readonly-mount-status" class="write-status" role="status" aria-live="polite"></span></div></section>
+
 <section class="config-card"><div class="config-heading"><h3>Limits</h3><span>RESTART REQUIRED</span></div><p class="config-note">在线修改 <code>[limits]</code>；数值通过服务器验证并保存，重启 EndlessVibe 后生效。单位为 bytes / seconds。</p><dl id="config-limits" class="config-list"></dl><form id="limits-editor" class="settings-editor"><div class="settings-fields"><label>Max file bytes<input name="max_file_bytes" type="number" min="4096" max="16777216" step="1" required></label><label>Max read bytes<input name="max_read_bytes" type="number" min="1" step="1" required></label><label>Max output bytes<input name="max_output_bytes" type="number" min="4096" max="8388608" step="1" required></label><label>Command timeout (s)<input name="command_timeout_seconds" type="number" min="1" max="3600" step="1" required></label><label>Max jobs<input name="max_jobs" type="number" min="1" max="16" step="1" required></label><label>Retained jobs<input name="retained_jobs" type="number" min="1" max="1000" step="1" required></label><label>Search max files<input name="search_max_files" type="number" min="1" max="100000" step="1" required></label><label>Search max bytes<input name="search_max_bytes" type="number" min="4096" max="1073741824" step="1" required></label></div><div class="config-reload-actions"><button type="submit">Save limits</button><span id="limits-editor-status" class="write-status" role="status" aria-live="polite"></span></div></form></section>
 <section class="config-card"><div class="config-heading"><h3>Git</h3><span>RESTART REQUIRED</span></div><p class="config-note">修改服务的 Git 可执行文件路径及提交身份。更改不会执行 Git 命令或推送代码，重启后生效。</p><dl id="config-git" class="config-list"></dl><form id="git-editor" class="settings-editor"><div class="settings-fields"><label>Git executable<input name="executable" type="text" placeholder="输入 Git 可执行文件路径或名称" required></label><label>Author name<input name="author_name" type="text" maxlength="160" required></label><label>Author email<input name="author_email" type="email" maxlength="254" required></label></div><div class="config-reload-actions"><button type="submit">Save Git</button><span id="git-editor-status" class="write-status" role="status" aria-live="polite"></span></div></form></section>
 <section class="config-card full"><div class="config-heading"><h3>Transfer / LAN Nodes</h3><span>RESTART REQUIRED</span></div><p class="config-note">开启 Transfer 后发布局域网发现信息，并通过独立 TLS 端口接收配对/授权操作。不会把本地 Dashboard 或 MCP OAuth 入口开放到局域网。</p><dl id="config-transfer" class="config-list"></dl><form id="transfer-editor" class="settings-editor"><div class="settings-fields"><label>Node display name<input name="display_name" type="text" maxlength="64" required></label><label>Listener IP:Port<input name="listen" type="text" placeholder="0.0.0.0:20002" required></label></div><div class="docker-options"><label><input name="enabled" type="checkbox"> Enable Transfer</label><label><input name="advertise" type="checkbox"> Advertise LAN node</label><label><input name="discover" type="checkbox"> Discover LAN nodes</label></div><div class="config-reload-actions"><button type="submit">Save Transfer settings</button><span id="transfer-editor-status" class="write-status" role="status" aria-live="polite"></span></div></form></section>

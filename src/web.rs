@@ -92,3 +92,24 @@ fn mutation_response(result:anyhow::Result<Value>)->Response{
 }
 pub async fn add_project(State(rt):State<Arc<Runtime>>,Json(request):Json<AddProjectRequest>)->Response{mutation_response(rt.dashboard_add_project(request))}
 pub async fn update_project(State(rt):State<Arc<Runtime>>,AxumPath((workspace,project)):AxumPath<(String,String)>,Json(request):Json<UpdateProjectRequest>)->Response{mutation_response(rt.dashboard_update_project(&workspace,&project,request))}
+
+#[cfg(test)]
+mod dashboard_sandbox_page_tests{
+    #[test]
+    fn dashboard_sandbox_navigation_and_backend_safety(){
+        const HTML:&str=include_str!("../web/index.html");
+        const SCRIPT:&str=include_str!("../web/app.js");
+        const ROUTES:&str=include_str!("server.rs");
+        assert!(ROUTES.contains(".route(\"/sandbox\",get(web::home))"));
+        assert!(HTML.contains("data-nav=\"sandbox\" href=\"/sandbox\""));
+        assert!(HTML.contains("data-page=\"sandbox\""));
+        assert_eq!(HTML.matches("id=\"execution-backend-editor\"").count(),1);
+        assert_eq!(HTML.matches("id=\"sandbox-check\"").count(),1);
+        assert!(HTML.contains("<option value=\"appcontainer\" disabled>"));
+        assert!(SCRIPT.contains("option.value===\"appcontainer\")option.disabled=true"));
+        assert!(SCRIPT.contains("location.pathname===\"/sandbox\"?\"sandbox\""));
+        assert!(SCRIPT.contains("currentPage===\"sandbox\""));
+        // AppContainer remains test-only and may never be advertised as an
+        // actually selectable or active command backend.
+    }
+}

@@ -4,7 +4,7 @@
  * never code blocks, tool output, project paths, secrets, or user input values.
  */
 const zhToEn = new Map(Object.entries({
-  "首页":"Home","活动":"Activity","日志":"Logs","配置":"Settings","任务":"Tasks","项目":"Projects",
+  "首页":"Home","活动":"Activity","日志":"Logs","配置":"Settings","沙箱":"Sandbox","任务":"Tasks","项目":"Projects",
   "节点":"Nodes","工具":"Tools","文件":"Files","命令":"Commands","连接":"Connection","其他":"Other",
   "保存":"Save","取消":"Cancel","刷新":"Refresh","删除":"Delete","查看":"View","详情":"Details",
   "深色":"Dark","浅色":"Light","主题":"Theme","语言":"Language","简体中文":"简体中文",
@@ -68,6 +68,21 @@ const zhToEn = new Map(Object.entries({
   "按职责分类显示当前服务实际暴露的工具；类别可折叠。":"Server tools are grouped by function. Click a group to expand or collapse it.",
   "只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。":"Only non-sensitive settings are displayed. Keys, tokens, and credentials are not returned by the Dashboard.",
 
+  "当前执行隔离":"Current execution isolation",
+  "当前运行":"Active backend",
+  "已加载的服务后端":"Backend loaded by the running service",
+  "已保存配置":"Saved configuration",
+  "配置待重启生效":"Restart required to apply configuration",
+  "配置已生效":"Configuration applied",
+  "检查配置版本":"Checking configuration revision",
+  "资源限制":"Resource limits",
+  "隔离能力":"Isolation capabilities",
+  "沙箱 / 执行隔离":"Sandbox / execution isolation",
+  "打开沙箱管理 ↗":"Open sandbox management ↗",
+  "正在检测操作系统":"Detecting operating system",
+  "开发中 · 不可选":"In development · Unavailable",
+  "检查平台":"Checking platform",
+  "appcontainer · Windows 隔离（开发中，暂不可选）":"appcontainer · Windows isolation (in development, unavailable)",
   "执行后端":"Execution backend",
   "选择本机命令执行方式。Windows 和 macOS 不支持 bubblewrap；修改仅写入配置，重启 EndlessVibe 后生效。":"Choose the local command execution backend. Windows and macOS do not support bubblewrap. Saving changes the config only; restart to apply.",
   "执行方式":"Execution mode",
