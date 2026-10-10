@@ -342,6 +342,108 @@ fn launch_isolated_test(
 mod tests{
     use super::*;
 
+    // The AppContainer child opens its own private log files and then changes
+    // only its *own* standard handles. This shares NO handles with the parent
+    // service, avoiding the unsafe cross-token inheritance path.
+    #[test]
+    fn isolated_process_writes_separate_stdout_stderr_files(){
+        if std::env::var("ENDLESSVIBE_DIRECT_STDIO_CHILD").ok().as_deref()!=Some("1"){return;}
+        use windows_sys::Win32::System::Console::{
+            SetStdHandle,STD_OUTPUT_HANDLE,STD_ERROR_HANDLE,
+        };
+        use std::os::windows::io::AsRawHandle;
+        assert!(has_appcontainer_token(unsafe{GetCurrentProcess()}).unwrap());
+        let out_name=std::env::var("ENDLESSVIBE_STDOUT_FILE").unwrap();
+        let err_name=std::env::var("ENDLESSVIBE_STDERR_FILE").unwrap();
+        let ack_name=std::env::var("ENDLESSVIBE_STDIO_ACK_FILE").unwrap();
+        let mut ack=fs::OpenOptions::new().write(true).create_new(true).open(&ack_name).unwrap();
+        ack.write_all(b"0").unwrap();
+        ack.sync_all().unwrap();
+        drop(ack);
+        let out=fs::OpenOptions::new().write(true).create_new(true).open(out_name).unwrap();
+        let err=fs::OpenOptions::new().write(true).create_new(true).open(err_name).unwrap();
+        assert_ne!(unsafe{SetStdHandle(STD_OUTPUT_HANDLE,out.as_raw_handle() as _)},0);
+        assert_ne!(unsafe{SetStdHandle(STD_ERROR_HANDLE,err.as_raw_handle() as _)},0);
+        std::io::stdout().write_all(b"APPCONTAINER-STDOUT-EARLY\n").unwrap();
+        std::io::stdout().flush().unwrap();
+        std::io::stderr().write_all(b"APPCONTAINER-STDERR-EARLY\n").unwrap();
+        std::io::stderr().flush().unwrap();
+        // A test handshake proves the parent saw the first bytes while the
+        // process was still alive, even under parallel test scheduling.
+        let until=std::time::Instant::now()+std::time::Duration::from_secs(6);
+        while fs::read(&ack_name).unwrap_or_default()!=b"1"{
+            assert!(std::time::Instant::now()<until,
+                "Parent did not acknowledge the first streamed bytes");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::io::stdout().write_all(b"APPCONTAINER-STDOUT-DONE\n").unwrap();
+        std::io::stdout().flush().unwrap();
+        std::io::stderr().write_all(b"APPCONTAINER-STDERR-DONE\n").unwrap();
+        std::io::stderr().flush().unwrap();
+        // The test harness may print after this function returns; preserve
+        // the handles until the entire restricted test process terminates.
+        std::mem::forget(out);
+        std::mem::forget(err);
+    }
+
+    #[test]
+    fn appcontainer_direct_stdio_is_readable_while_process_is_running(){
+        use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
+        let profile=Profile::create().unwrap();
+        let outputs=profile.prepare_results().unwrap();
+        let private=profile.folder().unwrap().join("LocalState/EndlessVibe");
+        fs::create_dir_all(&private).unwrap();
+        let exe=private.join("direct-stdio-probe.exe");
+        fs::copy(std::env::current_exe().unwrap(),&exe).unwrap();
+        let stdout_name=outputs.join("child-stdout.log");
+        let stderr_name=outputs.join("child-stderr.log");
+        let ack_name=outputs.join("stream-observed.ack");
+        let observed=Arc::new(AtomicBool::new(false));
+        let signal=observed.clone();
+        let watch_dir=outputs.clone();
+        let watch_ack=ack_name.clone();
+        let watcher=std::thread::spawn(move||{
+            let root=crate::security::paths::Root::open(&watch_dir).unwrap();
+            let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
+            while std::time::Instant::now()<until{
+                if let Ok(Some(chunk))=root.read_optional("child-stdout.log",1024){
+                    if chunk.windows(b"APPCONTAINER-STDOUT-EARLY".len())
+                        .any(|bytes|bytes==b"APPCONTAINER-STDOUT-EARLY")
+                        && !chunk.windows(b"APPCONTAINER-STDOUT-DONE".len())
+                           .any(|bytes|bytes==b"APPCONTAINER-STDOUT-DONE"){
+                        if fs::write(&watch_ack,b"1").is_ok(){
+                            signal.store(true,Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let name="tools::windows_appcontainer::tests::isolated_process_writes_separate_stdout_stderr_files";
+        let exit=launch_isolated_test(&profile,&exe,&format!("--exact {name} --nocapture"),
+            &[
+                ("ENDLESSVIBE_DIRECT_STDIO_CHILD","1".into()),
+                ("ENDLESSVIBE_STDOUT_FILE",stdout_name.to_string_lossy().into_owned()),
+                ("ENDLESSVIBE_STDERR_FILE",stderr_name.to_string_lossy().into_owned()),
+                ("ENDLESSVIBE_STDIO_ACK_FILE",ack_name.to_string_lossy().into_owned()),
+            ]
+        ).unwrap();
+        watcher.join().unwrap();
+        assert_eq!(exit,0,"AppContainer redirected standard output probe failed");
+        assert!(observed.load(Ordering::SeqCst),
+            "Parent must observe first stdout bytes before the final output is written");
+        let stdout=profile.collect_result("child-stdout.log",2048).unwrap();
+        let stderr=profile.collect_result("child-stderr.log",2048).unwrap();
+        assert!(String::from_utf8_lossy(&stdout.bytes).contains("APPCONTAINER-STDOUT-EARLY"));
+        assert!(String::from_utf8_lossy(&stdout.bytes).contains("APPCONTAINER-STDOUT-DONE"));
+        assert!(String::from_utf8_lossy(&stderr.bytes).contains("APPCONTAINER-STDERR-EARLY"));
+        assert!(String::from_utf8_lossy(&stderr.bytes).contains("APPCONTAINER-STDERR-DONE"));
+        assert_eq!(stdout.sha256,crate::util::digest(&stdout.bytes));
+        assert_eq!(stderr.sha256,crate::util::digest(&stderr.bytes));
+    }
+
+
     #[test]
     fn child_creates_private_reviewable_output(){
         if std::env::var("ENDLESSVIBE_OUTPUT_CHILD").ok().as_deref()!=Some("1"){return;}

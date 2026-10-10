@@ -87,12 +87,22 @@ returns both its bytes and SHA-256 for review. Output collection does not
 modify the original Project. Publishing into a Project requires a separate
 authorized write_file operation with its normal expected SHA-256.
 
-This implementation remains compiled into Windows test targets only: it
-is NOT a selectable production execution backend or a general sandboxed
-Cargo runner. Windows CreateProcess standard-handle inheritance failed
-native validation; secure stdout/stderr forwarding is still a blocker,
-as are production job lifecycle integration and crash recovery. The
-unrestricted-handle diagnostic was discarded and not committed.
+Windows native tests also verify an AppContainer-owned file-backed standard
+output path. A cooperating restricted process creates its own private stdout
+and stderr files and updates its own process-local standard handles; the
+parent neither lends nor inherits service-owned handles. The privileged
+broker can read the initial stdout data while that process is still running,
+then review each completed file through the existing bounded, hash-checked
+output broker.
+
+This remains Windows test-only infrastructure, NOT a production execution
+backend. It demonstrates streaming for a cooperating AppContainer process,
+not transparent capture of arbitrary external executables. Output files may
+grow until the broker or job terminates them; disk quotas and live output
+budgets are still needed. The previous CreateProcess cross-token handle
+inheritance experiment failed native validation and was discarded. A
+production-safe command protocol, task lifecycle, and crash recovery remain
+required before enabling arbitrary Project commands.
 
 ### Windows MSVC toolchain in host jobs
 
