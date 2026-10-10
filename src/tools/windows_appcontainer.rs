@@ -35,6 +35,16 @@ use windows_sys::Win32::{
 
 const MAX_STAGED_FILE:usize=2*1024*1024;
 
+/// Output bytes are brokered back for explicit review. A separate authorized
+/// write_file call is required before any source Project mutation.
+#[derive(Debug)]
+pub(super) struct OutputArtifact{
+    pub(super) relative_path:String,
+    pub(super) bytes:Vec<u8>,
+    pub(super) sha256:String,
+}
+
+
 fn wide(s:&str)->Vec<u16>{s.encode_utf16().chain(std::iter::once(0)).collect()}
 unsafe fn read_wide_pointer(pointer:*const u16)->Result<OsString>{
     if pointer.is_null(){bail!("Windows returned a null AppContainer path");}
@@ -116,6 +126,28 @@ impl Profile{
         output.write_all(&bytes)?;
         output.sync_all()?;
         Ok(dest)
+    }
+
+    /// Prepare a fresh result directory before starting untrusted child code.
+    pub(super) fn prepare_results(&self)->Result<PathBuf>{
+        let directory=self.folder()?.join("LocalState/EndlessVibe/outputs");
+        fs::create_dir_all(&directory).context("Prepare AppContainer output directory")?;
+        let root=crate::security::paths::Root::open(&self.folder()?)?;
+        root.directory_path("LocalState/EndlessVibe/outputs")
+    }
+    /// Explicitly collect one file using a pinned capability-rooted reader.
+    /// No output is automatically copied into the original Project directory.
+    pub(super) fn collect_result(&self,relative:&str,max_bytes:usize)->Result<OutputArtifact>{
+        if max_bytes==0||max_bytes>MAX_STAGED_FILE{
+            bail!("AppContainer output limit must be between 1 byte and 2 MiB");
+        }
+        let relative_path=crate::security::paths::relative(relative,false)?;
+        let profile=crate::security::paths::Root::open(&self.folder()?)?;
+        let output_dir=profile.directory_path("LocalState/EndlessVibe/outputs")?;
+        let output_root=crate::security::paths::Root::open(&output_dir)?;
+        let bytes=output_root.read(relative,max_bytes)?;
+        let sha256=crate::util::digest(&bytes);
+        Ok(OutputArtifact{relative_path:relative_path.to_string_lossy().into_owned(),bytes,sha256})
     }
 }
 impl Drop for Profile{
@@ -309,6 +341,49 @@ fn launch_isolated_test(
 #[cfg(test)]
 mod tests{
     use super::*;
+
+    #[test]
+    fn child_creates_private_reviewable_output(){
+        if std::env::var("ENDLESSVIBE_OUTPUT_CHILD").ok().as_deref()!=Some("1"){return;}
+        assert!(has_appcontainer_token(unsafe{GetCurrentProcess()}).unwrap());
+        let target=std::env::var("ENDLESSVIBE_OUTPUT_TARGET").unwrap();
+        fs::write(target,b"generated in AppContainer").unwrap();
+    }
+    #[test]
+    fn output_broker_checks_bounds_and_keeps_original_project_unchanged(){
+        let profile=Profile::create().unwrap();
+        let outputs=profile.prepare_results().unwrap();
+        let project=tempfile::tempdir().unwrap();
+        let original=project.path().join("generated.txt");
+        fs::write(&original,b"unmodified original").unwrap();
+        let private=profile.folder().unwrap().join("LocalState/EndlessVibe");
+        fs::create_dir_all(&private).unwrap();
+        let exe=private.join("artifact-probe.exe");
+        fs::copy(std::env::current_exe().unwrap(),&exe).unwrap();
+        let target=outputs.join("generated.txt");
+        let test="tools::windows_appcontainer::tests::child_creates_private_reviewable_output";
+        let code=launch_isolated_test(&profile,&exe,&format!("--exact {test}"),
+            &[("ENDLESSVIBE_OUTPUT_CHILD","1".into()),
+              ("ENDLESSVIBE_OUTPUT_TARGET",target.to_string_lossy().into_owned())]).unwrap();
+        assert_eq!(code,0,"AppContainer artifact process did not complete");
+        let returned=profile.collect_result("generated.txt",1024).unwrap();
+        assert_eq!(returned.relative_path,"generated.txt");
+        assert_eq!(returned.bytes,b"generated in AppContainer");
+        assert_eq!(returned.sha256,crate::util::digest(&returned.bytes));
+        assert_eq!(fs::read(&original).unwrap(),b"unmodified original");
+        assert!(profile.collect_result("../generated.txt",1024).is_err());
+        assert!(profile.collect_result(".env",1024).is_err());
+        assert!(profile.collect_result("generated.txt",4).is_err());
+        assert!(profile.collect_result("generated.txt",0).is_err());
+        assert!(profile.collect_result("generated.txt",MAX_STAGED_FILE+1).is_err());
+        fs::write(outputs.join("huge.txt"),vec![b'a';1025]).unwrap();
+        assert!(profile.collect_result("huge.txt",1024).is_err());
+        let linked=outputs.join("hardlink.txt");
+        if fs::hard_link(&target,&linked).is_ok(){
+            assert!(profile.collect_result("hardlink.txt",1024).is_err());
+        }
+    }
+
 
     #[test]
     fn child_sleeps_when_isolated(){

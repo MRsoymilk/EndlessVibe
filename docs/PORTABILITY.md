@@ -78,10 +78,21 @@ child to its Job Object, the runner resumes the process. On normal exit,
 cancellation or timeout it terminates the entire Job Object and waits for
 the contained process to exit. Native tests exercise both forced-stop paths.
 
-This implementation is still compiled into Windows test targets only.
-It is NOT a selectable production execution backend or a general sandboxed
-Cargo runner. Secure stdout/stderr forwarding and controlled output-file
-publication are still required before enabling arbitrary Project commands.
+The Windows-native output broker now prepares a private per-profile
+outputs directory *before* launching the untrusted child. After the child
+exits, the parent may explicitly collect one relative output path through
+the capability-pinned file reader. Collection enforces sensitive-name and
+traversal checks, rejects links, bounds each file to at most 2 MiB and
+returns both its bytes and SHA-256 for review. Output collection does not
+modify the original Project. Publishing into a Project requires a separate
+authorized write_file operation with its normal expected SHA-256.
+
+This implementation remains compiled into Windows test targets only: it
+is NOT a selectable production execution backend or a general sandboxed
+Cargo runner. Windows CreateProcess standard-handle inheritance failed
+native validation; secure stdout/stderr forwarding is still a blocker,
+as are production job lifecycle integration and crash recovery. The
+unrestricted-handle diagnostic was discarded and not committed.
 
 ### Windows MSVC toolchain in host jobs
 
