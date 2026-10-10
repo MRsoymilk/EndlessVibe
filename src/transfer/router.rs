@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[derive(Clone,Debug,Serialize,Deserialize,JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeCallArgs{pub node_id:String,pub tool:String,#[serde(default)]pub arguments:Value,#[serde(default)]pub request_id:Option<String>}
-pub fn readonly(tool:&str)->bool{matches!(tool,"list_workspaces"|"list_projects"|"inspect_project"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"|"get_task_checkpoint"|"continue_task"|"list_task_checkpoints"|"request_status")}
+pub fn readonly(tool:&str)->bool{matches!(tool,"list_workspaces"|"list_projects"|"inspect_project"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"|"get_task_checkpoint"|"continue_task"|"list_task_checkpoints"|"request_status"|"request_history")}
 pub fn writable(tool:&str)->bool{matches!(tool,"write_file"|"apply_patch"|"create_directory"|"run_command"|"get_job"|"get_job_output"|"cancel_job"|"git_commit")}
 fn permission(tool:&str)->Option<&'static str>{match tool{"write_file"|"apply_patch"|"create_directory"=>Some("write"),"run_command"|"get_job"|"get_job_output"|"cancel_job"=>Some("execute"),"git_commit"=>Some("git"),t if readonly(t)=>Some("read"),_=>None}}
 fn args<T:DeserializeOwned>(v:&Value)->Result<T>{serde_json::from_value(v.clone()).context("Invalid remote tool parameters")}
@@ -51,6 +51,7 @@ async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&st
  "get_task_checkpoint"=>{let a:TaskArgs=args(&v)?;if a.workspace!=w||a.project!=p{bail!("Remote checkpoint request must use exact authorized Project");}tasks::get(&rt.db,a)}
  "continue_task"=>{let a:ContinueTaskArgs=args(&v)?;if a.workspace!=w||a.project!=p{bail!("Remote recovery request must use exact authorized Project");}tasks::continue_recovery(&rt.db,a)}
  "request_status"=>{let id=v.get("request_id").and_then(Value::as_str).context("request_id is required")?;{let mut state=super::idempotency::status(&rt.db,&peer.node_id,id,w,p)?;if let Some(job_id)=state["job_id"].as_str(){match rt.jobs.get(job_id){Ok(job) if job["workspace"]==w&&job["project"]==p=>{state["job_status"]=job["status"].clone();state["recovery_action"]=json!(if matches!(job["status"].as_str(),Some("queued"|"running")){"poll_job"}else{"inspect_job"});},_=>{state["job_status"]=json!("unavailable");state["recovery_action"]=json!("inspect_project_before_new_request");}}}Ok(state)}}
+ "request_history"=>{let limit=v.get("limit").and_then(Value::as_u64).unwrap_or(20);if !(1..=50).contains(&limit){bail!("Transfer history limit must be 1..50");}super::idempotency::history(&rt.db,&peer.node_id,w,p,limit as usize)}
  "list_task_checkpoints"=>{let query:ListTaskCheckpointsArgs=args(&v)?;if query.workspace.as_deref()!=Some(w)||query.project.as_deref()!=Some(p){bail!("Remote checkpoint query must use exact authorized Project");}tasks::list(&rt.db,query)}
  "write_file"=>{let a:WriteArgs=args(&v)?;rt.sync_project("transfer_write_file",w,p,move|rt,project|filesystem::write(&rt,&project,a)).await}
  "apply_patch"=>{let a:PatchArgs=args(&v)?;rt.sync_project("transfer_apply_patch",w,p,move|rt,project|filesystem::patch(&rt,&project,a)).await}

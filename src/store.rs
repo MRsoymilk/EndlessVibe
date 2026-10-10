@@ -22,7 +22,7 @@ impl Store {
         c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         migrations::migrate(&mut c)?;
         c.execute("UPDATE operation_log SET status='interrupted',finished=?1,error=CASE WHEN error='' THEN 'Service restarted before operation completed' ELSE error END WHERE status='running'",[crate::util::now()])?;
-        c.execute("UPDATE kv SET value=json_set(value,'$.state','interrupted') WHERE namespace='transfer_requests' AND json_extract(value,'$.state')='started'",[])?;
+        c.execute("UPDATE kv SET value=json_set(value,'$.state','interrupted','$.updated',?1) WHERE namespace='transfer_requests' AND json_extract(value,'$.state')='started'",[crate::util::now()])?;
         Ok(Self { connection: Mutex::new(c) })
     }
     pub fn transaction<T>(&self, op: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
