@@ -134,7 +134,7 @@ mod tests{
     use super::explicit_origin;
     #[test]
     fn allowed_origin_uses_explicit_ports(){
-        assert_eq!(explicit_origin("https://endlessvibe.soymilk.xin"),"https://endlessvibe.soymilk.xin:443");
+        assert_eq!(explicit_origin("https://mcp.example.com"),"https://mcp.example.com:443");
         assert_eq!(explicit_origin("http://localhost"),"http://localhost:80");
         assert_eq!(explicit_origin("https://example.test:8443/path"),"https://example.test:8443");
         assert_eq!(explicit_origin("http://[::1]"),"http://[::1]:80");

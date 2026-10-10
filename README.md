@@ -176,7 +176,7 @@ Authentication: OAuth 2.0
 **Windows 新安装**（工作空间目录必须已存在）：
 
 ```powershell
-.\target\debug\endlessvibe.exe --init --lan-only --workspace "project=D:\project"
+.\target\debug\endlessvibe.exe --init --lan-only --workspace "projects=C:\path\to\projects"
 ```
 
 **Windows 已执行过 `--init` 的现有安装**（不删除配置或 owner.key）：

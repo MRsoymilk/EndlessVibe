@@ -9,7 +9,8 @@ pub struct Config { pub server: Server, pub security: Security, pub limits: Limi
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Server { pub bind: SocketAddr, pub public_url: String, pub allowed_hosts: Vec<String>, pub lan_only: bool }
-impl Default for Server { fn default() -> Self { Self { bind: "0.0.0.0:20000".parse().unwrap(), public_url: "https://endlessvibe.soymilk.xin".into(), lan_only: false, allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "host.docker.internal".into(), "endlessvibe".into()] } } }
+// The public origin is intentionally a non-operational example, never an owner-specific domain.
+impl Default for Server { fn default() -> Self { Self { bind: "0.0.0.0:20000".parse().unwrap(), public_url: "https://mcp.example.com".into(), lan_only: false, allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "host.docker.internal".into(), "endlessvibe".into()] } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Security { pub data_dir: PathBuf, pub allow_http_loopback: bool, pub extra_redirect_uris: Vec<String>, pub access_token_seconds: u64, pub refresh_token_seconds: u64 }
@@ -271,7 +272,7 @@ impl Config {
     #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, if cfg!(target_os="linux"){"bubblewrap"}else{"disabled"}); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }
-    #[test] fn ids_are_bounded() { assert!(valid_id("BAfter")); assert!(!valid_id("../BAfter")); assert!(!valid_id("")); }
+    #[test] fn ids_are_bounded() { assert!(valid_id("DemoApp")); assert!(!valid_id("../DemoApp")); assert!(!valid_id("")); }
     #[test] fn projects_are_relative_to_workspace_roots(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];assert!(c.validate().is_ok());c.workspaces[0].projects[0].path="/tmp/root/app".into();assert!(c.validate().is_err());}
     #[test] fn git_mutation_requires_write_and_exec(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:true,allow_git_push:false,execution_profile:default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];assert!(c.validate().is_err());c.workspaces[0].projects[0].allow_exec=true;assert!(c.validate().is_ok());}
     #[test] fn allowed_programs_are_simple_and_unique(){let mut c=Config::default();c.execution.allowed_programs=vec!["cargo".into(),"cargo".into()];assert!(c.validate().is_err());c.execution.allowed_programs=vec!["/usr/bin/cargo".into()];assert!(c.validate().is_err());c.execution.allowed_programs=vec!["cargo".into(),"rustc".into()];assert!(c.validate().is_ok());}

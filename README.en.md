@@ -176,7 +176,7 @@ Use **`--lan-only`** to connect EndlessVibe instances via **TLS 1.3 Transfer pai
 **New Windows installation** (the directory must already exist):
 
 ```powershell
-.\target\debug\endlessvibe.exe --init --lan-only --workspace "project=D:\project"
+.\target\debug\endlessvibe.exe --init --lan-only --workspace "projects=C:\path\to\projects"
 ```
 
 **Existing Windows installation** (no need to delete the config or owner key):

@@ -41,7 +41,7 @@ path = "/usr/local/bin:/usr/bin:/bin"
 allowed_programs = ["cargo", "rustc", "cmake", "ninja", "make", "ctest", "python3", "git", "rg"]
 # Programs that must exist inside the sandbox even when they are only launched
 # by child build/test scripts rather than directly through run_command.
-required_programs = ["cargo", "rustc", "initdb", "postgres", "pg_isready", "createdb"]
+required_programs = [] # Set only for programs required by your own builds/tests.
 readonly_mounts = []
 memory_limit_mb = 8192
 max_processes = 256

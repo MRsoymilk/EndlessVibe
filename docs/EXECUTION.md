@@ -120,11 +120,11 @@ path = "/usr/local/bin:/usr/bin:/bin"
 
 [[workspaces]]
 id = "projects"
-path = "/home/vv/project"
+path = "/absolute/path/to/workspace"
 
 [[workspaces.projects]]
-id = "milk64"
-path = "milk64"
+id = "sample-project"
+path = "sample-project"
 allow_write = true
 allow_exec = true
 allow_git_commit = true
@@ -155,15 +155,15 @@ cannot constrain arbitrary host processes. This mode is unsuitable for
 untrusted repositories or external collaborators. No sudo/system packages,
 Rust target libraries, QEMU, OVMF, or image tools are installed automatically.
 
-#### Rust bare-metal and Milk64 prerequisites
+#### Rust bare-metal and boot-image prerequisites
 
 `x86_64-unknown-none` is a freestanding Rust target. Its precompiled `core`
-must match the compiler/toolchain used by the Job. For rustup-managed 1.97.1:
+must match the compiler/toolchain used by the Job. For a rustup-managed stable toolchain:
 
 ```sh
-rustup toolchain install 1.97.1 --profile minimal
-rustup target add x86_64-unknown-none --toolchain 1.97.1
-rustup run 1.97.1 rustc --print target-libdir --target x86_64-unknown-none
+rustup toolchain install stable --profile minimal
+rustup target add x86_64-unknown-none --toolchain stable
+rustup run stable rustc --print target-libdir --target x86_64-unknown-none
 ```
 
 For Gentoo's system-packaged Rust without rustup, install the matching target
@@ -171,13 +171,13 @@ components using an appropriate toolchain manager, or switch this project to
 a compatible rustup toolchain. Merely listing `targets` in
 `rust-toolchain.toml` does not install `libcore` into a system Rust sysroot.
 Verify an actual `libcore-*.rlib` exists in the target libdir and run
-`cargo check -p milk64-kernel --target x86_64-unknown-none`.
+`cargo check --target x86_64-unknown-none` for your freestanding project.
 
-Milk64's boot script additionally needs `bash`, `qemu-system-x86_64`,
+A boot-image build script may also need `bash`, `qemu-system-x86_64`,
 `xorriso`, `curl`, `tar`, `sha256sum`, `timeout`, and matching OVMF
 CODE/VARS files; `gdb` and `nasm` are useful for later stages. The tools must
 be installed and on the configured PATH. Test first with
-`run_command(program="bash", args=["tools/boot.sh","smoke"], ...)`; never
+`run_command(program="bash", args=["path/to/boot-script.sh","smoke"], ...)`; never
 assume availability simply because the trusted mode bypasses a whitelist.
 
 ## Shell 与白名单

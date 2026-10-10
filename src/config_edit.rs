@@ -182,6 +182,67 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
 mod tests{
     use super::*;
     fn config(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![crate::config::WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];c}
+
+    #[test]
+    fn add_project_still_rejects_relative_and_outside_workspace_paths(){
+        let temp=tempfile::tempdir().unwrap();
+        let root=temp.path().join("workspace");
+        let child=root.join("inside");
+        let outside=temp.path().join("outside");
+        let state=temp.path().join("state");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let config_path=temp.path().join("config.toml");
+        std::fs::write(&config_path,toml::to_string_pretty(&config(&root,&state)).unwrap()).unwrap();
+        let mut request=AddProjectRequest{
+            expected_revision:revision(&config_path).unwrap(),
+            workspace:"root".into(),project:None,
+            path:"inside".into(),allow_write:true,allow_exec:true,
+            allow_git_commit:true,allow_git_mutation:false,
+            allow_git_push:false,execution_profile:Some("development".into()),
+            environment:vec![],
+        };
+        assert!(add_project(&config_path,request.clone()).unwrap_err().to_string().contains("absolute"));
+        request.path=outside.to_string_lossy().into_owned();
+        assert!(add_project(&config_path,request.clone()).unwrap_err().to_string().contains("strict descendant"));
+        request.path=root.join("not-yet-created").to_string_lossy().into_owned();
+        assert!(add_project(&config_path,request).is_err());
+        assert!(Config::load_file(&config_path).unwrap().workspaces[0].projects.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_add_project_accepts_drive_slashes_with_verbatim_workspace_root(){
+        let temp=tempfile::tempdir().unwrap();
+        let root=temp.path().join("workspace");
+        let child=root.join("EndlessVibe");
+        let state=temp.path().join("state");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let canonical_root=root.canonicalize().unwrap();
+        let root_text=canonical_root.to_string_lossy();
+        assert!(root_text.starts_with(r"\\?\"),"Windows canonical path: {root_text}");
+        let canonical_child=child.canonicalize().unwrap();
+        let child_text=canonical_child.to_string_lossy();
+        // From the OS's \\?\C:\... notation to a normal C:/... input.
+        let friendly=child_text.strip_prefix(r"\\?\").unwrap_or(&child_text);
+        let forward_slashes=friendly.replace('\\',"/");
+        let config_path=temp.path().join("config.toml");
+        std::fs::write(&config_path,toml::to_string_pretty(&config(&canonical_root,&state)).unwrap()).unwrap();
+        let outcome=add_project(&config_path,AddProjectRequest{
+            expected_revision:revision(&config_path).unwrap(),
+            workspace:"root".into(),project:None,
+            path:forward_slashes,allow_write:true,allow_exec:true,
+            allow_git_commit:true,allow_git_mutation:false,
+            allow_git_push:false,execution_profile:Some("development".into()),
+            environment:vec![],
+        }).unwrap();
+        assert_eq!(outcome.project["id"],"EndlessVibe");
+        let loaded=Config::load_file(&config_path).unwrap();
+        assert_eq!(loaded.workspaces[0].projects[0].path,PathBuf::from("EndlessVibe"));
+    }
+
     #[test]fn add_and_update_preserve_comments(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let child=root.join("demo");let state=t.path().join("state");std::fs::create_dir_all(&child).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let mut text=toml::to_string_pretty(&config(&root,&state)).unwrap();text.push_str("\n# keep-comment\n");std::fs::write(&path,&text).unwrap();let rev=revision(&path).unwrap();let added=add_project(&path,AddProjectRequest{expected_revision:rev,workspace:"root".into(),project:None,path:child.display().to_string(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:Some("development".into()),environment:vec!["TEST_DATABASE_URL=postgres://localhost/test".into()]}).unwrap();assert_eq!(added.project["execution_profile"],"development");assert_eq!(added.project["environment_keys"],json!(["TEST_DATABASE_URL"]));assert!(!added.operation_diff.contains("postgres://localhost/test"));assert!(added.operation_diff.contains("environment = [REDACTED]"));let updated=update_project(&path,"root","demo",UpdateProjectRequest{expected_revision:added.revision,allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:false,allow_git_push:false,execution_profile:Some("isolated".into()),environment:Some(vec![])}).unwrap();assert!(updated.requires_restart);let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-comment"));let loaded=Config::load_file(&path).unwrap();assert!(!loaded.workspaces[0].projects[0].allow_exec);}
     #[test]fn readonly_mounts_update_preserves_other_execution_text(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let state=t.path().join("state");let sdk=t.path().join("android-sdk");let tools=t.path().join("tools");std::fs::create_dir_all(&root).unwrap();std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&sdk).unwrap();std::fs::create_dir_all(&tools).unwrap();let path=t.path().join("config.toml");let mut cfg=config(&root,&state);cfg.execution.readonly_mounts=vec![ReadOnlyMount{source:tools.clone(),target:"/opt/tools".into()}];let mut text=toml::to_string_pretty(&cfg).unwrap();text=text.replace("[execution]\n","[execution]\n# keep-execution-comment\n");std::fs::write(&path,&text).unwrap();let rev=revision(&path).unwrap();let result=update_readonly_mounts(&path,UpdateReadonlyMountsRequest{expected_revision:rev,readonly_mounts:vec![ReadOnlyMount{source:sdk.clone(),target:"/opt/android-sdk".into()},ReadOnlyMount{source:tools,target:"/opt/tools".into()}]}).unwrap();assert!(result.requires_restart);let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-execution-comment"));assert!(after.contains("/opt/android-sdk"));let loaded=Config::load_file(&path).unwrap();assert_eq!(loaded.execution.readonly_mounts.len(),2);assert_eq!(loaded.execution.readonly_mounts[0].target,PathBuf::from("/opt/android-sdk"));}
     #[test]fn online_git_and_limits_edits_preserve_comments_and_reject_stale_revisions(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let state=t.path().join("state");std::fs::create_dir_all(&root).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let text=toml::to_string_pretty(&config(&root,&state)).unwrap().replace("[git]\n","[git]\n# keep-git-comment\n").replace("[limits]\n","[limits]\n# keep-limits-comment\n");std::fs::write(&path,text).unwrap();let original=revision(&path).unwrap();let git=update_git(&path,UpdateGitRequest{expected_revision:original.clone(),executable:"/usr/bin/git".into(),author_name:"Developer".into(),author_email:"developer@example.org".into()}).unwrap();assert!(git["requires_restart"].as_bool().unwrap());assert_eq!(git["git"]["author_name"],"Developer");assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-git-comment"));assert!(update_git(&path,UpdateGitRequest{expected_revision:original,executable:"/usr/bin/git".into(),author_name:"Conflict".into(),author_email:"developer@example.org".into()}).is_err());let mut limit=Config::load_file(&path).unwrap().limits;limit.command_timeout_seconds=600;limit.retained_jobs=25;let out=update_limits(&path,UpdateLimitsRequest{expected_revision:git["revision"].as_str().unwrap().into(),max_file_bytes:limit.max_file_bytes,max_read_bytes:limit.max_read_bytes,max_output_bytes:limit.max_output_bytes,command_timeout_seconds:limit.command_timeout_seconds,max_jobs:limit.max_jobs,retained_jobs:limit.retained_jobs,search_max_files:limit.search_max_files,search_max_bytes:limit.search_max_bytes}).unwrap();assert_eq!(out["limits"]["command_timeout_seconds"],600);assert_eq!(out["limits"]["retained_jobs"],25);assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-limits-comment"));let mut bad=UpdateLimitsRequest{expected_revision:out["revision"].as_str().unwrap().into(),max_file_bytes:limit.max_file_bytes,max_read_bytes:limit.max_read_bytes,max_output_bytes:limit.max_output_bytes,command_timeout_seconds:3601,max_jobs:limit.max_jobs,retained_jobs:limit.retained_jobs,search_max_files:limit.search_max_files,search_max_bytes:limit.search_max_bytes};assert!(update_limits(&path,bad.clone()).is_err());bad.command_timeout_seconds=600;bad.max_read_bytes=bad.max_file_bytes+1;assert!(update_limits(&path,bad).is_err());assert_eq!(Config::load_file(&path).unwrap().limits.command_timeout_seconds,600);}

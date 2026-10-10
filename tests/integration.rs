@@ -47,6 +47,20 @@ async fn brand_icon_is_a_real_png_on_dashboard_and_public_oauth_routes(){
  assert_eq!(manifest["icons"][0]["sizes"].as_str().unwrap(),format!("{width}x{height}"));
  assert!(include_str!("../src/security/auth.rs").contains("class=\"brand-icon oauth-icon\""));
 }
+#[test]
+fn dashboard_starts_with_generic_paths_and_config_defaults(){
+    let html=include_str!("../web/index.html");
+    assert!(html.contains("id=\"add-project-path\" type=\"text\" required placeholder=\"请输入现有项目的绝对路径\""));
+    assert!(!html.contains("placeholder=\"/home/"));
+    assert!(!html.contains("placeholder=\"D:"));
+    let app=include_str!("../web/app.js");
+    assert!(!app.contains("updateProjectPathPlaceholder"));
+    // An earlier front-end patch accidentally placed a // comment on this
+    // compact one-line handler, commenting out its remaining validation.
+    assert!(app.contains("if(!path){setWriteStatus(\"Absolute Path 不能为空\",\"error\");return;}if(project"));
+    assert_eq!(Config::default().server.public_url,"https://mcp.example.com");
+}
+
 #[tokio::test]
 async fn child_one_click_approval_finalizes_parent_without_project_grants(){
     let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -798,7 +812,7 @@ async fn every_private_tool_returns_oauth_challenge_without_valid_credentials(){
             assert_eq!(result["jsonrpc"],"2.0");assert_eq!(result["id"],"link-request");
             assert_eq!(result["result"]["isError"],true,"{name}");
             assert_eq!(result["result"]["_meta"]["mcp/www_authenticate"][0],header);
-            assert!(header.contains("resource_metadata=\"https://endlessvibe.soymilk.xin/.well-known/oauth-protected-resource\""));
+            assert!(header.contains("resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource\""));
             assert!(header.contains("error=\"invalid_token\""));assert!(header.contains("error_description="));
             assert!(result["result"]["structuredContent"].is_null());
             assert!(!result.to_string().contains(f._dir.path().to_str().unwrap()));
@@ -829,7 +843,7 @@ async fn unauthorized_writes_and_mixed_batches_cannot_execute_tools(){
 
 #[tokio::test]
 async fn browser_consent_preserves_origin_and_rejects_cross_site_or_missing_cookies(){
-    let f=fixture(|config|config.server.public_url="https://ENDLESSVIBE.SOYMILK.XIN:443".into());
+    let f=fixture(|config|config.server.public_url="https://MCP.EXAMPLE.COM:443".into());
     let app=server::create_router(f.rt.clone());
     let response=http(&app,"POST","/oauth/register",Body::from(json!({"redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"]}).to_string()),Some("application/json"),None,None).await;
     assert_eq!(response.status(),StatusCode::CREATED);let client=json_body(response).await["client_id"].as_str().unwrap().to_owned();
@@ -842,12 +856,12 @@ async fn browser_consent_preserves_origin_and_rejects_cross_site_or_missing_cook
     let html=String::from_utf8(to_bytes(response.into_body(),32768).await.unwrap().to_vec()).unwrap();
     let transaction=html.split("name=\"transaction\" value=\"").nth(1).unwrap().split('"').next().unwrap();
     let body=form(&[("transaction",transaction),("owner_key",&f.owner),("decision","approve")]);
-    for origin in ["null","https://evil.test","https://chatgpt.com","http://endlessvibe.soymilk.xin","https://endlessvibe.soymilk.xin:444"]{
+    for origin in ["null","https://evil.test","https://chatgpt.com","http://mcp.example.com","https://mcp.example.com:444"]{
         let response=consent_http(&app,body.clone(),Some(&cookie),origin).await;
         assert_eq!(response.status(),StatusCode::BAD_REQUEST);
         assert_eq!(json_body(response).await["error_description"],"Cross-origin consent POST refused");
     }
-    let origin="https://endlessvibe.soymilk.xin";
+    let origin="https://mcp.example.com";
     for cookie in [None,Some("ev_consent=wrong")]{
         let response=consent_http(&app,body.clone(),cookie,origin).await;
         assert_eq!(response.status(),StatusCode::BAD_REQUEST);
