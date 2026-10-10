@@ -65,12 +65,34 @@ impl Drop for ComWide{
 pub(super) struct Profile{
     name:Vec<u16>,
     sid:PSID,
+    journal:Option<PathBuf>,
 }
 impl Profile{
     pub(super) fn create()->Result<Self>{
         let random=crate::util::random_secret()?;
         let name=format!("EndlessVibe.Isolated.{}",&crate::util::digest(random)[..32]);
-        let profile_name=wide(&name);
+        Self::create_named(&name,None)
+    }
+
+    /// Persist the profile identity *before* creating it so a service crash
+    /// never leaves an untracked lowbox profile registered in Windows.
+    #[cfg(test)]
+    fn create_journaled(journal_dir:&Path)->Result<Self>{
+        crate::util::private_dir(journal_dir)?;
+        let random=crate::util::random_secret()?;
+        let name=format!("EndlessVibe.Isolated.{}",&crate::util::digest(random)[..32]);
+        let marker=journal_dir.join(format!("{name}.pending"));
+        crate::util::private_create(&marker,format!("v1:{name}\n").as_bytes())?;
+        match Self::create_named(&name,Some(marker.clone())){
+            Ok(profile)=>Ok(profile),
+            Err(error)=>{
+                let _=fs::remove_file(&marker);
+                Err(error)
+            }
+        }
+    }
+    fn create_named(name:&str,journal:Option<PathBuf>)->Result<Self>{
+        let profile_name=wide(name);
         let display=wide("EndlessVibe isolated workload");
         let description=wide("Unique sandbox profile with no default network capabilities");
         let mut sid:PSID=ptr::null_mut();
@@ -83,7 +105,7 @@ impl Profile{
             let _=unsafe{DeleteAppContainerProfile(profile_name.as_ptr())};
             bail!("AppContainer profile returned no SID");
         }
-        Ok(Self{name:profile_name,sid})
+        Ok(Self{name:profile_name,sid,journal})
     }
     pub(super) fn capabilities(&self)->SECURITY_CAPABILITIES{
         SECURITY_CAPABILITIES{
@@ -153,9 +175,49 @@ impl Profile{
 impl Drop for Profile{
     fn drop(&mut self){
         if !self.sid.is_null(){unsafe{FreeSid(self.sid)};self.sid=ptr::null_mut();}
-        let _=unsafe{DeleteAppContainerProfile(self.name.as_ptr())};
+        let result=unsafe{DeleteAppContainerProfile(self.name.as_ptr())};
+        if result>=0{
+            if let Some(path)=&self.journal{let _=fs::remove_file(path);}
+        }
     }
 }
+
+// Only call this when the service's single-instance lock has been acquired and
+// no old command job can still be alive. The production service does not yet
+// invoke this test-only recovery path.
+#[cfg(test)]
+fn recover_orphan_profiles(journal_dir:&Path)->Result<usize>{
+    crate::util::private_dir(journal_dir)?;
+    let root=crate::security::paths::Root::open(journal_dir)?;
+    let entries=root.entries(".")?;
+    if entries.len()>128{bail!("Too many pending AppContainer recovery records");}
+    let mut deleted=0usize;
+    for entry in entries{
+        if entry.kind!="file"{bail!("AppContainer recovery records must be regular files");}
+        let name=entry.name.strip_suffix(".pending")
+            .context("Unexpected AppContainer recovery record name")?;
+        let suffix=name.strip_prefix("EndlessVibe.Isolated.")
+            .context("Recovery refuses profiles outside the EndlessVibe namespace")?;
+        if suffix.len()!=32||!suffix.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()){
+            bail!("Invalid AppContainer recovery record identifier");
+        }
+        let bytes=root.read(&entry.name,128)?;
+        if bytes!=format!("v1:{name}\n").as_bytes(){
+            bail!("AppContainer recovery record content mismatches its filename");
+        }
+        let wide_name=wide(name);
+        let hr=unsafe{DeleteAppContainerProfile(wide_name.as_ptr())};
+        // A crash could occur after writing the journal but before profile
+        // creation. ERROR_NOT_FOUND is a safe already-absent result.
+        if hr<0 && hr as u32!=0x80070490{
+            bail!("DeleteAppContainerProfile recovery failed: HRESULT 0x{:08x}",hr as u32);
+        }
+        fs::remove_file(journal_dir.join(&entry.name))?;
+        deleted+=1;
+    }
+    Ok(deleted)
+}
+
 
 struct Attributes{storage:Vec<usize>}
 impl Attributes{
@@ -382,6 +444,48 @@ fn next_log_chunk(
 #[cfg(test)]
 mod tests{
     use super::*;
+
+    #[test]
+    fn durable_profile_journal_is_cleared_after_normal_cleanup(){
+        let temp=tempfile::tempdir().unwrap();
+        let journal=temp.path().join("pending-profiles");
+        let profile=Profile::create_journaled(&journal).unwrap();
+        assert_eq!(fs::read_dir(&journal).unwrap().count(),1);
+        drop(profile);
+        assert_eq!(fs::read_dir(&journal).unwrap().count(),0);
+        assert_eq!(recover_orphan_profiles(&journal).unwrap(),0);
+    }
+
+    #[test]
+    fn journaled_appcontainer_recovers_a_simulated_interrupted_service(){
+        let temp=tempfile::tempdir().unwrap();
+        let journal=temp.path().join("pending-profiles");
+        let profile=Profile::create_journaled(&journal).unwrap();
+        assert_eq!(fs::read_dir(&journal).unwrap().count(),1);
+        // Simulate a force-terminated service without running Drop. No
+        // sandboxed child is active when recovery starts.
+        std::mem::forget(profile);
+        assert_eq!(recover_orphan_profiles(&journal).unwrap(),1);
+        assert_eq!(recover_orphan_profiles(&journal).unwrap(),0);
+        assert_eq!(fs::read_dir(&journal).unwrap().count(),0);
+    }
+
+    #[test]
+    fn recovery_does_not_trust_unrecognized_or_tampered_journal_names(){
+        let temp=tempfile::tempdir().unwrap();
+        let journal=temp.path().join("pending-profiles");
+        crate::util::private_dir(&journal).unwrap();
+        let spoofed=journal.join("UnrelatedPackage.pending");
+        fs::write(&spoofed,b"spoofed").unwrap();
+        assert!(recover_orphan_profiles(&journal).is_err());
+        assert!(spoofed.exists(),"Refused records must not be silently discarded");
+        fs::remove_file(&spoofed).unwrap();
+        let wrong_name=journal.join(format!("EndlessVibe.Isolated.{}.pending","a".repeat(32)));
+        fs::write(&wrong_name,b"v1:an-unrelated-profile\n").unwrap();
+        assert!(recover_orphan_profiles(&journal).is_err());
+        assert!(wrong_name.exists());
+    }
+
 
     #[test]
     fn incremental_log_reader_rejects_replacements_and_unbounded_output(){

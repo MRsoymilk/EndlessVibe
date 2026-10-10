@@ -103,7 +103,17 @@ overlong, or disappearing logs fail closed rather than silently resuming.
 The test monitor cancels the entire Job Object when a log exceeds the
 configured total output budget. These are poll-time budgets, not filesystem
 disk quotas: a burst may temporarily exceed the budget between checks.
-Production integration still requires crash-safe retention and quotas. The previous CreateProcess cross-token handle
+A Windows test-only recovery journal now records the unique profile
+identifier in a service-owned, private file *before* calling the Windows
+profile creation API. On normal teardown the journal is cleared only if the
+profile was deleted. The recovery prototype validates each marker's exact
+namespace, file type, size and contents, then deletes that AppContainer
+profile and consumes its marker. Windows tests simulate an interrupted
+service without running destructors and reject forged recovery markers.
+Only a service instance that has acquired its exclusive state-directory
+lock, and confirmed no old jobs remain alive, may invoke such recovery.
+Production startup does not invoke this recovery prototype yet. Hard
+disk quotas and production job lifecycle remain separate work. The previous CreateProcess cross-token handle
 inheritance experiment failed native validation and was discarded. A
 production-safe command protocol, task lifecycle, and crash recovery remain
 required before enabling arbitrary Project commands.
