@@ -1,4 +1,5 @@
 pub mod secure;
+pub mod router;
 use crate::{config::Transfer,store::Store,util};
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
@@ -23,11 +24,11 @@ impl TransferManager{
  pub fn announce(&self)->Announce{Announce{service:SERVICE.into(),node_id:self.node_id.clone(),name:self.config.display_name.clone(),port:self.config.listen.port()}}
  pub fn observe(&self,packet:&[u8],address:SocketAddr)->Result<bool>{if packet.len()>512{return Ok(false);}let Ok(item)=serde_json::from_slice::<Announce>(packet)else{return Ok(false)};if item.service!=SERVICE||!valid_node_id(&item.node_id)||item.node_id==self.node_id||item.port==0||item.name.is_empty()||item.name.len()>64{return Ok(false);}let address=SocketAddr::new(address.ip(),item.port);let mut known=self.discovered.write().map_err(|_|anyhow::anyhow!("Transfer registry poisoned"))?;if known.len()>=MAX_PEERS&&!known.contains_key(&item.node_id){let oldest=known.iter().min_by_key(|(_,v)|v.last_seen).map(|(k,_)|k.clone());if let Some(k)=oldest{known.remove(&k);}}known.insert(item.node_id.clone(),Discovered{node_id:item.node_id,name:item.name,address,last_seen:util::now(),online:true});Ok(true)}
  pub fn discoveries(&self)->Value{let now=util::now();let devices=self.discovered.read().map(|peers|peers.values().map(|p|{let mut value=serde_json::to_value(p).unwrap_or(Value::Null);value["online"]=json!(now.saturating_sub(p.last_seen)<=20);value}).collect::<Vec<_>>()).unwrap_or_default();json!({"node_id":self.node_id,"name":self.config.display_name,"enabled":self.config.enabled,"listen":self.config.listen,"discovery_protocol":SERVICE,"peers":devices})}
- pub async fn run(self:Arc<Self>,shutdown:CancellationToken)->Result<()>{
+ pub async fn run(self:Arc<Self>,shutdown:CancellationToken,rt:Arc<crate::runtime::Runtime>)->Result<()>{
   if !self.config.enabled{return Ok(());}
   let emitter=async{if !self.config.advertise{shutdown.cancelled().await;return Ok(());}let socket=UdpSocket::bind("0.0.0.0:0").await?;socket.set_multicast_ttl_v4(1)?;let payload=serde_json::to_vec(&self.announce())?;let mut tick=time::interval(Duration::from_secs(5));loop{tokio::select!{_ = shutdown.cancelled()=>break,_ = tick.tick()=>{if let Err(error)=socket.send_to(&payload,SocketAddrV4::new(GROUP,DISCOVERY_PORT)).await{tracing::debug!(error=%error,"Transfer broadcast unavailable");}}}}Ok::<_,anyhow::Error>(())};
   let receiver=async{if !self.config.discover{shutdown.cancelled().await;return Ok(());}let socket=std::net::UdpSocket::bind(("0.0.0.0",DISCOVERY_PORT)).context("Cannot bind Transfer discovery UDP 20003")?;socket.set_nonblocking(true)?;socket.join_multicast_v4(&GROUP,&Ipv4Addr::UNSPECIFIED)?;let socket=UdpSocket::from_std(socket)?;let mut bytes=[0u8;1024];loop{tokio::select!{_ = shutdown.cancelled()=>break,result=socket.recv_from(&mut bytes)=>{if let Ok((n,addr))=result{let _=self.observe(&bytes[..n],addr);}}}}Ok::<_,anyhow::Error>(())};
-  let tls=self.clone().run_tls(shutdown.clone());let(a,b,c)=tokio::join!(emitter,receiver,tls);a?;b?;c?;Ok(())
+  let tls=self.clone().run_tls(shutdown.clone(),Some(rt));let(a,b,c)=tokio::join!(emitter,receiver,tls);a?;b?;c?;Ok(())
  }
 }
 #[cfg(test)]mod tests{

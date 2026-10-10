@@ -1,4 +1,4 @@
-use crate::{config_edit::{AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest},runtime::Runtime};
+use crate::{config_edit::{AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest,UpdateTransferRequest},runtime::Runtime};
 use axum::{extract::{Path as AxumPath,Query,State},http::{header,StatusCode},response::{sse::{Event,KeepAlive,Sse},Html,IntoResponse,Response},Json};
 use serde::Deserialize;
 use serde_json::{json,Value};
@@ -9,6 +9,7 @@ pub async fn home()->impl IntoResponse{Html(include_str!("../web/index.html"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
 pub async fn javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/app.js"))}
 pub async fn javascript_common()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/common.js"))}
+pub async fn javascript_nodes()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/nodes.js"))}
 pub async fn javascript_mcp()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/mcp.js"))}
 pub async fn javascript_charts()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/charts.js"))}
 pub async fn uplot_javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.iife.min.js"))}
@@ -18,6 +19,7 @@ pub async fn status(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.sn
 pub async fn metrics(State(rt):State<Arc<Runtime>>)->impl IntoResponse{match rt.db.dashboard_metrics(3600,60){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn activity(State(rt):State<Arc<Runtime>>)->impl IntoResponse{let audits=rt.db.audits(50);let jobs=rt.jobs.list(crate::tools::types::ListJobsArgs{workspace:None,project:None,task_id:None,limit:30});match(audits,jobs){(Ok(audits),Ok(jobs))=>Json(json!({"generated_at":crate::util::now(),"audits":audits,"jobs":jobs["jobs"]})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn node_discoveries(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.transfer.discoveries())}
+pub async fn node_read(State(rt):State<Arc<Runtime>>,Json(args):Json<crate::transfer::router::NodeCallArgs>)->Response{if !crate::transfer::router::readonly(&args.tool){return (StatusCode::FORBIDDEN,Json(json!({"error":"Only read-only tools are allowed"}))).into_response();}mutation_response(rt.transfer.call_node(&args.node_id,&args.tool,args.arguments).await)}
 pub async fn node_pending(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.transfer.pending())}
 pub async fn node_peers(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.transfer.peers())}
 pub async fn node_pair_start(State(rt):State<Arc<Runtime>>,Json(request):Json<crate::transfer::secure::PairStart>)->Response{mutation_response(rt.transfer.start_pair(request.address).await)}
@@ -27,6 +29,7 @@ pub async fn config(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_
 pub async fn project_states(State(rt):State<Arc<Runtime>>)->Response{let mut projects=Vec::new();for(workspace_id,project)in rt.projects_snapshot(){let base=json!({"workspace":workspace_id.clone(),"project":project.config.id});let value=match project.lock.clone().try_lock_owned(){Ok(_guard)=>match crate::tools::git::status(&rt,&project).await{Ok(status)=>{let changes=status["entries"].as_array().map(|v|v.len()).unwrap_or(0);json!({"workspace":workspace_id,"project":project.config.id,"state":"ready","branch":status["branch"],"head":status["head"],"changes":changes,"dirty":changes>0})},Err(error)=>{let message=format!("{error:#}");let state=if message.contains("not a standalone Git repository")||message.contains(".git must be a real directory"){"not_repository"}else{"unavailable"};let mut value=base;value["state"]=json!(state);value}},Err(_)=>{let mut value=base;value["state"]=json!("busy");value}};projects.push(value);}Json(json!({"generated_at":crate::util::now(),"projects":projects})).into_response()}
 pub async fn reload_config(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_reload_config())}
 pub async fn update_readonly_mounts(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateReadonlyMountsRequest>)->Response{mutation_response(rt.dashboard_update_readonly_mounts(request))}
+pub async fn update_transfer(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateTransferRequest>)->Response{mutation_response(rt.dashboard_update_transfer(request))}
 pub async fn update_docker(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateDockerRequest>)->Response{mutation_response(rt.dashboard_update_docker(request))}
 pub async fn update_git(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateGitRequest>)->Response{mutation_response(rt.dashboard_update_git(request))}
 pub async fn update_limits(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateLimitsRequest>)->Response{mutation_response(rt.dashboard_update_limits(request))}

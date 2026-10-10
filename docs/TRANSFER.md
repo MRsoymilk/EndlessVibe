@@ -21,6 +21,14 @@ The child approves with local `POST /api/nodes/approve`, specifying the exact Pr
 
 **Trust model:** During first pairing the TLS server certificate has no pre-existing trust anchor; the human comparison of the short code is therefore mandatory to rule out a local active MITM. After approval the parent pins the server certificate fingerprint and refuses unexpected key changes. An approved child accepts remote operations only with the matching parent ID and token plus its per-project grant. Protect the local Dashboard (e.g. do not expose 20001 to LAN) and use verified SAS comparison. Do not mistake multicast advertisements for cryptographic identity.
 
+## Phase 3 — Nodes Dashboard and Remote Read-Only Routing
+
+The local `http://127.0.0.1:20001/nodes` page shows discovered nodes, explicit manual-IP pairing, pending six-digit codes, child Project-grant checkboxes, approved peers and a simple remote Project browser. Transfer can be enabled or disabled from `/config` with `PUT /api/config/transfer` (full revision check; restart required). The Dashboard remains loopback-only and the dedicated Transfer socket uses TLS 1.3.
+
+`node_list` and `node_read` are the parent's MCP tools; the latter supports `list_workspaces`, `list_projects`, `inspect_project`, `list_directory`, `read_file`, `search_code`, `git_status`, `git_diff`, and `git_log` using the same parameter objects as the local equivalents. The parent is allowed only approved peers with their previously pinned TLS certificate fingerprint. The child verifies the parent token for every request, filters Workspace/Project listings by exact grants, and then invokes its existing local Project locks and filesystem/Git helpers. Arbitrary tool names, nested forwarding, paths outside the Project, and remote mutation attempts are rejected.
+
+For browser use the parent exposes loopback-only `POST /api/nodes/read` with `{\"node_id\":\"...\",\"tool\":\"read_file\",\"arguments\":{\"workspace\":\"...\",\"project\":\"...\",\"path\":\"src/main.rs\"}}`.
+
 ## Planned authorization and routing invariants
 
 - Pairing must use an encrypted authenticated protocol. The discovery name and IP are untrusted hints, not identities.
