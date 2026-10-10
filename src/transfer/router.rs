@@ -32,7 +32,7 @@ pub async fn dispatch(rt:Arc<Runtime>,transfer:Arc<TransferManager>,wire:Wire)->
  let result=dispatch_inner(rt.clone(),peer,tool,input,&w,&p).await;
  let result=rt.finish_operation(operation,result);
  if writable(tool)&&!matches!(tool,"get_job"|"get_job_output"|"run_command"){
-  if let Ok(ref value)=result{super::idempotency::complete(&rt.db,&wire.node_id,&wire.id,value)?;}
+  match &result{Ok(value)=>super::idempotency::complete(&rt.db,&wire.node_id,&wire.id,value)?,Err(_)=>super::idempotency::fail(&rt.db,&wire.node_id,&wire.id)?}
  }
  result
 }
