@@ -64,12 +64,18 @@ attributes to launch a suspended, low-privilege process. Native tests inspect
 its access token and confirm that it actually has AppContainer identity.
 Temporary profiles are deleted after their process has exited.
 
-This is an isolated-identity verification layer, not yet a selectable
-execution backend. In particular, it does not mount or grant access to any
-Project directory and must not be treated as equivalent to a working
-sandboxed Cargo command runner. A separate staging mechanism is required
-before authorizing Project code execution; broad ACL grants to the original
-Project must not be made implicitly.
+The AppContainer input-staging prototype reads only individually selected
+files via the existing capability-rooted Project reader. It refuses sensitive
+names, symlinks, and traversal, and copies at most 2 MiB per file into the
+ephemeral AppContainer profile. The original Project's ACLs are unchanged.
+Native Windows tests launch a real AppContainer process: it can read the
+staged file but cannot read the original Project file or reach the local
+Dashboard over loopback when no network capabilities are granted.
+
+This is still an isolated-identity and file-staging layer, NOT a selectable
+production execution backend or a general sandboxed Cargo runner. Complete
+stdout/stderr streaming, cancellation, and controlled output synchronization
+are required before enabling it for arbitrary Project commands.
 
 ### Windows MSVC toolchain in host jobs
 
