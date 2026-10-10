@@ -1,112 +1,238 @@
-# EndlessVibe
+<p align="center">
+  <img src="EndlessVibe.png" alt="EndlessVibe logo" width="156">
+</p>
 
-EndlessVibe 是一个使用 Rust 编写的 **self-hosted、single-owner MCP 开发后端**。它让 ChatGPT 等 MCP 客户端在明确授权的本地 Project 中读取和修改文件、搜索代码、运行受限命令，并通过可审查流程创建 Git commit。
+<p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
 
-当前版本：**v0.3.2**
+<h1 align="center">EndlessVibe</h1>
 
-## Workspace 与 Project
+<p align="center">
+  <strong>把本地开发环境安全地连接到 AI 助手。</strong>
+  <br>
+  一个使用 Rust 构建的自托管 MCP 开发服务，统一管理项目、代码、命令、Git 与远程节点。
+</p>
 
-EndlessVibe 使用两层模型：
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.3.3-2563eb" alt="Version 0.3.3">
+  <img src="https://img.shields.io/badge/Rust-1.88%2B-de6a36?logo=rust&logoColor=white" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/platform-Linux-34495e?logo=linux&logoColor=white" alt="Linux">
+  <img src="https://img.shields.io/badge/MCP-Streamable%20HTTP-7c3aed" alt="MCP Streamable HTTP">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22a06b" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <a href="#screenshots">界面预览</a> ·
+  <a href="#features">核心功能</a> ·
+  <a href="#quick-start">快速开始</a> ·
+  <a href="#architecture">架构</a> ·
+  <a href="#security">安全</a> ·
+  <a href="#documentation">文档</a>
+</p>
+
+---
+
+## Overview
+
+**EndlessVibe** 让 ChatGPT 等支持 MCP（Model Context Protocol）的客户端通过统一接口操作**已授权**的本地代码项目，并提供可在浏览器中查看的 Dashboard。
+
+它不是云端 IDE，也不是多用户远程 Shell。服务由使用者自行托管，核心设计是**显式授权、按 Project 隔离、操作可审查、长任务可恢复**。
+
+- **MCP Server**：通过 Streamable HTTP 和 OAuth 2.0 授权客户端。
+- **Local Dashboard**：查看项目、任务、代码操作、执行记录与节点状态。
+- **Project Runtime**：提供文件、命令、Git、Checkpoint 及持久化 Job 管理。
+- **Node Transfer（可选）**：在局域网中配对其他 EndlessVibe 节点，远程访问获授权的 Project。
+
+## Screenshots
+
+### Dashboard
+
+![EndlessVibe Dashboard](docs/screenshots/dashboard.jpg)
+
+<sub>深色主题 · 简体中文 — 服务状态、执行指标与本地控制台。</sub>
+
+| Projects | Tasks |
+| :---: | :---: |
+| ![Project management](docs/screenshots/projects.jpg) | ![Task management](docs/screenshots/tasks.jpg) |
+| Workspace / Project 权限与配置 | Job 状态、阶段与 Checkpoint |
+
+| Operations | Nodes |
+| :---: | :---: |
+| ![Operation history](docs/screenshots/operations.jpg) | ![Node management](docs/screenshots/nodes.jpg) |
+| 操作审计与执行记录 | 节点发现、配对与远程请求诊断 |
+
+<sub>截图使用当前工作区新版前端与本地运行服务的数据生成，已脱敏部分本机标识。英文版 README 展示亮色英文界面；Nodes / Transfer 功能默认关闭，需要主动配置。</sub>
+
+## Features
+
+| 模块 | 能力 |
+| --- | --- |
+| **Workspace & Project** | 两层工作空间模型，项目级读写、执行和 Git 权限，独立操作锁 |
+| **Files & Search** | 安全列目录、读取、创建、写入、精确 Patch、代码搜索；SHA-256 冲突检查 |
+| **Commands & Jobs** | 异步命令、持久 Job ID、输出分页、超时、取消、请求去重 |
+| **Git Workflow** | Status、Diff 审查、Log、Commit；按需启用本地 Git 修改或受限 Push |
+| **Tasks & Recovery** | `task_id + stage` Checkpoint、Job 关联、提交恢复点、重启诊断 |
+| **Dashboard** | 状态图表、Projects、Tasks、Operations、Nodes、配置与存储管理 |
+| **Authentication** | OAuth 2.0 Authorization Code、PKCE、动态客户端注册及工具 Scope |
+| **Node Transfer** | 局域网发现、TLS 配对、Project 授权、远程请求状态与历史 |
+| **Execution Profiles** | 默认 Bubblewrap 沙箱；可显式切换 Development / Trusted Host |
+| **Docker（可选）** | 通过受限 Engine API 查看、管理获授权的容器 |
+
+### Workspace 与 Project
+
+`Workspace` 只是根目录管理边界，`Project` 才是可执行操作的授权单元：
 
 ```text
-Workspace: projects -> /home/user/projects
-├── Project: BAfter       -> BAfter/
-├── Project: EndlessVibe  -> EndlessVibe/
-└── Project: mHypr        -> mHypr/
+Workspace: projects                  /home/user/projects
+├── Project: website                 website/
+├── Project: kernel                  kernel/
+└── Project: tools                   tools/
 ```
 
-- **Workspace** 是管理根节点，只定义允许挂载 Project 的文件系统边界。
-- **Project** 是实际操作单元，拥有独立的写入、命令执行、Git commit 权限与操作锁。
-- Project 的配置路径必须是 Workspace 根目录下的相对路径，不能使用 `..` 或逃离根目录。
-- 不同 Project 使用独立锁，可以并行执行；同一 Project 的文件、命令和 Git 操作会串行化。
-- 命令任务的全局并行数仍由 `limits.max_jobs` 控制。
+不同 Project 可以并行工作；同一个 Project 的文件、命令和 Git 修改共享操作锁，避免互相覆盖。
 
-因此 MCP 客户端应先调用 `list_workspaces`，再调用 `list_projects(workspace)`，后续项目操作显式携带 `workspace + project`。
+## Quick Start
 
-## 特性
+### Requirements
 
-- **两层授权模型**：Workspace 管理根边界，Project 管理实际权限。
-- **Project 级并发**：不同 Project 可并行，同一 Project 保持互斥。
-- **OAuth for MCP**：Authorization Code、S256 PKCE、Dynamic Client Registration。
-- **冲突安全编辑**：文件写入和 patch 使用 SHA-256 做乐观并发检查。
-- **异步任务**：命令立即返回 Job ID，可查询状态、输出、超时和取消。
-- **长任务 Checkpoint**：`task_id + stage` 将 Job 与 Git commit 关联；成功 commit 自动成为阶段恢复点，stream 中断后可直接查询恢复。
-- **默认 Bubblewrap 沙箱**：网络与通用 Shell 默认关闭。
-- **受审查 Git 提交**：`git_diff` 生成 review token，`git_commit` 只提交明确审查过的文件。
-- **内嵌状态页**：无需独立前端服务。
+- Linux 5.6+（包含安全文件路径操作所需的内核支持）
+- Rust / Cargo **1.88+**
+- Git、C/C++ 编译工具链
+- Bubblewrap 与可用的非特权 User Namespace（默认执行后端）
 
-## 安全模型
+EndlessVibe **拒绝以 root 身份启动**。目前主要面向 Linux 本机部署。
 
-EndlessVibe 面向单用户、自托管开发环境，不是多租户托管平台。默认情况下，未授权客户端不能执行私有 MCP 工具；Workspace 必须显式登记；Project 必须位于对应 Workspace 根内；文件工具不能越过 Project 根目录，也不会跟随符号链接；`run_shell` 和沙箱网络默认关闭；Bubblewrap 不挂载整个 HOME、SSH 凭据、Docker socket 或服务状态目录；Git 工具默认不允许 push，并且不提供 reset、clean 或自动回滚；只有 Project 显式启用 `allow_git_push` 后，专用 `git_push` 才可执行受限的非 force 推送。
+### 1. Build
 
-如果显式启用 host execution，命令将拥有当前宿主机用户权限：
-
-```toml
-[execution]
-backend = "host"
-acknowledge_unsafe_host_execution = true
-```
-
-完整边界见 [docs/SECURITY.md](docs/SECURITY.md) 和 [docs/EXECUTION.md](docs/EXECUTION.md)。
-
-## 环境要求
-
-- Linux 5.6+
-- Rust / Cargo 1.88+
-- Git
-- C 编译器（`rusqlite` 使用 bundled SQLite）
-- bubblewrap（默认执行后端）
-- 可用的非特权 user namespace
-
-服务拒绝以 root 身份启动。
-
-## 构建与验证
+在项目源码目录中：
 
 ```bash
-cargo test --all-targets
 cargo build --release
+cargo test --locked
 ```
 
-Bubblewrap 基础环境可以单独检查：
+可选：检查 Bubblewrap 环境是否具备所需工具链。
 
 ```bash
 ./target/release/endlessvibe --check-sandbox
 ```
 
-## Quick Start
+### 2. Initialize
 
-### 1. 创建 Workspace 根
+准备一个已存在的 Workspace 根目录，再初始化配置：
 
 ```bash
+mkdir -p "$HOME/projects"
+
 ./target/release/endlessvibe \
   --init \
-  --workspace projects=/home/user/projects \
+  --workspace "projects=$HOME/projects" \
   --public-url https://mcp.example.com
 ```
 
-`--init` 创建 Workspace 根、配置文件和随机 owner key。Workspace 本身没有写入/执行/Git 权限。
+`--init` 会创建配置和私有状态（包含 Owner Key）；不会自动向客户端授予项目权限。
 
-默认配置路径为 `$XDG_CONFIG_HOME/endlessvibe/config.toml`，未设置时为 `~/.config/endlessvibe/config.toml`；状态目录默认是 `$XDG_STATE_HOME/endlessvibe`，未设置时为 `~/.local/state/endlessvibe`。
-
-### 2. 挂载 Project
-
-先停止运行中的 EndlessVibe，再执行：
+### 3. Add a Project
 
 ```bash
+# 请先确保目标目录已经存在
 ./target/release/endlessvibe \
-  --add-project projects:EndlessVibe=/home/user/projects/EndlessVibe
+  --add-project "projects:website=$HOME/projects/website"
 ```
 
-如果省略 `:PROJECT_ID`，会使用目标目录名：
+Project 必须位于已登记的 Workspace 根目录之内。首次添加时也可选择 `--read-only` 或 `--no-exec` 收紧权限。
+
+### 4. Start
 
 ```bash
-./target/release/endlessvibe \
-  --add-project projects=/home/user/projects/BAfter
+./target/release/endlessvibe
 ```
 
-可以重复 `--add-project` 一次挂载多个 Project。`--read-only` 会关闭新 Project 的写入/执行/提交权限；`--no-exec` 只关闭命令执行。目标目录必须已经存在，并且必须严格位于指定 Workspace 根目录下。
+| 入口 | 默认地址 / 说明 |
+| --- | --- |
+| **Dashboard** | [http://127.0.0.1:20001](http://127.0.0.1:20001)（仅本地） |
+| **MCP** | `/mcp`，默认在 `20000` 端口监听；公网部署须配合 HTTPS |
+| **Nodes / Transfer** | 默认关闭；需要独立配置及双方确认配对 |
 
-生成的配置结构类似：
+可通过 `--status`、`--stop`、`--restart` 管理服务进程。
+
+### 5. Connect an MCP Client
+
+在 ChatGPT 或其他支持 MCP 的客户端中配置：
+
+```text
+Name:           EndlessVibe
+Server URL:     https://mcp.example.com/mcp
+Authentication: OAuth 2.0
+```
+
+把示例域名替换为实际的 `server.public_url`。反向代理 / Tunnel 除 `/mcp` 外，还必须放行 OAuth 相关端点。**不要将 `owner.key`、令牌或登录凭据放进 URL。**
+
+详见 [OAuth 接入](docs/OAUTH.md) 与 [Cloudflare Tunnel](docs/DOCKER_TUNNEL.md)。
+
+## Usage
+
+### Read and edit files
+
+```text
+list_workspaces
+  → list_projects(workspace)
+  → read_file(workspace, project, path)
+  → apply_patch(workspace, project, path, expected_sha256, edits)
+```
+
+已有文件必须提供读取时返回的 `expected_sha256`；创建文件使用 `MISSING`。Patch 使用精确文本替换，防止覆盖并发修改。
+
+### Run a job
+
+```json
+{
+  "workspace": "projects",
+  "project": "website",
+  "program": "cargo",
+  "args": ["test", "--locked"],
+  "request_id": "website-test-001",
+  "timeout_seconds": 120
+}
+```
+
+命令会返回 Job ID。之后通过 `get_job` / `get_job_output` 查询结果；网络中断时先查询原请求状态，**不要换一个请求 ID 盲目重放**。
+
+### Review and commit changes
+
+```text
+git_status
+  → git_diff(paths)
+  → Review changes
+  → git_commit(paths, expected_head, expected_diff_sha256)
+```
+
+`git_commit` 只提交通过审查的路径，不会默认执行 Push；远端推送需要额外启用 Project 权限。
+
+## Architecture
+
+```mermaid
+flowchart TB
+    Client["ChatGPT / MCP Clients"] -->|"OAuth 2.0 + PKCE"| MCP["Rust MCP Server"]
+    Browser["Local Browser"] --> Dashboard["Dashboard · 127.0.0.1:20001"]
+    MCP --> Runtime["Workspace / Project Runtime"]
+    Dashboard --> Runtime
+    Runtime --> Files["Files & Search"]
+    Runtime --> Jobs["Command Jobs & Checkpoints"]
+    Runtime --> Git["Git Review & Commit"]
+    Runtime --> Store["SQLite State & Audit"]
+    Runtime -.->|"Optional TLS pairing"| Nodes["Remote EndlessVibe Nodes"]
+```
+
+- **Rust**：Axum、Tokio、rmcp、Rusqlite、Rustls。
+- **Web UI**：随 Rust 服务一起分发的静态资源；无需额外部署前端服务。
+- **State**：SQLite 存储认证、任务、操作和节点状态；敏感内容按不同接口进行脱敏或限制保留。
+- **Isolation**：项目锁、文件系统边界以及可配置的命令执行后端。
+
+## Configuration
+
+配置文件默认位于 `~/.config/endlessvibe/config.toml`，状态目录默认位于 `~/.local/state/endlessvibe`（遵循对应的 XDG 环境变量）。
+
+配置中的 Workspace / Project 示例：
 
 ```toml
 [[workspaces]]
@@ -114,161 +240,63 @@ id = "projects"
 path = "/home/user/projects"
 
 [[workspaces.projects]]
-id = "EndlessVibe"
-path = "EndlessVibe"
+id = "website"
+path = "website"
 allow_write = true
 allow_exec = true
 allow_git_commit = true
 allow_git_mutation = false
 allow_git_push = false
+execution_profile = "isolated"
 ```
 
-旧版 flat workspace 配置仍可读取用于迁移，但新 CLI 只写入两层格式。
+可用的 Project 执行模式：
 
-### 3. 启动
+| Profile | 用途 |
+| --- | --- |
+| `isolated` | 默认受限开发环境，使用 Bubblewrap 的隔离能力 |
+| `development` | 可信开发项目，可按配置共享主机网络，但仍受执行后端约束 |
+| `trusted_host` | 显式高风险选项：配合已确认的 Host 后端，允许运行 PATH 中已安装的本机工具 |
+
+`trusted_host` **不是默认功能**。它要求全局启用无沙箱的 Host 执行，会影响其他可执行项目的隔离安全性；仅应在受控环境中使用。
+
+完整配置示例见 [config/config.example.toml](config/config.example.toml)，执行模式与工具链说明见 [docs/EXECUTION.md](docs/EXECUTION.md)。
+
+## Security
+
+EndlessVibe 是**单用户、自托管**开发工具，不应作为允许不可信用户共享宿主权限的多租户服务。
+
+- **授权优先**：私有 MCP 工具需要 OAuth 认证及对应 Scope；Project 权限显式配置。
+- **路径保护**：文件 API 不允许逃逸 Project 根目录或通过符号链接绕过边界。
+- **默认执行隔离**：Bubblewrap 不默认暴露真实 HOME、SSH 凭据、Docker Socket 或服务状态目录。
+- **危险操作需显式开启**：Shell、Docker 修改、Git Push 和 Host 执行均有独立条件或配置约束。
+- **可追溯**：Job、操作日志和恢复状态持久化；未知执行结果不能推断为“未执行”。
+- **Dashboard 仅监听本机**：不要通过公网反向代理暴露管理界面。
+
+请阅读 [安全模型](docs/SECURITY.md) 和 [执行模型](docs/EXECUTION.md)，再开放外部 MCP 客户端或切换执行后端。
+
+## Development
 
 ```bash
-./target/release/endlessvibe
+cargo fmt --check
+cargo test --locked
+cargo build --release
 ```
 
-本地 Dashboard：`http://127.0.0.1:20001/`
+提交代码时建议按功能拆分 Commit，在每次修改后检查 `git diff` 和相应测试。项目遵循 MIT License，欢迎通过 Issue / Pull Request 讨论问题与改进。
 
-MCP endpoint：`http://127.0.0.1:20000/mcp`
+## Documentation
 
-公网部署应使用 HTTPS，并让 `server.public_url` 与公开 origin 一致。
-
-### 4. 进程控制
-
-新版本启动后会在私有 state 目录维护 `service.pid`，记录 PID 与 Linux `/proc` start time，避免 PID 被复用后误杀其他进程。
-
-```bash
-# 查看状态
-./target/release/endlessvibe --status
-
-# 优雅退出
-./target/release/endlessvibe --stop
-
-# 优雅停止旧实例，然后由当前二进制直接重新启动
-./target/release/endlessvibe --restart
-```
-
-如果使用非默认配置：
-
-```bash
-./target/release/endlessvibe --config /path/to/config.toml --restart
-```
-
-`--stop` / `--restart` 发送 `SIGTERM` 并最多等待 15 秒，不会自动 `SIGKILL`。如果升级前的旧实例还没有 `service.pid`，需要最后一次使用原有方式停止并启动新版本；从新版本成功启动后即可一直使用上述内置命令。
-
-### 5. 连接 ChatGPT
-
-- Name：`EndlessVibe`
-- MCP URL：`https://mcp.example.com/mcp`
-- Authentication：OAuth
-- Client registration：自动注册 / DCR
-
-不要把 `owner.key` 放入 URL、聊天记录或公开配置。详见 [docs/OAUTH.md](docs/OAUTH.md)。
-
-## MCP 工具
-
-`hello` / `get_service_status` 会同时返回服务版本、`tool_schema_revision` 和工具数量。若 Dashboard `/mcp` 已显示新的 revision，但 ChatGPT 仍缺少新工具，说明客户端仍缓存旧 MCP schema，需要重新连接或刷新插件。
-
-| 类别 | 工具 |
-|---|---|
-| 连接 | `hello`, `get_service_status` |
-| Workspace / Project | `list_workspaces`, `list_projects`, `inspect_project` |
-| 文件 | `list_directory`, `read_file`, `write_file`, `apply_patch`, `create_directory`, `search_code` |
-| 命令 | `run_command`, `run_shell` |
-| 任务 | `get_job`, `get_job_output`, `cancel_job`, `list_jobs`, `get_task_checkpoint`, `list_task_checkpoints` |
-| Git | `git_status`, `git_diff`, `git_log`, `git_commit`, `git_push` |
-
-除连接和 Job 查询类工具外，Project 操作统一使用：
-
-```json
-{"workspace":"projects","project":"EndlessVibe"}
-```
-
-路径始终相对于 Project 根，而不是 Workspace 根。
-
-### 文件编辑
-
-`read_file` 返回完整文件 SHA-256。修改已有文件必须把该摘要作为 `expected_sha256`；创建新文件使用字面量 `MISSING`。`apply_patch` 是精确 `old_text -> new_text` 替换，不是 unified diff。
-
-### 异步命令与并发
-
-`run_command` / `run_shell` 的请求键由 `workspace + project + request_id` 组成。相同组合和相同参数在去重窗口内复用；参数不同则冲突。
-
-例如 `projects/BAfter` 与 `projects/mHypr` 可以同时执行任务，只要没有超过全局 `max_jobs`；`projects/BAfter` 自己的文件、命令和 Git 操作会争用同一 Project 锁。
-
-长任务建议始终携带稳定的 `task_id` 和当前 `stage`：
-
-```json
-{"workspace":"projects","project":"BAfter","program":"cargo","args":["check"],"request_id":"release-check-01","task_id":"release-031","stage":"validate","timeout_seconds":120}
-```
-
-Job 会把 `job_id` 和终态写入阶段 checkpoint。阶段最终通过 `git_commit` 提交时继续传相同的 `task_id + stage`，该 commit SHA 会成为该阶段的持久恢复点。ChatGPT stream 中断后使用：
-
-```json
-{"workspace":"projects","project":"BAfter","task_id":"release-031"}
-```
-
-调用 `get_task_checkpoint`，即可取得最新阶段、关联 Job、Job 状态和最后 commit，无需猜测上一轮执行到了哪里。Job 成功本身不代表阶段完成；只有成功 commit 的阶段状态为 `committed`。
-
-### Git
-
-推荐流程：
-
-```text
-git_status(workspace, project)
-  → git_diff(workspace, project, paths)
-  → 审查 diff
-  → git_commit(workspace, project, paths, expected_head, expected_diff_sha256)
-```
-
-`git_commit` 不执行 hooks、签名或 push，不覆盖无关暂存内容，也不改写工作树。长任务可以额外传 `task_id + stage`；commit 成功后会自动记录 checkpoint。需要在 bubblewrap 内通过 `run_command git` 执行 `switch/merge/branch/add/commit` 等本地 Git 变更时，可对单个 Project 显式设置 `allow_git_mutation=true`；它要求 `allow_write=true` 和 `allow_exec=true`。远端推送使用独立的 `allow_git_push=true` 与 `git_push(remote, branch, expected_head)`；它先校验本地 branch HEAD、查询远端 HEAD 并执行 dry-run，只允许把已存在的本地 branch 非 force 地推送到预配置 remote 的同名 branch。`run_command` 仍继续拒绝 `git push/fetch/pull/...` 网络子命令。详见 [docs/GIT_RECOVERY.md](docs/GIT_RECOVERY.md) 与 [docs/EXECUTION.md](docs/EXECUTION.md)。
-
-## Cloudflare Tunnel
-
-如果 EndlessVibe 在宿主机、cloudflared 在 Docker 中，可以将整个 hostname 转发到 `http://host.docker.internal:20000`。不要只代理 `/mcp`，OAuth 还需要 `/.well-known/*` 和 `/oauth/*`。详见 [docs/DOCKER_TUNNEL.md](docs/DOCKER_TUNNEL.md)。
-
-## 已知限制
-
-Git 工具只支持 `.git` 为真实目录的 standalone repository，不支持 linked worktree、bare repository、部分 clone/sparse 配置和依赖 filters/LFS helper 的转换流程。Project 之间禁止目录重叠；一个 Project 只能属于一个明确的 Workspace 根。
-
-文件工具会过滤常见敏感名称，但不能识别所有源码中的凭据。允许执行命令的 Project 中不应保存真实秘密。
-
-## 项目结构
-
-```text
-src/
-├── config.rs
-├── runtime.rs
-├── workspace.rs
-├── mcp.rs
-├── security/
-└── tools/
-    ├── filesystem.rs
-    ├── process.rs
-    ├── jobs.rs
-    ├── git.rs
-    └── types.rs
-
-config/               配置示例
-deploy/               Cloudflare Tunnel 示例
-tests/integration.rs   Rust 集成测试
-docs/                  安全、OAuth、工具、沙箱与恢复文档
-web/                   内嵌状态页面
-```
-
-## 文档
-
-- [MCP 工具参数](docs/TOOLS.md)
-- [命令执行与 sandbox](docs/EXECUTION.md)
-- [安全模型](docs/SECURITY.md)
-- [Git 恢复与限制](docs/GIT_RECOVERY.md)
-- [OAuth 与 ChatGPT 接入](docs/OAUTH.md)
-- [Cloudflare Tunnel](docs/DOCKER_TUNNEL.md)
+| 文档 | 内容 |
+| --- | --- |
+| [Tools](docs/TOOLS.md) | MCP 工具及参数 |
+| [Execution](docs/EXECUTION.md) | Bubblewrap、Host、Toolchain、Job 与预检 |
+| [Security](docs/SECURITY.md) | 权限、安全边界与部署注意事项 |
+| [OAuth](docs/OAUTH.md) | OAuth 2.0、PKCE 与客户端接入 |
+| [Git Recovery](docs/GIT_RECOVERY.md) | Git 审查、提交与恢复 |
+| [Node Transfer](docs/TRANSFER.md) | 节点发现、授权、请求去重与诊断 |
+| [Cloudflare Tunnel](docs/DOCKER_TUNNEL.md) | HTTPS / Tunnel 部署 |
 
 ## License
 
-[MIT](LICENSE)
+EndlessVibe 基于 [MIT License](LICENSE) 开源。

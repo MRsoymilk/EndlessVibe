@@ -18,7 +18,7 @@ pub fn create_router(rt:Arc<Runtime>)->Router{
     let mcp=StreamableHttpService::new(move||Ok(EndlessVibeMcp::new(tool_state.clone())),LocalSessionManager::default().into(),transport);
     let protected:Router<Arc<Runtime>>=Router::new().route_service("/mcp",mcp.clone()).route_service("/mcp/",mcp).route_layer(middleware::from_fn_with_state(rt.clone(),auth::protect));
     let oauth=Router::new().route("/.well-known/oauth-authorization-server",get(auth::oauth_metadata)).route("/.well-known/oauth-protected-resource",get(auth::protected_metadata)).route("/.well-known/oauth-protected-resource/mcp",get(auth::protected_metadata)).route("/oauth/register",post(auth::register)).route("/oauth/authorize",get(auth::authorize).post(auth::consent)).route("/oauth/token",post(auth::token)).route("/oauth/revoke",post(auth::revoke)).layer(DefaultBodyLimit::max(16384));
-    Router::new().route("/health",get(web::status)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
+    Router::new().route("/health",get(web::status)).route("/favicon.ico",get(web::favicon)).route("/assets/EndlessVibe.png",get(web::brand_icon)).route("/assets/app.css",get(web::css)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
 }
 
 pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
@@ -30,10 +30,17 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/operations",get(web::home))
         .route("/mcp",get(web::home))
         .route("/config",get(web::home))
+        .route("/nodes",get(web::home))
         .route("/assets/app.css",get(web::css))
+        .route("/assets/theme.css",get(web::theme_css))
+        .route("/assets/js/preferences-init.js",get(web::preferences_init))
+        .route("/assets/js/preferences.js",get(web::preferences_js))
+        .route("/assets/EndlessVibe.png",get(web::brand_icon))
+        .route("/manifest.webmanifest",get(web::webmanifest))
         .route("/assets/app.js",get(web::javascript))
         .route("/assets/js/common.js",get(web::javascript_common))
         .route("/assets/js/mcp.js",get(web::javascript_mcp))
+        .route("/assets/js/nodes.js",get(web::javascript_nodes))
         .route("/assets/js/charts.js",get(web::javascript_charts))
         .route("/vendor/uPlot/uPlot.min.css",get(web::uplot_css))
         .route("/vendor/uPlot/uPlot.iife.min.js",get(web::uplot_javascript))
@@ -42,10 +49,20 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/metrics",get(web::metrics))
         .route("/api/activity",get(web::activity))
         .route("/api/config",get(web::config))
+        .route("/api/nodes",get(web::node_discoveries))
+        .route("/api/nodes/metrics",get(web::node_metrics))
+        .route("/api/nodes/read",post(web::node_read))
+        .route("/api/nodes/write",post(web::node_write))
+        .route("/api/nodes/pending",get(web::node_pending))
+        .route("/api/nodes/peers",get(web::node_peers))
+        .route("/api/nodes/pair",post(web::node_pair_start))
+        .route("/api/nodes/approve",post(web::node_pair_approve))
+        .route("/api/nodes/peers/{node_id}",axum::routing::delete(web::node_pair_revoke))
         .route("/api/config/reload",post(web::reload_config))
         .route("/api/config/execution/readonly-mounts",put(web::update_readonly_mounts))
         .route("/api/config/git",put(web::update_git))
         .route("/api/config/docker",put(web::update_docker))
+        .route("/api/config/transfer",put(web::update_transfer))
         .route("/api/config/limits",put(web::update_limits))
         .route("/api/storage",get(web::storage_health))
         .route("/api/sandbox",get(web::sandbox_diagnostics))

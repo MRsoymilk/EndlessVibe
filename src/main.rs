@@ -112,6 +112,7 @@ async fn main()->Result<()>{
     let listener=tokio::net::TcpListener::bind(settings.server.bind).await.with_context(||format!("Cannot listen on {}; stop the previous EndlessVibe process",settings.server.bind))?;settings.server.bind=listener.local_addr()?;
     let rt=Runtime::new(settings,&path)?;let _service_pid=util::install_service_identity(&rt.config.security.data_dir)?;let app=server::create_router(rt.clone());
     let telemetry_rt=rt.clone();let telemetry_task=tokio::spawn(async move{let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);loop{tokio::select!{_=telemetry_rt.shutdown.cancelled()=>break,_=interval.tick()=>{let(requests,rx_bytes,tx_bytes)=telemetry_rt.take_http_traffic();if requests>0||rx_bytes>0||tx_bytes>0{if let Err(error)=telemetry_rt.db.record_traffic(requests,rx_bytes,tx_bytes){tracing::warn!(error=%error,"Could not persist HTTP traffic metrics");}telemetry_rt.publish_dashboard("metrics_changed",serde_json::json!({"http_requests":requests,"rx_bytes":rx_bytes,"tx_bytes":tx_bytes,"active_jobs":telemetry_rt.jobs.active_count()}));}}}}let(requests,rx_bytes,tx_bytes)=telemetry_rt.take_http_traffic();if requests>0||rx_bytes>0||tx_bytes>0{let _=telemetry_rt.db.record_traffic(requests,rx_bytes,tx_bytes);}});
+    let transfer_manager=rt.transfer.clone();let transfer_shutdown=rt.shutdown.clone();let transfer_rt=rt.clone();let transfer_task=tokio::spawn(async move{if let Err(error)=transfer_manager.run(transfer_shutdown,transfer_rt).await{tracing::warn!(error=%error,"Transfer discovery stopped");}});
     let dashboard_listener=tokio::net::TcpListener::bind("127.0.0.1:20001")
         .await
         .context("Cannot listen on Dashboard 127.0.0.1:20001")?;
@@ -127,7 +128,7 @@ async fn main()->Result<()>{
     if rt.config.execution.backend=="bubblewrap"&&!rt.config.execution.bubblewrap.exists(){tracing::warn!("bubblewrap is not installed; file/Git tools work, command jobs fail closed until it is installed");}
     eprintln!("Dashboard: http://127.0.0.1:20001/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.public_url);
     let shutdown_rt=rt.clone();let result=axum::serve(listener,app).with_graceful_shutdown(async move{shutdown_signal().await;shutdown_rt.jobs.cancel_all();shutdown_rt.shutdown.cancel();}).await;
-    rt.shutdown.cancel();dashboard_task.abort();let _=dashboard_task.await;let _=telemetry_task.await;
+    rt.shutdown.cancel();let _=transfer_task.await;dashboard_task.abort();let _=dashboard_task.await;let _=telemetry_task.await;
     rt.jobs.shutdown().await;rt.wait_for_operations().await;result.context("HTTP server failed")
 }
 async fn shutdown_signal(){

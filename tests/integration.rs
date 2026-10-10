@@ -7,6 +7,304 @@ use sha2::{Digest,Sha256};
 use std::{path::Path,sync::Arc,time::Duration};
 use tower::ServiceExt;
 
+
+#[tokio::test]
+async fn brand_icon_is_a_real_png_on_dashboard_and_public_oauth_routes(){
+ let f=fixture(|_|{});
+ let reference=include_bytes!("../EndlessVibe.png");
+ assert!(reference.starts_with(b"\x89PNG\r\n\x1a\n"));
+ assert!(reference.len()>1000);
+ assert!(matches!(reference[25],4|6),"Brand icon PNG must have transparency");
+ for (site,router) in [
+  ("dashboard",server::create_dashboard_router(f.rt.clone())),
+  ("oauth",server::create_router(f.rt.clone()))
+ ]{
+  for path in ["/assets/EndlessVibe.png","/favicon.ico"]{
+   let request=Request::builder().uri(path).header(header::HOST,"localhost").body(Body::empty()).unwrap();
+   let response=router.clone().oneshot(request).await.unwrap();
+   assert_eq!(response.status(),StatusCode::OK,"{site} {path}");
+   assert_eq!(response.headers().get(header::CONTENT_TYPE).unwrap(),"image/png");
+   let actual=to_bytes(response.into_body(),2*1024*1024).await.unwrap();
+   assert_eq!(actual.as_ref(),reference,"{site} {path}");
+  }
+ }
+ let width=u32::from_be_bytes(reference[16..20].try_into().unwrap());
+ let height=u32::from_be_bytes(reference[20..24].try_into().unwrap());
+ let dashboard=server::create_dashboard_router(f.rt.clone());
+ let page=dashboard.clone().oneshot(Request::builder().uri("/").header(header::HOST,"localhost").body(Body::empty()).unwrap()).await.unwrap();
+ assert_eq!(page.status(),StatusCode::OK);
+ let html=String::from_utf8(to_bytes(page.into_body(),2*1024*1024).await.unwrap().to_vec()).unwrap();
+ assert!(html.contains("class=\"brand-icon\""));
+ assert!(html.contains("rel=\"icon\""));
+ assert!(html.contains("rel=\"apple-touch-icon\""));
+ assert!(html.contains("href=\"/manifest.webmanifest\""));
+ let manifest_response=dashboard.oneshot(Request::builder().uri("/manifest.webmanifest").header(header::HOST,"localhost").body(Body::empty()).unwrap()).await.unwrap();
+ assert_eq!(manifest_response.status(),StatusCode::OK);
+ assert!(manifest_response.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().starts_with("application/manifest+json"));
+ let manifest:Value=serde_json::from_slice(&to_bytes(manifest_response.into_body(),65536).await.unwrap()).unwrap();
+ assert_eq!(manifest["name"],"EndlessVibe");
+ assert_eq!(manifest["icons"][0]["src"],"/assets/EndlessVibe.png");
+ assert_eq!(manifest["icons"][0]["sizes"].as_str().unwrap(),format!("{width}x{height}"));
+ assert!(include_str!("../src/security/auth.rs").contains("class=\"brand-icon oauth-icon\""));
+}
+#[test]fn transfer_pair_grants_do_not_exceed_child_permissions(){let f=fixture(|c|c.transfer.enabled=true);let id="abcdef123456abcdef123456";let secret="a".repeat(44);let offer=endlessvibe::transfer::secure::Wire{kind:"pair_hello".into(),node_id:id.into(),name:"Parent".into(),id:"123456789012345678901234".into(),token:secret.clone(),tool:String::new(),args:Value::Null};let v=f.rt.transfer.receive_pair(&offer,"127.0.0.1:23456".parse().unwrap(),"cert").unwrap();assert_eq!(v["ok"],true);let p=endlessvibe::transfer::secure::PairApprove{id:"123456789012345678901234".into(),grants:vec![endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:false,execute:false,git:false}]};assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","read").is_err());assert_eq!(f.rt.transfer.approve_pair(p,&f.rt).unwrap()["paired"],true);assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","read").is_ok());assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","write").is_err());assert!(f.rt.transfer.authorized(id,"wrong-token","demo","demo","read").is_err());assert!(f.rt.transfer.receive_pair(&endlessvibe::transfer::secure::Wire{node_id:"123456abcdef123456abcdef".into(),..offer},"127.0.0.1:23456".parse().unwrap(),"cert").is_err());assert_eq!(f.rt.transfer.revoke_pair(id).unwrap()["revoked"],true);assert!(f.rt.transfer.authorized(id,&secret,"demo","demo","read").is_err());}
+#[tokio::test]async fn transfer_parent_reads_child_over_pinned_tls_and_rejects_unpaired_work(){let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=socket.local_addr().unwrap();drop(socket);let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});let parent=fixture(|c|c.transfer.enabled=true);initialize_git(&child,true);let shutdown=tokio_util::sync::CancellationToken::new();let task=tokio::spawn(child.rt.transfer.clone().run_tls(shutdown.clone(),Some(child.rt.clone())));tokio::time::sleep(Duration::from_millis(100)).await;let pending=parent.rt.transfer.start_pair(address).await.unwrap();let id=pending["id"].as_str().unwrap().to_owned();assert_eq!(child.rt.transfer.pending().unwrap()["pending"][0]["code"],pending["code"]);let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:false,execute:false,git:false};child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:id.clone(),grants:vec![grant]},&child.rt).unwrap();parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id,grants:vec![]},&parent.rt).unwrap();let node_id=child.rt.transfer.node_id.clone();let ws=parent.rt.transfer.call_node(&node_id,"list_workspaces",json!({})).await.unwrap();assert_eq!(ws["workspaces"][0]["id"],"demo");let pj=parent.rt.transfer.call_node(&node_id,"list_projects",json!({"workspace":"demo"})).await.unwrap();assert_eq!(pj["projects"][0]["id"],"demo");let content=parent.rt.transfer.call_node(&node_id,"read_file",json!({"workspace":"demo","project":"demo","path":"src/main.rs"})).await.unwrap();assert!(content["content"].as_str().unwrap().contains("hello"));let git=parent.rt.transfer.call_node(&node_id,"git_status",json!({"workspace":"demo","project":"demo"})).await.unwrap();assert_eq!(git["branch"],"main");assert!(parent.rt.transfer.call_node(&node_id,"apply_patch",json!({"workspace":"demo","project":"demo"})).await.is_err());let app=server::create_dashboard_router(parent.rt.clone());let request=Request::builder().method("POST").uri("/api/nodes/read").header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json").header(header::ORIGIN,"http://localhost:20001").body(Body::from(json!({"node_id":node_id,"tool":"read_file","arguments":{"workspace":"demo","project":"demo","path":"src/main.rs"}}).to_string())).unwrap();let response=app.clone().oneshot(request).await.unwrap();assert_eq!(response.status(),StatusCode::OK);shutdown.cancel();task.await.unwrap().unwrap();assert!(parent.rt.transfer.call_node(&node_id,"read_file",json!({"workspace":"demo","project":"demo","path":"src/main.rs"})).await.is_err());}
+#[tokio::test]async fn transfer_parent_mutates_and_polls_child_jobs_over_tls(){
+let sock=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=sock.local_addr().unwrap();drop(sock);
+let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});let parent=fixture(|c|c.transfer.enabled=true);initialize_git(&child,true);
+let stop=tokio_util::sync::CancellationToken::new();let tls=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));tokio::time::sleep(Duration::from_millis(100)).await;
+let offer=parent.rt.transfer.start_pair(address).await.unwrap();let id=offer["id"].as_str().unwrap().to_owned();
+let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:true,git:true};
+child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:id.clone(),grants:vec![grant]},&child.rt).unwrap();
+parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id,grants:vec![]},&parent.rt).unwrap();
+let node=child.rt.transfer.node_id.clone();let w=json!({"workspace":"demo","project":"demo","path":"src/main.rs"});
+let original=parent.rt.transfer.call_node(&node,"read_file",w.clone()).await.unwrap();
+let h=original["sha256"].as_str().unwrap();
+let patch=json!({"workspace":"demo","project":"demo","path":"src/main.rs","expected_sha256":h,"edits":[{"old_text":"hello","new_text":"transferred","expected_occurrences":1}]});
+let written=parent.rt.transfer.call_node_with_request_id(&node,"apply_patch",patch.clone(),Some("integration-patch")).await.unwrap();
+let state=parent.rt.transfer.call_node(&node,"request_status",json!({"workspace":"demo","project":"demo","request_id":"integration-patch"})).await.unwrap();assert_eq!(state["state"],"completed");
+assert_eq!(parent.rt.transfer.call_node_with_request_id(&node,"apply_patch",patch,Some("integration-patch")).await.unwrap()["changed"],true);
+assert!(parent.rt.transfer.call_node(&node,"request_status",json!({"workspace":"demo","project":"other","request_id":"integration-patch"})).await.is_err());
+assert_eq!(written["changed"],true);assert!(parent.rt.transfer.call_node(&node,"read_file",w.clone()).await.unwrap()["content"].as_str().unwrap().contains("transferred"));
+assert!(parent.rt.transfer.call_node(&node,"apply_patch",json!({"workspace":"demo","project":"demo","path":"src/main.rs","expected_sha256":h,"edits":[{"old_text":"hello","new_text":"stale"}]})).await.is_err());
+let job=parent.rt.transfer.call_node(&node,"run_command",json!({"workspace":"demo","project":"demo","program":"git","args":["--version"],"request_id":"transfer-test-version","timeout_seconds":20})).await.unwrap();
+let job_id=job["job_id"].as_str().unwrap().to_owned();
+for _ in 0..80{let status=parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.unwrap();if status["status"]=="succeeded"{break;}tokio::time::sleep(Duration::from_millis(40)).await;}
+let status=parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.unwrap();assert_eq!(status["status"],"succeeded");
+let recent=parent.rt.transfer.call_node(&node,"request_history",json!({"workspace":"demo","project":"demo","limit":20})).await.unwrap();
+let linked=recent["requests"].as_array().unwrap().iter().find(|r|r["request_id"]=="transfer-test-version").unwrap();
+assert_eq!(linked["state"],"completed");
+assert_eq!(linked["job_status"],"succeeded");
+assert_eq!(linked["job_id"],job_id);
+let output=parent.rt.transfer.call_node(&node,"get_job_output",json!({"workspace":"demo","project":"demo","job_id":job_id,"limit":2048})).await.unwrap();assert!(output["output"].as_str().unwrap().contains("git version"));
+let task_id=job["task_id"].as_str().unwrap();let checkpoint=parent.rt.transfer.call_node(&node,"get_task_checkpoint",json!({"workspace":"demo","project":"demo","task_id":task_id})).await.unwrap();assert_eq!(checkpoint["latest"]["status"],"succeeded");let recovery=parent.rt.transfer.call_node(&node,"continue_task",json!({"workspace":"demo","project":"demo","task_id":task_id})).await.unwrap();assert_eq!(recovery["resolved_task_id"],task_id);
+let history=parent.rt.transfer.call_node(&node,"list_task_checkpoints",json!({"workspace":"demo","project":"demo","task_id":task_id,"limit":5})).await.unwrap();assert_eq!(history["checkpoints"].as_array().unwrap().len(),1);
+assert!(parent.rt.transfer.call_node(&node,"list_task_checkpoints",json!({"workspace":"other","project":"demo","task_id":task_id,"limit":5})).await.is_err());
+let replay=parent.rt.transfer.call_node(&node,"run_command",json!({"workspace":"demo","project":"demo","program":"git","args":["--version"],"request_id":"transfer-test-version","timeout_seconds":20})).await.unwrap();assert_eq!(replay["reused"],true);assert_eq!(replay["job_id"],job_id);
+assert!(parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":"not-the-same"})).await.is_err());
+assert!(parent.rt.transfer.call_node(&node,"run_shell",json!({"workspace":"demo","project":"demo","script":"echo bad"})).await.is_err());
+stop.cancel();tls.await.unwrap().unwrap();
+assert!(parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.is_err());
+let recovered=endlessvibe::transfer::TransferManager::new(child.rt.config.transfer.clone(),child.rt.db.clone()).unwrap();assert_eq!(recovered.node_id,node);assert_eq!(recovered.peers().unwrap()["peers"].as_array().unwrap().len(),1);
+let resume=tokio_util::sync::CancellationToken::new();let running=tokio::spawn(recovered.clone().run_tls(resume.clone(),Some(child.rt.clone())));tokio::time::sleep(Duration::from_millis(100)).await;
+let old=parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.unwrap();assert_eq!(old["status"],"succeeded");
+child.rt.transfer.revoke_pair(&parent.rt.transfer.node_id).unwrap();assert!(parent.rt.transfer.call_node(&node,"get_job",json!({"workspace":"demo","project":"demo","job_id":job_id})).await.is_err());
+resume.cancel();running.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn transfer_request_history_survives_runtime_restart_and_revocation(){
+ let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+ let address=socket.local_addr().unwrap();drop(socket);
+ let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});
+ let parent=fixture(|c|c.transfer.enabled=true);
+ let parent_id=parent.rt.transfer.node_id.clone();
+ let node_id=child.rt.transfer.node_id.clone();
+ let stop=tokio_util::sync::CancellationToken::new();
+ let server_task=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+ tokio::time::sleep(Duration::from_millis(100)).await;
+ let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+ let pair_id=offer["id"].as_str().unwrap().to_string();
+ let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false};
+ child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id.clone(),grants:vec![grant]},&child.rt).unwrap();
+ parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id,grants:vec![]},&parent.rt).unwrap();
+ let good=json!({"workspace":"demo","project":"demo","path":"restored-directory"});
+ parent.rt.transfer.call_node_with_request_id(&node_id,"create_directory",good.clone(),Some("confirmed-create")).await.unwrap();
+ let bad=json!({"workspace":"demo","project":"demo","path":"../outside-project"});
+ assert!(parent.rt.transfer.call_node_with_request_id(&node_id,"create_directory",bad.clone(),Some("rejected-create")).await.is_err());
+ let failed=parent.rt.transfer.call_node(&node_id,"request_status",json!({"workspace":"demo","project":"demo","request_id":"rejected-create"})).await.unwrap();
+ assert_eq!(failed["state"],"failed");
+
+ // Simulate the durable record left by a process killed after claiming a write,
+ // then actually stop the TLS listener and recreate the whole Runtime/Store.
+ let interrupted_id="crash-during-write";
+ let interrupted_args=json!({"workspace":"demo","project":"demo","path":"recovery.txt","expected_sha256":"MISSING","content":"sensitive payload"});
+ let digest=util::digest(format!("write_file\0{}",interrupted_args));
+ let kv_key=util::digest(format!("{parent_id}\0{interrupted_id}"));
+ let now=util::now();
+ let record=json!({"fingerprint":digest,"state":"started","result":null,
+  "workspace":"demo","project":"demo","tool":"write_file",
+  "error":null,"job_id":null,"request_id":interrupted_id,"peer_node_id":parent_id,
+  "created":now,"updated":now});
+ child.rt.db.put("transfer_requests",&kv_key,&record,0).unwrap();
+ let unknown=parent.rt.transfer.call_node(&node_id,"request_status",json!({"workspace":"demo","project":"demo","request_id":interrupted_id})).await.unwrap();
+ assert_eq!(unknown["state"],"uncertain");
+ let config=(*child.rt.config).clone();
+ let config_path=child.rt.config_path.clone();
+ stop.cancel();server_task.await.unwrap().unwrap();
+ drop(child.rt);
+ // An accepted TLS session may finish releasing its Runtime Arc just after
+ // the listener task exits; wait only for that known transient file lock.
+ let restarted=tokio::time::timeout(Duration::from_secs(3),async{
+  loop{
+   match Runtime::new(config.clone(),&config_path){
+    Ok(rt)=>break rt,
+    Err(error) if error.to_string().contains("Another EndlessVibe process is using this state directory")=>{
+     tokio::time::sleep(Duration::from_millis(20)).await;
+    },
+    Err(error)=>panic!("Transfer Runtime restart failed: {error:#}"),
+   }
+  }
+ }).await.expect("Active TLS sessions did not release the state lock after shutdown");
+ assert_eq!(restarted.transfer.node_id,node_id);
+ let resume=tokio_util::sync::CancellationToken::new();
+ let restart_task=tokio::spawn(restarted.transfer.clone().run_tls(resume.clone(),Some(restarted.clone())));
+ tokio::time::sleep(Duration::from_millis(100)).await;
+ let state=parent.rt.transfer.call_node(&node_id,"request_status",json!({"workspace":"demo","project":"demo","request_id":interrupted_id})).await.unwrap();
+ assert_eq!(state["state"],"interrupted");
+ assert_eq!(state["safe_to_replay"],false);
+ assert_eq!(state["recovery_action"],"inspect_project_before_new_request");
+ let history=parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":20})).await.unwrap();
+ let rows=history["requests"].as_array().unwrap();
+ let first_page=parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":1})).await.unwrap();
+ assert_eq!(first_page["requests"].as_array().unwrap().len(),1);
+ assert_eq!(first_page["has_more"],true);
+ let cursor=first_page["next_cursor"].as_str().unwrap();
+ let second_page=parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":1,"cursor":cursor})).await.unwrap();
+ assert_ne!(first_page["requests"][0]["request_id"],second_page["requests"][0]["request_id"]);
+ assert!(parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo","limit":1,"cursor":"invalid"})).await.is_err());
+ assert!(rows.iter().any(|r|r["request_id"]=="confirmed-create"&&r["state"]=="completed"));
+ assert!(rows.iter().any(|r|r["request_id"]=="rejected-create"&&r["state"]=="failed"));
+ assert!(rows.iter().any(|r|r["request_id"]==interrupted_id&&r["state"]=="interrupted"));
+ assert!(parent.rt.transfer.call_node_with_request_id(&node_id,"write_file",interrupted_args,Some(interrupted_id)).await.is_err());
+ assert!(!restarted.project("demo","demo").unwrap().root.path.join("recovery.txt").exists());
+ parent.rt.transfer.call_node_with_request_id(&node_id,"create_directory",good,Some("confirmed-create")).await.unwrap();
+ restarted.transfer.revoke_pair(&parent_id).unwrap();
+ assert!(parent.rt.transfer.call_node(&node_id,"request_history",json!({"workspace":"demo","project":"demo"})).await.is_err());
+ resume.cancel();restart_task.await.unwrap().unwrap();
+}
+#[tokio::test]
+async fn transfer_offline_and_lost_ack_do_not_replay_mutations(){
+    let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=socket.local_addr().unwrap();drop(socket);
+    let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});
+    let parent=fixture(|c|c.transfer.enabled=true);
+    let stop=tokio_util::sync::CancellationToken::new();
+    let server=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+    let pair_id=offer["id"].as_str().unwrap().to_owned();
+    let grant=endlessvibe::transfer::secure::Grant{workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:false,git:false};
+    child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id.clone(),grants:vec![grant]},&child.rt).unwrap();
+    parent.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{id:pair_id,grants:vec![]},&parent.rt).unwrap();
+    let node=child.rt.transfer.node_id.clone();
+    let workspace=child.rt.project("demo","demo").unwrap().root.path.clone();
+    stop.cancel();server.await.unwrap().unwrap();
+    let undelivered=json!({"workspace":"demo","project":"demo","path":"not-yet-delivered"});
+    assert!(parent.rt.transfer.call_node_with_request_id(&node,"create_directory",undelivered.clone(),Some("offline-delivery")).await.is_err());
+    assert!(!workspace.join("not-yet-delivered").exists());
+    let key=util::digest(format!("{}\0offline-delivery",parent.rt.transfer.node_id));
+    assert!(child.rt.db.get::<Value>("transfer_requests",&key).unwrap().is_none());
+    let resume=tokio_util::sync::CancellationToken::new();
+    let running=tokio::spawn(child.rt.transfer.clone().run_tls(resume.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    parent.rt.transfer.call_node_with_request_id(&node,"create_directory",undelivered,Some("offline-delivery")).await.unwrap();
+    assert!(workspace.join("not-yet-delivered").is_dir());
+    let delivered=json!({"workspace":"demo","project":"demo","path":"already-delivered"});
+    // Emulate an application losing the response after the child commits the side effect.
+    let acknowledged=parent.rt.transfer.call_node_with_request_id(&node,"create_directory",delivered.clone(),Some("lost-ack")).await.unwrap();
+    let response_digest=util::digest(acknowledged.to_string());drop(acknowledged);
+    assert!(workspace.join("already-delivered").is_dir());
+    let before:i64=child.rt.db.transaction(|tx|Ok(tx.query_row("SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get(0))?)).unwrap();
+    assert_eq!(before,2);
+    resume.cancel();running.await.unwrap().unwrap();
+    let reboot=tokio_util::sync::CancellationToken::new();
+    let rebooted=tokio::spawn(child.rt.transfer.clone().run_tls(reboot.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let replay=parent.rt.transfer.call_node_with_request_id(&node,"create_directory",delivered,Some("lost-ack")).await.unwrap();
+    assert_eq!(util::digest(replay.to_string()),response_digest);
+    let after:i64=child.rt.db.transaction(|tx|Ok(tx.query_row("SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get(0))?)).unwrap();
+    assert_eq!(after,before);
+    let status=parent.rt.transfer.call_node(&node,"request_status",json!({"workspace":"demo","project":"demo","request_id":"lost-ack"})).await.unwrap();
+    assert_eq!(status["state"],"completed");
+    assert_eq!(status["safe_to_replay"],false);
+    reboot.cancel();rebooted.await.unwrap().unwrap();
+}
+#[test]fn transfer_operation_audit_never_persists_remote_output_or_diff(){let f=fixture(|_|{});for tool in ["node_read","node_write","node_dashboard_write","transfer_get_job_output","transfer_git_diff"]{let op=f.rt.begin_operation(tool,"demo","demo",json!({"request_hash":"digest"}));let id=op.id.unwrap();let delivered=f.rt.finish_operation(op,Ok(json!({"output":"REMOTE_SECRET_LOG","diff":"REMOTE_SECRET_PATCH"}))).unwrap();assert_eq!(delivered["output"],"REMOTE_SECRET_LOG");let stored=f.rt.db.operation(id).unwrap();assert_eq!(stored["output"]["redacted"],true);assert!(!stored.to_string().contains("REMOTE_SECRET_LOG"));assert!(!stored.to_string().contains("REMOTE_SECRET_PATCH"));}}
+#[tokio::test]
+async fn dashboard_theme_language_and_bilingual_readmes_are_available(){
+ let f=fixture(|_|{});
+ let router=server::create_dashboard_router(f.rt.clone());
+ for page in ["/","/projects","/tasks","/activity","/operations","/mcp","/config","/nodes"]{
+  let response=http(&router,"GET",page,Body::empty(),None,None,None).await;
+  assert_eq!(response.status(),StatusCode::OK,"{page}");
+  let body=to_bytes(response.into_body(),100_000).await.unwrap();
+  let html=String::from_utf8_lossy(&body);
+  for marker in ["id=\"theme-select\"","id=\"language-select\"",
+     "/assets/js/preferences-init.js","/assets/theme.css","/assets/app.js"]{
+    assert!(html.contains(marker),"{page} missing {marker}");
+  }
+ }
+ for (path,marker) in [
+   ("/assets/theme.css","html[data-theme=\"light\"]"),
+   ("/assets/js/preferences-init.js","endlessvibe.theme"),
+   ("/assets/js/preferences.js","initPreferences"),
+   ("/assets/js/preferences.js","MutationObserver"),
+   ("/assets/js/charts.js","refreshChartTheme"),
+ ]{
+  let response=http(&router,"GET",path,Body::empty(),None,None,None).await;
+  assert_eq!(response.status(),StatusCode::OK,"{path}");
+  let mime=response.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().to_owned();
+  assert!(mime.contains(if path.ends_with(".css"){"text/css"}else{"text/javascript"}));
+  let bytes=to_bytes(response.into_body(),150_000).await.unwrap();
+  assert!(String::from_utf8_lossy(&bytes).contains(marker),"{path} missing {marker}");
+ }
+ let zh=include_str!("../README.md");
+ let en=include_str!("../README.en.md");
+ assert!(zh.contains("README.en.md"));
+ assert!(en.contains("README.md"));
+ assert!(en.contains("## Quick Start"));
+ for filename in ["dashboard","projects","tasks","operations","nodes"]{
+  let zh_image=format!("docs/screenshots/{filename}.jpg");
+  let en_image=format!("docs/screenshots/{filename}-en-light.jpg");
+  assert!(zh.contains(&zh_image),"Chinese README missing {zh_image}");
+  assert!(en.contains(&en_image),"English README missing {en_image}");
+  for image in [&zh_image,&en_image]{
+   assert!(std::path::Path::new(image).exists(),"missing screenshot: {image}");
+  }
+ }
+}
+
+#[tokio::test]
+async fn nodes_request_history_ui_assets_are_served(){
+ let f=fixture(|_|{});
+ let router=server::create_dashboard_router(f.rt.clone());
+ for (path,expected) in [
+  ("/nodes","id=\"node-request-history\""),
+  ("/assets/js/nodes.js","loadRequestHistory"),
+  ("/assets/js/nodes.js","request_history"),
+  ("/assets/js/nodes.js","Load older requests"),
+  ("/nodes","id=\"node-metrics\""),
+  ("/assets/js/nodes.js","renderTransferMetrics"),
+  ("/assets/js/nodes.js","/api/nodes/metrics"),
+  ("/assets/app.css",".node-metrics article"),
+  ("/assets/app.css",".node-history-state[data-state=\"interrupted\"]"),
+ ]{
+  let response=http(&router,"GET",path,Body::empty(),None,None,None).await;
+  assert_eq!(response.status(),StatusCode::OK,"{path}");
+  let body=to_bytes(response.into_body(),2*1024*1024).await.unwrap();
+  assert!(String::from_utf8_lossy(&body).contains(expected),"{path} missing {expected}");
+ }
+}
+
+#[tokio::test]
+async fn transfer_metrics_are_local_only_and_aggregate(){
+ let child=fixture(|c|c.transfer.enabled=true);
+ child.rt.db.put("transfer_requests","secret-record",
+     &json!({"state":"failed","fingerprint":"PRIVATE_CREDENTIAL","result":null}),0).unwrap();
+ let app=server::create_dashboard_router(child.rt.clone());
+ let response=http(&app,"GET","/api/nodes/metrics",Body::empty(),None,None,None).await;
+ assert_eq!(response.status(),StatusCode::OK);
+ let metrics=json_body(response).await;
+ assert_eq!(metrics["request_records"]["review_required"],1);
+ assert_eq!(metrics["request_records"]["failed"],1);
+ assert_eq!(metrics["contains_request_contents"],false);
+ assert!(!metrics.to_string().contains("PRIVATE_CREDENTIAL"));
+ let public=server::create_router(child.rt.clone());
+ let request=Request::builder().uri("/api/nodes/metrics").header(header::HOST,"localhost").body(Body::empty()).unwrap();
+ assert_eq!(public.oneshot(request).await.unwrap().status(),StatusCode::NOT_FOUND);
+}
+#[tokio::test]async fn nodes_dashboard_and_transfer_config_endpoint_are_local_only(){let f=fixture(|_|{});let app=server::create_dashboard_router(f.rt.clone());for(path,text)in[("/nodes","id=\"node-pending-list\""),("/assets/js/nodes.js","renderTrusted")]{let response=http(&app,"GET",path,Body::empty(),None,None,None).await;assert_eq!(response.status(),StatusCode::OK);let bytes=to_bytes(response.into_body(),2*1024*1024).await.unwrap();assert!(String::from_utf8_lossy(&bytes).contains(text));}let old=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;let request=Request::builder().method("PUT").uri("/api/config/transfer").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"expected_revision":old["revision"],"enabled":true,"listen":"0.0.0.0:20002","advertise":true,"discover":true,"display_name":"Child Test"}).to_string())).unwrap();let response=app.clone().oneshot(request).await.unwrap();assert_eq!(response.status(),StatusCode::OK);assert_eq!(json_body(response).await["requires_restart"],true);let config=json_body(http(&app,"GET","/api/config",Body::empty(),None,None,None).await).await;assert_eq!(config["transfer"]["display_name"],"Child Test");let denied=Request::builder().method("POST").uri("/api/nodes/read").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"write_file","arguments":{}}).to_string())).unwrap();assert_eq!(app.clone().oneshot(denied).await.unwrap().status(),StatusCode::FORBIDDEN);let missing_confirm=Request::builder().method("POST").uri("/api/nodes/write").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"run_command","arguments":{"workspace":"demo","project":"demo"},"confirm":false}).to_string())).unwrap();assert_eq!(app.clone().oneshot(missing_confirm).await.unwrap().status(),StatusCode::FORBIDDEN);let forbidden=Request::builder().method("POST").uri("/api/nodes/write").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(json!({"node_id":"123456789012345678901234","tool":"run_shell","arguments":{},"confirm":true}).to_string())).unwrap();assert_eq!(app.clone().oneshot(forbidden).await.unwrap().status(),StatusCode::FORBIDDEN);}
 struct Fixture{_dir:tempfile::TempDir,rt:Arc<Runtime>,owner:String}
 fn fixture(edit:impl FnOnce(&mut Config))->Fixture{
     let d=tempfile::tempdir().unwrap();let root=d.path().join("workspace");let project=root.join("project");std::fs::create_dir_all(project.join("src")).unwrap();std::fs::write(project.join("src/main.rs"),"fn main() {\n    println!(\"hello\");\n}\n").unwrap();
@@ -30,6 +328,36 @@ fn initialize_git(f:&Fixture,initial:bool){let w=f.rt.project("demo","demo").unw
 #[tokio::test]async fn git_diff_is_paginated_with_stable_review_token(){let f=fixture(|_|{});initialize_git(&f,true);let w=f.rt.project("demo","demo").unwrap();std::fs::write(w.root.path.join("tracked.txt"),(0..300).map(|i|format!("changed-line-{i:03}\n")).collect::<String>()).unwrap();let paths=vec!["tracked.txt".into()];let first=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),project:"demo".into(),paths:paths.clone(),offset:0,limit:512,task_id:None,stage:None}).await.unwrap();assert_eq!(first["has_more"],true);assert!(first["total_bytes"].as_u64().unwrap()>first["diff"].as_str().unwrap().len() as u64);let second=git::diff(&f.rt,&w,DiffArgs{workspace:"demo".into(),project:"demo".into(),paths,offset:first["next_offset"].as_u64().unwrap(),limit:512,task_id:None,stage:None}).await.unwrap();assert_eq!(first["diff_sha256"],second["diff_sha256"]);assert_eq!(first["head"],second["head"]);assert!(second["offset"].as_u64().unwrap()>0);}
 
 async fn wait_job(rt:&Arc<Runtime>,id:&str)->Value{for _ in 0..150{let j=rt.jobs.get(id).unwrap();if !matches!(j["status"].as_str(),Some("queued"|"running")){return j;}tokio::time::sleep(Duration::from_millis(30)).await;}panic!("Job did not finish");}
+#[tokio::test]
+async fn trusted_host_project_can_run_unlisted_local_tool_without_shell_api(){
+ let f=fixture(|c|{
+  c.execution.backend="host".into();
+  c.execution.acknowledge_unsafe_host_execution=true;
+  c.execution.allow_shell=false;
+  c.workspaces[0].projects[0].execution_profile="trusted_host".into();
+ });
+ let args=CommandArgs{workspace:"demo".into(),project:"demo".into(),
+  program:"sh".into(),args:vec!["-c".into(),"printf TRUSTED_HOST_OK".into()],
+  cwd:".".into(),request_id:"trusted-host-shell-command".into(),
+  timeout_seconds:Some(5),preflight_programs:vec![],
+  environment:Default::default(),network:None,task_id:None,stage:None};
+ assert!(!f.rt.config.execution.allowed_programs.contains(&"sh".to_owned()));
+ let job=f.rt.jobs.submit(f.rt.clone(),args,false).await.unwrap();
+ let id=job["job_id"].as_str().unwrap();
+ let finished=wait_job(&f.rt,id).await;
+ assert_eq!(finished["status"],"succeeded");
+ let output=f.rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:1024}).unwrap();
+ assert!(output["output"].as_str().unwrap().contains("TRUSTED_HOST_OK"));
+ assert_eq!(job["preflight"]["execution_profile"],"trusted_host");
+ let app=server::create_dashboard_router(f.rt.clone());
+ let page=http(&app,"GET","/projects",Body::empty(),None,None,None).await;
+ assert_eq!(page.status(),StatusCode::OK);
+ let html=to_bytes(page.into_body(),2*1024*1024).await.unwrap();
+ assert!(String::from_utf8_lossy(&html).contains("value=\"trusted_host\""));
+ let script=http(&app,"GET","/assets/app.js",Body::empty(),None,None,None).await;
+ let source=to_bytes(script.into_body(),2*1024*1024).await.unwrap();
+ assert!(String::from_utf8_lossy(&source).contains("trusted_host"));
+}
 #[tokio::test]async fn jobs_return_output_and_deduplicate(){let f=fixture(|_|{});let a=CommandArgs{workspace:"demo".into(),project:"demo".into(),program:"git".into(),args:vec!["--version".into()],cwd:".".into(),request_id:"once".into(),timeout_seconds:Some(3),preflight_programs:vec![],environment:Default::default(),network:Some(false),task_id:None,stage:None};let j=f.rt.jobs.submit(f.rt.clone(),a.clone(),false).await.unwrap();let id=j["job_id"].as_str().unwrap();let finished=wait_job(&f.rt,id).await;assert_eq!(finished["status"],"succeeded");let task_id=finished["task_id"].as_str().unwrap();assert!(task_id.starts_with("auto-job-"));assert_eq!(finished["stage"],"execute");let checkpoint=tasks::get(&f.rt.db,TaskArgs{workspace:"demo".into(),project:"demo".into(),task_id:task_id.into()}).unwrap();assert_eq!(checkpoint["latest"]["origin"],"auto_job");assert_eq!(checkpoint["latest"]["status"],"succeeded");let out=f.rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:4096}).unwrap();assert!(out["output"].as_str().unwrap().contains("git version"));let reused=f.rt.jobs.submit(f.rt.clone(),a.clone(),false).await.unwrap();assert_eq!(reused["job_id"],id);assert_eq!(reused["reused"],true);let mut changed=a;changed.args.push("different".into());assert!(f.rt.jobs.submit(f.rt.clone(),changed,false).await.is_err());}
 #[tokio::test]async fn dashboard_lists_automatic_job_and_job_detail(){let f=fixture(|_|{});let a=CommandArgs{workspace:"demo".into(),project:"demo".into(),program:"git".into(),args:vec!["--version".into()],cwd:".".into(),request_id:"dashboard-auto-job".into(),timeout_seconds:Some(3),preflight_programs:vec![],environment:Default::default(),network:Some(false),task_id:None,stage:None};let j=f.rt.jobs.submit(f.rt.clone(),a,false).await.unwrap();let id=j["job_id"].as_str().unwrap();assert_eq!(wait_job(&f.rt,id).await["status"],"succeeded");let dashboard=server::create_dashboard_router(f.rt.clone());let data=json_body(http(&dashboard,"GET","/api/tasks",Body::empty(),None,None,None).await).await;let checkpoints=data["checkpoints"].as_array().unwrap();assert_eq!(checkpoints.len(),1);assert_eq!(checkpoints[0]["origin"],"auto_job");assert_eq!(checkpoints[0]["status"],"succeeded");assert!(checkpoints[0]["last_commit"].is_null());assert_eq!(checkpoints[0]["program"],"git");assert_eq!(checkpoints[0]["request_id"],"dashboard-auto-job");assert_eq!(data["total_auto_jobs"],1);assert_eq!(data["total_explicit_tasks"],0);let detail=http(&dashboard,"GET",&format!("/api/jobs/{id}"),Body::empty(),None,None,None).await;assert_eq!(detail.status(),StatusCode::OK);let payload=json_body(detail).await;assert!(payload["output"]["output"].as_str().unwrap().contains("git version"));}
 #[tokio::test]async fn task_tool_links_file_operations_and_dashboard_shows_them(){let f=fixture(|_|{});let app=server::create_router(f.rt.clone());let token=f.rt.auth.issue_local_token().unwrap();let start=json!({"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"start_task","arguments":{"workspace":"demo","project":"demo","task_id":"feature-fft","stage":"inspect"}}});let response=http(&app,"POST","/mcp",Body::from(start.to_string()),Some("application/json"),Some(&token),None).await;assert_eq!(response.status(),StatusCode::OK);let read=json!({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"demo","project":"demo","path":"src/main.rs","task_id":"feature-fft","stage":"inspect"}}});let response=http(&app,"POST","/mcp",Body::from(read.to_string()),Some("application/json"),Some(&token),None).await;assert_eq!(response.status(),StatusCode::OK);let cp=tasks::get(&f.rt.db,TaskArgs{workspace:"demo".into(),project:"demo".into(),task_id:"feature-fft".into()}).unwrap();let ops=cp["latest"]["operations"].as_array().unwrap();assert!(ops.iter().any(|op|op["tool"]=="read_file"&&op["status"]=="succeeded"));assert_eq!(cp["latest"]["status"],"pending");let dashboard=server::create_dashboard_router(f.rt.clone());let data=json_body(http(&dashboard,"GET","/api/tasks",Body::empty(),None,None,None).await).await;assert!(data["checkpoints"].as_array().unwrap().iter().any(|item|item["task_id"]=="feature-fft"));assert_eq!(data["total_explicit_tasks"],1);assert_eq!(data["total_auto_jobs"],0);}

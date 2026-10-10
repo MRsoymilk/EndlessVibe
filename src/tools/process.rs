@@ -197,7 +197,11 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     if program=="git"&&git_network_subcommand(args){bail!("Network Git subcommands are disabled in run_command; allow_git_mutation only permits local repository mutations");}
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
     if shell&&!config.execution.allow_shell{bail!("run_shell is disabled; set execution.allow_shell=true locally after reviewing the risks");}
-    if !shell&&!config.execution.allowed_programs.iter().any(|p|p==program)&&!project_programs.iter().any(|p|p==program){bail!("Program is neither globally allowed nor detected from this project's toolchain manifests");}
+    // trusted_host is a per-Project opt-in for native host executables, not a global wildcard.
+    // It is deliberately unavailable in bubblewrap or without explicit host acknowledgement.
+    let trusted_host=w.config.trusted_host()&&config.execution.backend=="host"&&config.execution.acknowledge_unsafe_host_execution;
+    if w.config.trusted_host()&&!trusted_host{bail!("trusted_host requires explicitly acknowledged host execution");}
+    if !shell&&!trusted_host&&!config.execution.allowed_programs.iter().any(|p|p==program)&&!project_programs.iter().any(|p|p==program){bail!("Program is neither globally allowed nor detected from this project's toolchain manifests");}
     let host_cwd=w.root.directory_path(cwd)?;
     let mut command=match config.execution.backend.as_str(){
         "disabled"=>bail!("Command execution backend is disabled"),
@@ -246,6 +250,39 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     use super::*;
     #[test]fn bubblewrap_does_not_limit_launcher_nproc(){assert_eq!(pre_exec_nproc_limit("bubblewrap",256),None);}
     #[test]fn host_keeps_configured_nproc_limit(){assert_eq!(pre_exec_nproc_limit("host",256),Some(256));}
+    #[test]
+    fn trusted_host_can_run_installed_programs_without_global_allowlisting(){
+        let temp=tempfile::tempdir().unwrap();
+        let base=crate::security::paths::Root::open(temp.path()).unwrap();
+        let mut config=Config::default();
+        config.execution.backend="host".into();
+        config.execution.acknowledge_unsafe_host_execution=true;
+        config.execution.path="/usr/bin:/bin".into();
+        config.execution.allow_shell=false;
+        let mut project=Project{
+            workspace_id:"demo".into(),
+            config:crate::config::ProjectConfig{id:"kernel".into(),path:".".into(),
+                allow_write:true,allow_exec:true,allow_git_commit:false,
+                allow_git_mutation:false,allow_git_push:false,
+                execution_profile:"development".into(),environment:vec![]},
+            root:base,
+            lock:std::sync::Arc::new(tokio::sync::Mutex::new(()))
+        };
+        let env=BTreeMap::new();
+        assert!(!config.execution.allowed_programs.iter().any(|v|v=="sh"));
+        assert!(build_job_command(&config,&project,"sh",&["-c".into(),"true".into()],
+            ".",false,&[],&env,true,"/tmp/job-summary.json").is_err());
+        project.config.execution_profile="trusted_host".into();
+        assert!(config.validate().is_ok());
+        assert!(build_job_command(&config,&project,"sh",&["-c".into(),"true".into()],
+            ".",false,&[],&env,true,"/tmp/job-summary.json").is_ok());
+        assert!(build_job_command(&config,&project,"not-a-real-program", &[],
+            ".",false,&[],&env,true,"/tmp/job-summary.json").is_err());
+        config.execution.backend="bubblewrap".into();
+        assert!(config.validate().is_ok()); // No Project registered; direct call still fails closed.
+        assert!(build_job_command(&config,&project,"sh",&[],
+            ".",false,&[],&env,true,"/tmp/job-summary.json").is_err());
+    }
     #[test]fn required_programs_do_not_grant_run_permission(){let mut c=Config::default();c.execution.required_programs=vec!["postgres".into()];assert!(!c.execution.allowed_programs.contains(&"postgres".to_owned()));}
     #[test]fn diagnostics_always_include_joint_gate_tools(){let c=Config::default();let programs=diagnostic_programs(&c);for program in DIAGNOSTIC_PROGRAMS{assert!(programs.contains(&program.to_owned()));}}
     #[test]fn system_tools_only_need_path_suggestion(){let v=mount_suggestion("postgres","/usr/bin/postgres").unwrap();assert_eq!(v["kind"],"path-only");assert_eq!(v["path_entry"],"/usr/bin");}

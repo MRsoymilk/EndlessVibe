@@ -1,0 +1,243 @@
+/* Appearance and responsive UI polish, layered over the existing component styles. */
+:root {
+  --focus-ring: #26a3bc55;
+  --surface-hover: #1c2a3b;
+  --shadow-soft: 0 12px 44px #00000019;
+  --header-backdrop: #111a27f2;
+  --input-surface: #0e1927;
+  --chart-grid: #233246;
+  --radius-card: 14px;
+  --radius-control: 10px;
+}
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f7fc;
+  --panel: #ffffff;
+  --panel2: #f6f9fd;
+  --border: #d9e3ef;
+  --text: #18263b;
+  --muted: #63758d;
+  --accent: #087f67;
+  --amber: #95640f;
+  --red: #bf3850;
+  --blue: #3261b0;
+  --violet: #7541c3;
+  --focus-ring: #2876c133;
+  --surface-hover: #eff5fc;
+  --shadow-soft: 0 12px 42px #2d4d7712;
+  --header-backdrop: #ffffffee;
+  --input-surface: #fff;
+  --chart-grid: #e2eaf5;
+  --tone-00000016: #33415516;
+  --tone-0002: #33415516;
+  --tone-09111b: #f5f8fc;
+  --tone-0b1018: #f4f7fc;
+  --tone-0b141f: #f8fafc;
+  --tone-0b1521: #fbfdff;
+  --tone-0c1421: #ffffff;
+  --tone-0c1622: #ffffff;
+  --tone-0c1722: #f9fbff;
+  --tone-0d1622: #ffffff;
+  --tone-0d1723: #f0f5fb;
+  --tone-0d1724: #ffffff;
+  --tone-0e1722: #f7faff;
+  --tone-0e1723: #f3f7fc;
+  --tone-0f1824: #f6f9fd;
+  --tone-101923: #f8fbfe;
+  --tone-102c2b: #ecf9f7;
+  --tone-111827: #ffffff;
+  --tone-111a27: #ffffff;
+  --tone-111c2a: #ffffff;
+  --tone-111d2b: #f1f5fa;
+  --tone-122031: #eaf2fc;
+  --tone-142131: #e8f2fd;
+  --tone-151f2e: #f5f8fd;
+  --tone-152131: #e9f2fb;
+  --tone-152437: #e8f1fc;
+  --tone-15352d: #e7f9ef;
+  --tone-162536: #e6f1fa;
+  --tone-162637: #edf5ff;
+  --tone-16382f: #e7f9f0;
+  --tone-172334: #e7edf7;
+  --tone-17293a: #e8f1fa;
+  --tone-173329: #e7f8ee;
+  --tone-17372f: #e7f9f0;
+  --tone-17392f: #e4f7ef;
+  --tone-182735: #e8eff9;
+  --tone-182a3a: #e9f1fb;
+  --tone-183d35: #e9f7f2;
+  --tone-1a3b34: #ecf9f4;
+  --tone-1b2b3c: #dceafc;
+  --tone-1d2a3c: #e4edf8;
+  --tone-203244: #edf3fb;
+  --tone-24251f: #fff9ea;
+  --tone-243247: #d9e3ef;
+  --tone-24524855: #0e96722b;
+  --tone-2472ec33: #33415516;
+  --tone-26364a: #dce7f2;
+  --tone-294259: #e1ebf8;
+  --tone-2a1d24: #fff1f4;
+  --tone-2b3d53: #dce6f3;
+  --tone-2b6054: #99d4c5;
+  --tone-304057: #cedae8;
+  --tone-304258: #bfcbdd;
+  --tone-31291c: #fff7e8;
+  --tone-314056: #ccd9e9;
+  --tone-314158: #dce6f4;
+  --tone-31455d: #dfe8f5;
+  --tone-31594f: #9dd6c6;
+  --tone-32271f: #fff3e2;
+  --tone-332c1b: #fff9e8;
+  --tone-334b66: #d4e4f7;
+  --tone-342d1d: #fff8e6;
+  --tone-354356: #cbd9e8;
+  --tone-35465c: #c3d2e5;
+  --tone-35516b: #7ba7d0;
+  --tone-36475a: #bdcada;
+  --tone-392128: #fff0f3;
+  --tone-3a526a: #cbd8e8;
+  --tone-3a556c: #cbd8e8;
+  --tone-3a655d: #8ac8b9;
+  --tone-3b252d: #fef1f4;
+  --tone-3b4b61: #9baec2;
+  --tone-3b536c: #b8cadf;
+  --tone-3c3222: #fff6e5;
+  --tone-3c556a: #b7cbdf;
+  --tone-3c655c: #91cdbb;
+  --tone-3f2630: #ffffff;
+  --tone-40516a: #bdcde0;
+  --tone-475569: #bdcbdc;
+  --tone-4c8d83: #0a896d;
+  --tone-536780: #71829a;
+  --tone-5b3844: #daa6b3;
+  --tone-5c4f31: #e3c894;
+  --tone-657891: #899eb8;
+  --tone-66562d: #d8af6c;
+  --tone-675631: #dec184;
+  --tone-70404a: #e6a4b2;
+  --tone-72404b: #e6a5b6;
+  --tone-72ddc0: #087f67;
+  --tone-7496b5: #5585aa;
+  --tone-806044: #cdab77;
+  --tone-83b8ff: #2861bc;
+  --tone-8be0b8: #166f50;
+  --tone-8fa0b7: #62738c;
+  --tone-91a4bd: #5d748d;
+  --tone-91a6bf: #33445d;
+  --tone-9aabc0: #62778e;
+  --tone-9fbfff: #315caa;
+  --tone-aab8c9: #687d95;
+  --tone-adc8e2: #3f6288;
+  --tone-aebed0: #576b84;
+  --tone-b2f9df: #135c4b;
+  --tone-b7c2d1: #546a82;
+  --tone-b8c7db: #536980;
+  --tone-bac8da: #4c6481;
+  --tone-bcd0e6: #35516d;
+  --tone-bd9cff: #7541c3;
+  --tone-c5d1e0: #30485f;
+  --tone-c7d4e5: #33445d;
+  --tone-c7d8eb: #29415a;
+  --tone-c8d6e7: #365067;
+  --tone-e5e7eb: #1e293b;
+  --tone-eab68a: #a3661a;
+  --tone-edf3fb: #1c293d;
+  --tone-efc879: #97610e;
+  --tone-f4d1a6: #825518;
+  --tone-ff969e: #c52b4a;
+  --tone-ff9da4: #bc334c;
+}
+/* Generated semantic tokens map hard-coded legacy colors to legible light surfaces. */
+
+body {
+  background: radial-gradient(ellipse 85% 52% at 13% -13%, color-mix(in srgb, var(--blue) 10%, var(--bg)) 0%, var(--bg) 71%);
+  color: var(--text);
+}
+.shell {max-width: 1360px; padding-top: 24px;}
+.topbar {
+  gap: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--header-backdrop);
+  box-shadow: var(--shadow-soft);
+}
+.brand {gap: 10px; min-width: 206px;}
+.brand-icon {width: 72px; height: 48px; object-fit: contain; filter: drop-shadow(0 3px 10px #286be834);}
+.brand h1 {font-size: 19px; letter-spacing: -.55px;}
+.eyebrow {letter-spacing: 1.4px;}
+.top-nav {gap: 3px; flex-wrap: nowrap; white-space: nowrap;}
+.top-nav a {padding: 9px 11px; font-weight: 590; border-radius: 10px; transition: background-color .16s ease, color .16s ease;}
+.top-nav a:hover {background: var(--surface-hover); color: var(--text);}
+.top-nav a.active {background: color-mix(in srgb, var(--blue) 14%, var(--panel)); color: var(--blue);}
+.display-preferences {display: flex; align-items: center; gap: 8px; flex: 0 0 auto;}
+.display-preference {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin: 0; padding: 5px 6px 5px 9px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--panel2);
+  color: var(--muted); font-size: 11px; font-weight: 600;
+}
+.display-preference select {
+  border: 0; outline: 0; padding: 5px 3px; background: transparent;
+  color: var(--text); font: 600 11px/1.25 system-ui, sans-serif; cursor: pointer; max-width: 112px;
+}
+.display-preference select option {background: var(--panel); color: var(--text);}
+.display-preference:focus-within {outline: 2px solid var(--focus-ring); outline-offset: 1px;}
+.pref-icon {font-size: 14px; color: var(--blue);}
+.header-status {flex: 0 0 auto; white-space: nowrap;}
+.overview, .chart-card, .panel, .config-card, .metrics article, .task-card, .node-card {
+  border-color: var(--border);
+  box-shadow: var(--shadow-soft);
+}
+.overview {background: linear-gradient(124deg, color-mix(in srgb, var(--blue) 7%, var(--panel)), var(--panel));}
+.metrics article, .config-card, .chart-card, .panel {transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;}
+.metrics article:hover, .config-card:hover, .chart-card:hover {border-color: color-mix(in srgb, var(--blue) 26%, var(--border));}
+button, input, textarea, select {transition: border-color .17s ease, background-color .17s ease, box-shadow .17s ease;}
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--blue); outline-offset: 2px;
+}
+button {border-radius: var(--radius-control); background: var(--panel2); color: var(--text); border: 1px solid var(--border);}
+button:hover:not(:disabled) {background: var(--surface-hover); border-color: color-mix(in srgb, var(--blue) 36%, var(--border));}
+input, textarea, select {accent-color: var(--accent);}
+.config-form input[type=text], .config-form select, .node-pair-form input, .node-remote-actions input, .settings-fields input, .settings-fields textarea, .mount-field input, form input[type=password] {
+  background: var(--input-surface); border-color: var(--border); color: var(--text);
+}
+.config-form input::placeholder, .settings-fields input::placeholder, textarea::placeholder {color: var(--muted);}
+.tool-tree-group, .task-summary, .task-job-group, .node-card, .node-summary, .mount-editor-row, .write-status, .config-form input[type=text] {
+  border-color: var(--border);
+}
+.tool-tree-summary, .task-summary, .operation-grid-head {background: var(--panel2); color: var(--text);}
+.tool-tree-group, .node-card, .task-job-group {background: var(--panel);}
+.tool-tree-item, .task-job, .node-history-row {color: var(--text);}
+.operation-summary-grid:hover, .task-summary:hover {background: var(--surface-hover);}
+.operation-detail, .operation-detail-meta > div {background: var(--panel2);}
+.operation-json, .operation-diff, .operation-job-output, .node-output {background: var(--input-surface); color: var(--text); border-color: var(--border);}
+.operation-cell-preview, .diff-preview, .tool-tree-item code, .mono-value, .task-job code {color: var(--text);}
+.node-history-state[data-state="completed"],.node-history-state[data-state="succeeded"], .task-state.good {border-color: color-mix(in srgb, var(--accent) 32%, var(--border));background:color-mix(in srgb,var(--accent) 9%,var(--panel)); color: var(--accent);}
+.node-history-state[data-state="failed"],.node-history-state[data-state="timed_out"],.node-history-state[data-state="cancelled"],.task-state.bad {border-color:color-mix(in srgb,var(--red) 35%,var(--border));background:color-mix(in srgb,var(--red) 8%,var(--panel)); color:var(--red);}
+.node-history-state[data-state="interrupted"],.node-history-state[data-state="uncertain"],.node-history-state[data-state="running"],.node-history-state[data-state="queued"],.task-state.active {border-color:color-mix(in srgb,var(--amber) 38%,var(--border));background:color-mix(in srgb,var(--amber) 9%,var(--panel));color:var(--amber);}
+.node-metrics article[data-attention="true"] {background:color-mix(in srgb,var(--amber) 9%,var(--panel));border-color:color-mix(in srgb,var(--amber) 38%,var(--border));}
+.node-metrics article[data-attention="true"] strong {color:var(--amber);}
+html[data-theme="light"] .operation-diff .diff-add {background:#e3f7eb;color:#106846;}
+html[data-theme="light"] .operation-diff .diff-remove {background:#ffe7eb;color:#b32c49;}
+html[data-theme="light"] .header-status.online {background:#e5f8f2;border-color:#a4ddca;color:#09654e;}
+html[data-theme="light"] .header-status.offline {background:#fff0f2;border-color:#ebbec5;color:#bc3850;}
+@media (max-width: 1230px) {
+  .topbar {flex-wrap: wrap; justify-content: space-between;}
+  .top-nav {order: 4; flex: 1 1 100%; border-top: 1px solid var(--border); padding-top: 8px; overflow-x: auto; scrollbar-width: thin;}
+  .header-status {margin-left: 0;}
+}
+@media (max-width: 690px) {
+  .shell {padding: 16px 12px 24px;}
+  .topbar {padding: 12px; gap: 10px;}
+  .brand {min-width: auto;}
+  .brand-icon {width: 57px; height: 42px;}
+  .brand h1 {font-size: 16px;}
+  .display-preferences {order: 3; width: 100%; justify-content: flex-end;}
+  .display-preference {flex: 1; justify-content: space-between;}
+  .display-preference select {max-width: 118px;}
+  .top-nav {order: 4;}
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {transition: none !important; scroll-behavior: auto !important;}
+}

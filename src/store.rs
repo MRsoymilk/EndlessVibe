@@ -5,7 +5,7 @@ use std::{path::Path, sync::Mutex, time::Duration};
 
 mod migrations;
 mod retention;
-pub(crate) use retention::prune_common;
+pub(crate) use retention::{prune_common,TRANSFER_RESULT_CACHE_SECONDS};
 
 pub struct Store { connection: Mutex<Connection> }
 impl Store {
@@ -22,6 +22,9 @@ impl Store {
         c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         migrations::migrate(&mut c)?;
         c.execute("UPDATE operation_log SET status='interrupted',finished=?1,error=CASE WHEN error='' THEN 'Service restarted before operation completed' ELSE error END WHERE status='running'",[crate::util::now()])?;
+        c.execute("UPDATE kv SET value=json_set(value,'$.state','interrupted','$.updated',?1) WHERE namespace='transfer_requests' AND json_extract(value,'$.state')='started'",[crate::util::now()])?;
+        // Bound startup work; keep durable request tombstones even after cached outputs age out.
+        let tx=c.transaction()?;retention::compact_transfer_results(&tx,crate::util::now())?;tx.commit()?;
         Ok(Self { connection: Mutex::new(c) })
     }
     pub fn transaction<T>(&self, op: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
@@ -36,6 +39,55 @@ impl Store {
             tx.execute("INSERT INTO audit(time,tool,workspace,outcome,note) VALUES(?1,?2,?3,?4,?5)", params![now, tool, workspace, outcome, crate::util::bounded_text(note, 512)])?;
             retention::prune_common(tx,now)?;
             Ok(())
+        })
+    }
+
+    /// Local-only aggregate Transfer metrics: never return parent credentials, paths or results.
+    pub fn transfer_metrics(&self)->Result<serde_json::Value>{
+        self.transaction(|tx|{
+            let now=crate::util::now();
+            let mut totals=serde_json::json!({
+                "total":0_u64,"completed":0_u64,"failed":0_u64,"interrupted":0_u64,
+                "started":0_u64,"result_expired":0_u64,"unknown":0_u64,
+                "review_required":0_u64
+            });
+            let mut q=tx.prepare(
+                "SELECT COALESCE(json_extract(value,'$.state'),'unknown'),COUNT(*)
+                 FROM kv WHERE namespace='transfer_requests'
+                 GROUP BY COALESCE(json_extract(value,'$.state'),'unknown')"
+            )?;
+            for row in q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u64>(1)?)))?{
+                let(state,count)=row?;
+                totals["total"]=serde_json::json!(totals["total"].as_u64().unwrap_or(0)+count);
+                let bucket=match state.as_str(){
+                    "completed"=>"completed","failed"=>"failed","interrupted"=>"interrupted",
+                    "started"=>"started","result_expired"=>"result_expired",_=>"unknown"
+                };
+                totals[bucket]=serde_json::json!(totals[bucket].as_u64().unwrap_or(0)+count);
+                if !matches!(state.as_str(),"completed"|"result_expired"){
+                    totals["review_required"]=serde_json::json!(
+                        totals["review_required"].as_u64().unwrap_or(0)+count
+                    );
+                }
+            }
+            let since=now.saturating_sub(86_400);
+            let mut operations=serde_json::json!({"total":0_u64,"succeeded":0_u64,"failed":0_u64,
+                "interrupted":0_u64,"running":0_u64});
+            let mut q=tx.prepare(
+                "SELECT status,COUNT(*) FROM operation_log
+                 WHERE tool LIKE 'transfer_%' AND started>=?1
+                 GROUP BY status"
+            )?;
+            for row in q.query_map([since],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u64>(1)?)))?{
+                let(state,count)=row?;
+                operations["total"]=serde_json::json!(operations["total"].as_u64().unwrap_or(0)+count);
+                let bucket=match state.as_str(){"succeeded"=>"succeeded","interrupted"=>"interrupted",
+                    "running"=>"running",_=>"failed"};
+                operations[bucket]=serde_json::json!(operations[bucket].as_u64().unwrap_or(0)+count);
+            }
+            Ok(serde_json::json!({"generated_at":now,"window_seconds":86_400,
+                "request_records":totals,"recent_calls":operations,
+                "scope":"local_only","contains_request_contents":false}))
         })
     }
     pub fn audits(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
@@ -96,6 +148,7 @@ impl Store {
             let operations:u64=tx.query_row("SELECT COUNT(*) FROM operation_log",[],|r|r.get(0))?;
             let traffic:u64=tx.query_row("SELECT COUNT(*) FROM traffic",[],|r|r.get(0))?;
             let task_checkpoints:u64=tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='task_checkpoints'",[],|r|r.get(0))?;
+            let transfer_requests:u64=tx.query_row("SELECT COUNT(*) FROM kv WHERE namespace='transfer_requests'",[],|r|r.get(0))?;
             Ok(serde_json::json!({
                 "schema_version":schema_version,
                 "schema_current":migrations::CURRENT_SCHEMA_VERSION,
@@ -103,8 +156,8 @@ impl Store {
                 "page_size":page_size,
                 "logical_bytes":page_count.saturating_mul(page_size),
                 "free_bytes":freelist_count.saturating_mul(page_size),
-                "rows":{"jobs":jobs,"audit":audit,"operations":operations,"traffic":traffic,"task_checkpoints":task_checkpoints},
-                "retention":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS}
+                "rows":{"jobs":jobs,"audit":audit,"operations":operations,"traffic":traffic,"task_checkpoints":task_checkpoints,"transfer_requests":transfer_requests},
+                "retention":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS,"transfer_response_cache_seconds":retention::TRANSFER_RESULT_CACHE_SECONDS,"transfer_response_compact_batch":retention::TRANSFER_RESULTS_PER_PASS,"request_tombstones":"retained_indefinitely"}
             }))
         })
     }
@@ -113,11 +166,13 @@ impl Store {
         self.transaction(|tx|{
             let mut stats=retention::prune_common(tx,now)?;
             stats.jobs=retention::prune_jobs(tx,retained_jobs)?;
+            stats.transfer_results_compacted+=retention::compact_transfer_results(tx,now)?;
             Ok(serde_json::json!({
                 "checked_at":now,
                 "deleted":{"expired_kv":stats.expired_kv,"task_checkpoints":stats.task_checkpoints,"audit":stats.audit,"operations":stats.operations,"traffic":stats.traffic,"jobs":stats.jobs,"total":stats.total()},
-                "policy":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS},
-                "safety":{"running_jobs_preserved":true,"running_operations_preserved":true,"vacuum_performed":false}
+                "policy":{"retained_jobs":retained_jobs,"audit_rows":retention::MAX_AUDIT_ROWS,"operation_rows":retention::MAX_OPERATION_ROWS,"task_checkpoints":retention::MAX_TASK_CHECKPOINTS,"traffic_seconds":retention::TRAFFIC_RETENTION_SECONDS,"transfer_response_cache_seconds":retention::TRANSFER_RESULT_CACHE_SECONDS,"transfer_response_compact_batch":retention::TRANSFER_RESULTS_PER_PASS,"request_tombstones":"retained_indefinitely"},
+                "compacted":{"transfer_response_bodies":stats.transfer_results_compacted},
+                "safety":{"running_jobs_preserved":true,"running_operations_preserved":true,"transfer_request_tombstones_preserved":true,"vacuum_performed":false}
             }))
         })
     }
@@ -146,5 +201,31 @@ pub fn count(tx: &Transaction<'_>, namespace: &str) -> Result<usize> { Ok(tx.que
     #[test] fn private_storage_persists_and_rolls_back() { let d = tempfile::tempdir().unwrap(); let s = Store::open(&d.path().join("db")).unwrap(); s.put("x", "key", &42, 0).unwrap(); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); let r: Result<()> = s.transaction(|tx| { put(tx,"x","key",&43,0)?; anyhow::bail!("abort") }); assert!(r.is_err()); assert_eq!(s.get::<i32>("x", "key").unwrap(), Some(42)); }
     #[test] fn store_opens_current_schema(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();let(version,error_code):(i64,i64)=s.transaction(|tx|Ok((tx.query_row("PRAGMA user_version",[],|r|r.get(0))?,tx.query_row("SELECT COUNT(*) FROM pragma_table_info('operation_log') WHERE name='error_code'",[],|r|r.get(0))?))).unwrap();assert_eq!(version,migrations::CURRENT_SCHEMA_VERSION);assert_eq!(error_code,1);}
     #[test] fn dashboard_metrics_aggregate_audit_jobs_and_traffic(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();s.audit("read_file","demo/project","started","").unwrap();s.audit("read_file","demo/project","succeeded","").unwrap();s.record_traffic(1,120,340).unwrap();let now=crate::util::now();let job=serde_json::json!({"started":now.saturating_sub(1),"finished":null});s.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",rusqlite::params!["job",job.to_string()])?;Ok(())}).unwrap();let value=s.dashboard_metrics(3600,60).unwrap();assert_eq!(value["totals"]["requests"],1);assert_eq!(value["totals"]["successes"],1);assert_eq!(value["totals"]["failures"],0);assert_eq!(value["totals"]["http_requests"],1);assert_eq!(value["totals"]["rx_bytes"],120);assert_eq!(value["totals"]["tx_bytes"],340);assert_eq!(value["points"].as_array().unwrap().last().unwrap()["active_jobs"],1);}
+
+    #[test]
+    fn transfer_metrics_count_only_scoped_states_and_no_sensitive_payloads(){
+        let temp=tempfile::tempdir().unwrap();
+        let s=Store::open(&temp.path().join("db")).unwrap();
+        for (i,state) in ["completed","completed","failed","interrupted","started","result_expired","unknown_state"].iter().enumerate(){
+            s.put("transfer_requests",&format!("req-{i}"),
+                &serde_json::json!({"state":state,"fingerprint":"PRIVATE_SECRET","result":null}),0).unwrap();
+        }
+        let op=s.operation_start("transfer_write_file","w","p",&serde_json::json!({"content":"TOP_SECRET"})).unwrap();
+        s.operation_finish(op,"succeeded",12,Some(&serde_json::json!({"changed":true})),
+            "","","").unwrap();
+        let failed=s.operation_start("transfer_git_commit","w","p",&serde_json::json!({})).unwrap();
+        s.operation_finish(failed,"failed",2,None,"","TRANSFER_FAILURE","secret reason").unwrap();
+        let metrics=s.transfer_metrics().unwrap();
+        assert_eq!(metrics["request_records"]["total"],7);
+        assert_eq!(metrics["request_records"]["completed"],2);
+        assert_eq!(metrics["request_records"]["review_required"],4);
+        assert_eq!(metrics["request_records"]["result_expired"],1);
+        assert_eq!(metrics["recent_calls"]["total"],2);
+        assert_eq!(metrics["recent_calls"]["succeeded"],1);
+        assert_eq!(metrics["recent_calls"]["failed"],1);
+        assert_eq!(metrics["scope"],"local_only");
+        assert!(!metrics.to_string().contains("PRIVATE_SECRET"));
+        assert!(!metrics.to_string().contains("TOP_SECRET"));
+    }
     #[test] fn operation_log_redacts_and_tracks_diff(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();let id=s.operation_start("apply_patch","root","demo",&serde_json::json!({"authorization":"Bearer abc","path":"src/main.rs","environment":{"TEST_DATABASE_URL":"postgres://user:password@127.0.0.1:5432/test"}})).unwrap();s.operation_finish(id,"succeeded",12,Some(&serde_json::json!({"changed":true})),"--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n","","").unwrap();let detail=s.operation(id).unwrap();assert_eq!(detail["added_lines"],1);assert_eq!(detail["removed_lines"],1);assert_eq!(detail["input"]["authorization"],"[REDACTED]");assert_eq!(detail["input"]["environment"]["TEST_DATABASE_URL"],"[REDACTED]");}
 }

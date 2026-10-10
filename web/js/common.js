@@ -1,15 +1,23 @@
 export const $=id=>document.getElementById(id);
 
-const dateTime=new Intl.DateTimeFormat("zh-CN",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
-const timeOnly=new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+let activeLocale="",dateTime,timeOnly;
+function formatters(){
+  const locale=document.documentElement.lang==="en"?"en-US":"zh-CN";
+  if(locale!==activeLocale){
+    dateTime=new Intl.DateTimeFormat(locale,{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+    timeOnly=new Intl.DateTimeFormat(locale,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+    activeLocale=locale;
+  }
+  return {dateTime,timeOnly};
+}
 
 export const setText=(id,value)=>{const el=$(id);if(el)el.textContent=value??"—";};
-export const formatTime=seconds=>dateTime.format(new Date(seconds*1000));
-export const formatShortTime=seconds=>timeOnly.format(new Date(seconds*1000));
+export const formatTime=seconds=>formatters().dateTime.format(new Date(seconds*1000));
+export const formatShortTime=seconds=>formatters().timeOnly.format(new Date(seconds*1000));
 
 export function formatUptime(seconds){
   const days=Math.floor(seconds/86400),hours=Math.floor(seconds%86400/3600),minutes=Math.floor(seconds%3600/60),secs=seconds%60;
-  return (days?`${days}天 `:"")+`${String(hours).padStart(2,"0")}:${String(minutes).padStart(2,"0")}:${String(secs).padStart(2,"0")}`;
+  return (days?`${days}${document.documentElement.lang==="en"?"d":"天"} `:"")+`${String(hours).padStart(2,"0")}:${String(minutes).padStart(2,"0")}:${String(secs).padStart(2,"0")}`;
 }
 
 export function formatBytes(value){
@@ -31,7 +39,7 @@ export function outcomeClass(outcome){
 
 export function displayValue(value){
   if(Array.isArray(value))return value.length?value.join(", "):"—";
-  if(typeof value==="boolean")return value?"启用":"禁用";
+  if(typeof value==="boolean")return document.documentElement.lang==="en"?(value?"Enabled":"Disabled"):(value?"启用":"禁用");
   if(value===null||value===undefined||value==="")return"—";
   return String(value);
 }

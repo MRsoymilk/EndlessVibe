@@ -29,7 +29,7 @@ bubblewrap sandbox probe: ok (9 configured programs visible)
 
 ## Project execution profile
 
-每个两层 Project 可设置 `execution_profile = "isolated" | "development"`。`isolated` 是兼容旧行为的默认值：bubblewrap 使用独立网络 namespace，只有管理员全局开启 `execution.allow_network=true` 后，单个 Job 才能用 `network=true` 覆盖。`development` 面向本人控制的受信开发仓库：Job 未指定 `network` 时默认共享宿主网络，因此 `127.0.0.1`、Docker 发布端口和本机开发服务可直接访问；Job 仍可显式 `network=false` 临时收紧。
+每个两层 Project 可设置 `execution_profile = "isolated" | "development" | "trusted_host"`；第三种是仅在显式确认全局 host 后端时可用的高风险本地工具模式，详见下文。`isolated` 是兼容旧行为的默认值：bubblewrap 使用独立网络 namespace，只有管理员全局开启 `execution.allow_network=true` 后，单个 Job 才能用 `network=true` 覆盖。`development` 面向本人控制的受信开发仓库：Job 未指定 `network` 时默认共享宿主网络，因此 `127.0.0.1`、Docker 发布端口和本机开发服务可直接访问；Job 仍可显式 `network=false` 临时收紧。
 
 Docker socket 不再因为 `development` profile 而自动暴露。默认 `docker.allow_project_socket=false`，普通 Job 不会挂载 Docker socket 或注入 `DOCKER_HOST`。如需让完全信任的测试脚本直接操作 Docker，可在 Docker 配置中单独启用 `allow_project_socket=true`；这会允许该类 Job 通过任意程序/脚本绕开 Docker MCP 的容器白名单，应视为宿主级高权限授权，不建议开启。默认使用下文专用 Docker MCP 工具。
 
@@ -103,9 +103,86 @@ readonly_mounts = [
 
 在 `isolated` profile 下，不要挂宿主 PostgreSQL 的数据目录、认证文件、Unix socket、开发数据库或 Docker socket。测试应在 `/cache` 或其他 Job 私有可写目录初始化临时数据库并使用自己的 loopback namespace。需要复用现有 Docker 开发环境时，应明确把该 Project 切到 `development`，由统一的 profile 逻辑暴露宿主网络和 Docker socket，而不是手工追加任意 mount。
 
+### Trusted host Project: use locally installed tools without a per-tool allowlist
+
+For **personally trusted** projects that need QEMU, image builders, cross-compilers,
+or custom SDKs, set `execution_profile = "trusted_host"` on that Project.
+This is a **per-project** opt-in, not an implicit global wildcard and not a new MCP.
+The global `[execution]` section must also explicitly select and acknowledge
+unsandboxed host execution:
+
+```toml
+[execution]
+backend = "host"
+acknowledge_unsafe_host_execution = true
+allow_shell = false
+path = "/usr/local/bin:/usr/bin:/bin"
+
+[[workspaces]]
+id = "projects"
+path = "/home/vv/project"
+
+[[workspaces.projects]]
+id = "milk64"
+path = "milk64"
+allow_write = true
+allow_exec = true
+allow_git_commit = true
+execution_profile = "trusted_host"
+```
+
+Merge these values with your **existing** config; do not duplicate TOML tables
+or replace other workspace/project grants. The global `host` backend impacts
+every command-enabled project (other profiles retain their program allowlist,
+but are still **not sandboxed**). Use a dedicated unprivileged OS account,
+not root. Restart EndlessVibe after changing the service-level execution
+backend, then enable the individual Project profile in Config or TOML.
+
+In `trusted_host`, `run_command` can launch any **installed executable
+whose simple name is resolvable in `execution.path`**, without being present
+in `execution.allowed_programs` or an auto-detected manifest. Thus
+`program="bash", args=["tools/boot.sh","smoke"]` can run a project's QEMU
+and ISO workflow. The program name must still be simple (no arbitrary
+absolute paths), arguments remain bounded, jobs are audited and have a
+timeout, and preflight refuses missing tools. `run_shell` remains separately
+controlled by `allow_shell`, **but allowing Bash through `run_command`
+also permits arbitrary shell scripts**; it is not a security barrier.
+
+**Risk:** host commands run with the EndlessVibe service user's filesystem,
+network and device permissions. Build scripts can spawn child commands or
+read the service account's files; Project filesystem APIs and Git push scopes
+cannot constrain arbitrary host processes. This mode is unsuitable for
+untrusted repositories or external collaborators. No sudo/system packages,
+Rust target libraries, QEMU, OVMF, or image tools are installed automatically.
+
+#### Rust bare-metal and Milk64 prerequisites
+
+`x86_64-unknown-none` is a freestanding Rust target. Its precompiled `core`
+must match the compiler/toolchain used by the Job. For rustup-managed 1.97.1:
+
+```sh
+rustup toolchain install 1.97.1 --profile minimal
+rustup target add x86_64-unknown-none --toolchain 1.97.1
+rustup run 1.97.1 rustc --print target-libdir --target x86_64-unknown-none
+```
+
+For Gentoo's system-packaged Rust without rustup, install the matching target
+components using an appropriate toolchain manager, or switch this project to
+a compatible rustup toolchain. Merely listing `targets` in
+`rust-toolchain.toml` does not install `libcore` into a system Rust sysroot.
+Verify an actual `libcore-*.rlib` exists in the target libdir and run
+`cargo check -p milk64-kernel --target x86_64-unknown-none`.
+
+Milk64's boot script additionally needs `bash`, `qemu-system-x86_64`,
+`xorriso`, `curl`, `tar`, `sha256sum`, `timeout`, and matching OVMF
+CODE/VARS files; `gdb` and `nasm` are useful for later stages. The tools must
+be installed and on the configured PATH. Test first with
+`run_command(program="bash", args=["tools/boot.sh","smoke"], ...)`; never
+assume availability simply because the trusted mode bypasses a whitelist.
+
 ## Shell 与白名单
 
-`run_command` 接受程序名+参数，不默认使用 `sh -c`。程序名必须属于 `allowed_programs`。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
+`run_command` 接受程序名+参数，不默认使用 `sh -c`。除显式 `trusted_host` Profile 外，程序名必须属于 `allowed_programs` 或获项目工具链自动发现授权。`allowed_programs` 中每一项必须是唯一的简单可执行名（如 `cargo`、`git`），不能写绝对路径；实际位置由 `execution.path` 与只读 mount 决定。`run_shell` 需要明确 `allow_shell=true`，不是通过往 program 白名单里加 bash 来隐式开启。
 
 每个 `run_command` / `run_shell` 还可以提供 `preflight_programs`。这些程序会在 **Job ID 创建、command slot 占用、Project lock 获取、Job 持久化之前**在实际执行后端中做可见性检查；缺失时以 `JOB_PREFLIGHT_FAILED` fail-fast，不启动目标命令。直接运行 `cargo` 会自动把 `rustc` 加入门禁。只有在 Job **自行启动本地 PostgreSQL 二进制** 时，才应显式门禁 `initdb,postgres,pg_isready,createdb`。如果数据库由 Docker/宿主开发环境提供，`development` profile 会继承所需的宿主网络/Docker 能力，不应把容器里的服务端二进制误判为 sandbox 本地依赖。成功的 preflight 会记录 `execution_profile`、最终 `network`、`network_source`、工具链路径和 `environment_keys`；环境变量值不会写入该字段。该字段只做环境门禁，不绕过 `allowed_programs` 对顶层 `run_command` 的权限控制。
 
