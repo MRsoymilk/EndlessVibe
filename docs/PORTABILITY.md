@@ -167,14 +167,24 @@ broker can read the initial stdout data while that process is still running,
 then review each completed file through the existing bounded, hash-checked
 output broker.
 
-This remains Windows test-only infrastructure, NOT a production execution
-backend. It demonstrates streaming for a cooperating AppContainer process,
-not transparent capture of arbitrary external executables. The Windows test-only log cursor delivers bounded byte chunks while
-verifying SHA-256 of every previously delivered prefix. Truncated, replaced,
-overlong, or disappearing logs fail closed rather than silently resuming.
-The test monitor cancels the entire Job Object when a log exceeds the
-configured total output budget. These are poll-time budgets, not filesystem
-disk quotas: a burst may temporarily exceed the budget between checks.
+The **production fixed hash_input self-check** now has a bounded log broker:
+the lowbox worker creates separate private `child-stdout.log` and
+`child-stderr.log` files, while its privileged parent reads them in 4 KiB
+pages through capability-held directory handles. A **combined 64 KiB limit**
+applies to both files; previously consumed prefixes are SHA-256 checked on
+every poll and checked again after the Job Object has exited. The parent
+terminates the whole Job Object if the budget is exceeded or any streamed
+prefix changes, and refuses missing/truncated/replaced final logs. The
+CLI returns only bounded byte counts and SHA-256 digests, not arbitrary
+worker output or input content. A separate test uses a deliberately noisy
+AppContainer process to verify over-budget termination.
+
+This is a polling limit, **not a filesystem disk quota**: a burst may
+temporarily exceed 64 KiB between polls. The existing Windows test harness
+also demonstrates file-backed live stdout/stderr for cooperating processes.
+Neither facility is transparent capture of arbitrary external executables;
+the generic `run_command` path still uses explicitly acknowledged host mode
+and does **not** inherit the fixed worker's AppContainer protection.
 The Windows service now runs an orphaned-profile recovery scan during
 Runtime::new, after obtaining the exclusive service.lock and before
 accepting any commands. The private recovery directory lives under

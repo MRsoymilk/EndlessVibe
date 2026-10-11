@@ -1029,6 +1029,15 @@ fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     assert_eq!(result["arbitrary_commands_supported"],false);
     assert_eq!(result["general_execution_backend"],false);
     assert_eq!(result["profile_crash_recovery_journaled"],true);
+    assert_eq!(result["logs"]["bounded"],true);
+    assert_eq!(result["logs"]["capture"],"private_files_without_parent_handle_inheritance");
+    assert_eq!(result["logs"]["limit_bytes"],65536);
+    assert_eq!(result["logs"]["stdout_bytes"],b"hash_input: receipt generated\n".len());
+    assert_eq!(result["logs"]["stdout_sha256"],util::digest(b"hash_input: receipt generated\n"));
+    assert_eq!(result["logs"]["stderr_bytes"],0);
+    assert_eq!(result["logs"]["stderr_sha256"],util::digest(b""));
+    assert!(!result.to_string().contains("isolated fixed-operation hash probe"),
+        "Sensitive staged input content must not appear in diagnostic output");
 
     let journal=endlessvibe::tools::windows_recovery::journal_dir(&config.security.data_dir);
     assert_eq!(std::fs::read_dir(journal).unwrap().count(),0,

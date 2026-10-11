@@ -208,7 +208,7 @@ Authentication: OAuth 2.0
 
 LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限与 Owner Key。原公网地址签发的 OAuth Token 不再对新的本机资源有效。
 
-**Windows AppContainer 沙箱自检：** 在 Windows 服务停止后执行 `cargo build --locked --target-dir target/windows-stage`，然后运行 `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`。该功能验证真实低权限令牌、Job Object 和固定 `hash_input` 回执；它不会启用任意命令沙箱，也不读取用户项目。详情见 [Windows 沙箱状态与限制](docs/PORTABILITY.md)。
+**Windows AppContainer 沙箱自检：** 在 Windows 服务停止后执行 `cargo build --locked --target-dir target/windows-stage`，然后运行 `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`。该功能验证真实低权限令牌、Job Object 和固定 `hash_input` 回执，并以 64 KiB 合计预算校验私有 stdout/stderr、检测篡改并在超限时终止 Job；它不会启用任意命令沙箱，也不读取用户项目。详情见 [Windows 沙箱状态与限制](docs/PORTABILITY.md)。
 
 - 本机 MCP（OAuth）：`http://127.0.0.1:20000/mcp`，**只监听 loopback**，不是供局域网设备直接调用的 HTTP 地址。
 - 本机 Dashboard：`http://127.0.0.1:20001/nodes`，**只允许本机访问**。

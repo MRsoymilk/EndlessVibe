@@ -248,10 +248,17 @@ fn sandbox_environment(profile:&Profile,extras:&[(&str,String)])->Result<Vec<u16
         ("TMP".to_owned(),temp.to_string_lossy().into_owned()),
     ];
     for (key,value) in extras{
-        if key.contains(['=','\0'])||value.contains('\0')||key.len()>128{
-            bail!("Invalid AppContainer probe environment variable");
+        let name=*key;
+        let mut chars=name.bytes();
+        let safe_name=matches!(chars.next(),Some(b)if b.is_ascii_alphabetic()||b==b'_')
+            &&chars.all(|b|b.is_ascii_alphanumeric()||b==b'_');
+        if !safe_name||name.len()>128||value.contains('\0')||value.len()>4096{
+            bail!("Invalid AppContainer worker environment variable");
         }
-        values.push(((*key).to_owned(),value.clone()));
+        if values.iter().any(|(existing,_):&(String,String)|existing.eq_ignore_ascii_case(name)){
+            bail!("AppContainer worker environment cannot override a protected variable");
+        }
+        values.push((name.to_owned(),value.clone()));
     }
     values.sort_by_key(|entry|entry.0.to_ascii_lowercase());
     let mut output=Vec::new();
@@ -270,6 +277,7 @@ impl ProbeProcess{
     fn resume_and_wait(
         &self,job:&crate::tools::windows_job::JobObject,
         timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
+        mut logs:Option<&mut BoundedLogBroker>,
     )->Result<ProbeOutcome>{
         use std::sync::atomic::Ordering;
         if unsafe{ResumeThread(self.thread.as_raw_handle() as _)}==u32::MAX{
@@ -278,6 +286,12 @@ impl ProbeProcess{
         let deadline=std::time::Instant::now()+timeout;
         let(mut cancelled,mut timed_out)=(false,false);
         loop{
+            if let Some(broker)=logs.as_deref_mut(){
+                if let Err(error)=broker.poll(){
+                    job.terminate();
+                    return Err(error).context("AppContainer output rejected; contained Job Object was terminated");
+                }
+            }
             if cancel.load(Ordering::SeqCst){cancelled=true;break;}
             if std::time::Instant::now()>=deadline{timed_out=true;break;}
             match unsafe{WaitForSingleObject(self.process.as_raw_handle() as _,30)}{
@@ -294,6 +308,7 @@ impl ProbeProcess{
             WAIT_TIMEOUT=>bail!("AppContainer process survived Job Object termination"),
             _=>return Err(std::io::Error::last_os_error()).context("Wait for contained process exit"),
         }
+        if let Some(broker)=logs.as_deref_mut(){broker.poll()?;}
         let mut code=0u32;
         if unsafe{GetExitCodeProcess(self.process.as_raw_handle() as _,&mut code)}==0{
             return Err(std::io::Error::last_os_error()).context("Read isolated process exit code");
@@ -310,9 +325,10 @@ impl Drop for ProbeProcess{
     }
 }
 
-fn launch_controlled_test(
+fn launch_controlled(
     profile:&Profile,program:&Path,args:&str,extras:&[(&str,String)],
     timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
+    logs:Option<&mut BoundedLogBroker>,
 )->Result<ProbeOutcome>{
     let caps=profile.capabilities();
     let mut attrs=Attributes::create(&caps)?;
@@ -341,7 +357,15 @@ fn launch_controlled_test(
     }
     job.assign(child.dwProcessId)?;
     if !job.contains(child.dwProcessId)?{bail!("AppContainer worker escaped its Job Object");}
-    process.resume_and_wait(&job,timeout,cancel)
+    process.resume_and_wait(&job,timeout,cancel,logs)
+}
+
+#[cfg(test)]
+fn launch_controlled_test(
+    profile:&Profile,program:&Path,args:&str,extras:&[(&str,String)],
+    timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
+)->Result<ProbeOutcome>{
+    launch_controlled(profile,program,args,extras,timeout,cancel,None)
 }
 
 #[cfg(test)]
@@ -423,6 +447,13 @@ pub fn run_fixed_worker_from_env()->Result<()>{
     let mut file=outputs.open_with(RECEIPT_NAME,&options)?.into_std();
     file.write_all(&bytes)?;
     file.sync_all()?;
+    // The sandbox itself owns these log files. The privileged broker neither
+    // passes inheritable handles nor lets logs escape the private profile.
+    let mut stdout=outputs.open_with("child-stdout.log",&options)?.into_std();
+    stdout.write_all(b"hash_input: receipt generated\n")?;
+    stdout.sync_all()?;
+    let stderr=outputs.open_with("child-stderr.log",&options)?.into_std();
+    stderr.sync_all()?;
     Ok(())
 }
 
@@ -443,7 +474,8 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     let profile=Profile::create_journaled(&journal)?;
     let staged=profile.stage_project_file(&project,"probe.txt")?;
     if !staged.is_file(){bail!("Sandbox input was not staged");}
-    profile.prepare_results()?;
+    let output_dir=profile.prepare_results()?;
+    let mut logs=BoundedLogBroker::open(&output_dir,MAX_PRODUCTION_LOG_BYTES)?;
     let private=profile.folder()?.join("LocalState/EndlessVibe");
     let request=WorkerRequest::new("local_self_check","inputs/probe.txt")?;
     crate::util::private_create(
@@ -453,15 +485,16 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     fs::copy(std::env::current_exe()?,&program)
         .context("Stage trusted EndlessVibe worker binary in private profile")?;
     let cancel=std::sync::atomic::AtomicBool::new(false);
-    let run=launch_controlled_test(
+    let run=launch_controlled(
         &profile,&program,"--internal-sandbox-worker",
         &[("ENDLESSVIBE_PROTOCOL_ROOT",private.to_string_lossy().into_owned())],
-        std::time::Duration::from_secs(15),&cancel,
+        std::time::Duration::from_secs(15),&cancel,Some(&mut logs),
     )?;
     if run.cancelled||run.timed_out||run.exit_code!=0{
         bail!("Fixed AppContainer worker failed: exit={}, cancelled={}, timed_out={}",
             run.exit_code,run.cancelled,run.timed_out);
     }
+    let log_report=logs.finish()?;
     let artifact=profile.collect_result(RECEIPT_NAME,
         crate::tools::sandbox_protocol::MAX_RECEIPT_BYTES)?;
     let receipt=WorkerReceipt::decode(&artifact.bytes)?;
@@ -476,6 +509,7 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
         "input_bytes":receipt.input_bytes,
         "input_sha256":receipt.sha256,
         "receipt_sha256":artifact.sha256,
+        "logs":log_report,
         "protocol_version":crate::tools::sandbox_protocol::VERSION,
         "appcontainer_token_verified":true,
         "job_object_enforced":true,
@@ -489,13 +523,11 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
 
 /// Append-only raw-byte log cursor. The parent owns this state; child-provided
 /// metadata is never trusted for offset, content identity or output limits.
-#[cfg(test)]
 #[derive(Default)]
 struct LogCursor{
     next:usize,
     prefix_sha256:Option<String>,
 }
-#[cfg(test)]
 fn next_log_chunk(
     root:&crate::security::paths::Root,
     name:&str,
@@ -527,6 +559,76 @@ fn next_log_chunk(
     cursor.prefix_sha256=Some(crate::util::digest(&content[..end]));
     Ok(part)
 }
+// A process may write only a bounded pair of *private* files. This
+// reader owns the cursors; an untrusted child cannot provide offsets or
+// overwrite already-consumed prefixes without aborting the entire job.
+pub const MAX_PRODUCTION_LOG_BYTES:usize=64*1024;
+const PRODUCTION_LOG_PAGE_BYTES:usize=4096;
+
+struct BoundedLogBroker{
+    root:crate::security::paths::Root,
+    stdout:LogCursor,
+    stderr:LogCursor,
+    stdout_data:Vec<u8>,
+    stderr_data:Vec<u8>,
+    budget:usize,
+}
+impl BoundedLogBroker{
+    fn open(output_dir:&Path,budget:usize)->Result<Self>{
+        if budget==0||budget>MAX_PRODUCTION_LOG_BYTES{
+            bail!("Sandbox log budget must be 1..64 KiB");
+        }
+        Ok(Self{
+            root:crate::security::paths::Root::open(output_dir)?,
+            stdout:LogCursor::default(),
+            stderr:LogCursor::default(),
+            stdout_data:Vec::new(),
+            stderr_data:Vec::new(),
+            budget,
+        })
+    }
+    fn poll(&mut self)->Result<()>{
+        let mut combined=self.stdout_data.len().saturating_add(self.stderr_data.len());
+        for (name,cursor,data) in [
+            ("child-stdout.log",&mut self.stdout,&mut self.stdout_data),
+            ("child-stderr.log",&mut self.stderr,&mut self.stderr_data),
+        ]{
+            loop{
+                let chunk=next_log_chunk(
+                    &self.root,name,cursor,PRODUCTION_LOG_PAGE_BYTES,self.budget
+                ).with_context(||format!("Read bounded AppContainer {name}"))?;
+                if chunk.is_empty(){break;}
+                if data.len().saturating_add(chunk.len())>self.budget
+                    ||combined.saturating_add(chunk.len())>self.budget{
+                    bail!("Combined AppContainer stdout/stderr exceeds byte budget");
+                }
+                combined+=chunk.len();
+                data.extend_from_slice(&chunk);
+            }
+        }
+        Ok(())
+    }
+    fn finish(&mut self)->Result<serde_json::Value>{
+        self.poll()?;
+        // Final pinned re-read detects replacements, truncation and missing
+        // files, including changes after the last streaming poll.
+        let out=self.root.read("child-stdout.log",self.budget)?;
+        let err=self.root.read("child-stderr.log",self.budget)?;
+        if out!=self.stdout_data||err!=self.stderr_data{
+            bail!("AppContainer logs changed after streaming");
+        }
+        Ok(serde_json::json!({
+            "stdout_bytes":out.len(),
+            "stdout_sha256":crate::util::digest(&out),
+            "stderr_bytes":err.len(),
+            "stderr_sha256":crate::util::digest(&err),
+            "limit_bytes":self.budget,
+            "bounded":true,
+            "capture":"private_files_without_parent_handle_inheritance",
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -632,6 +734,92 @@ mod tests{
         assert!(wrong_name.exists());
     }
 
+
+    #[test]
+    fn sandbox_worker_environment_cannot_override_protected_values(){
+        let profile=Profile::create().unwrap();
+        assert!(sandbox_environment(&profile,&[]).is_ok());
+        assert!(sandbox_environment(&profile,&[
+            ("ENDLESSVIBE_PROTOCOL_ROOT",profile.folder().unwrap().display().to_string())
+        ]).is_ok());
+        for name in ["PATH","path","SystemRoot","TEMP","ComSpec","APPDATA"]{
+            assert!(sandbox_environment(&profile,&[(name,"bad".into())]).is_err(),
+                "Protected Windows environment variable {name} was overridable");
+        }
+        for name in ["", "=C:", "BAD-NAME", "a b", "x=y"]{
+            assert!(sandbox_environment(&profile,&[(name,"invalid".into())]).is_err());
+        }
+        assert!(sandbox_environment(&profile,&[
+            ("SANDBOX_KEY","first".into()),("sandbox_key","second".into())
+        ]).is_err(),"Case-insensitive duplicate environment variable accepted");
+        assert!(sandbox_environment(&profile,&[
+            ("SANDBOX_KEY","x".repeat(4097))
+        ]).is_err());
+    }
+
+    #[test]
+    fn production_log_broker_checks_combined_budget_and_replacement(){
+        let dir=tempfile::tempdir().unwrap();
+        let stdout=dir.path().join("child-stdout.log");
+        let stderr=dir.path().join("child-stderr.log");
+        assert!(BoundedLogBroker::open(dir.path(),0).is_err());
+        assert!(BoundedLogBroker::open(dir.path(),MAX_PRODUCTION_LOG_BYTES+1).is_err());
+        let mut broker=BoundedLogBroker::open(dir.path(),8).unwrap();
+        fs::write(&stdout,b"hello").unwrap();
+        fs::write(&stderr,b"!").unwrap();
+        broker.poll().unwrap();
+        let report=broker.finish().unwrap();
+        assert_eq!(report["stdout_bytes"],5);
+        assert_eq!(report["stderr_bytes"],1);
+        assert_eq!(report["stdout_sha256"],crate::util::digest(b"hello"));
+        assert_eq!(report["stderr_sha256"],crate::util::digest(b"!"));
+        fs::write(&stdout,b"HELLO").unwrap();
+        assert!(broker.poll().is_err(),
+            "Rewriting previously consumed stdout must be refused");
+
+        let mut combined=BoundedLogBroker::open(dir.path(),8).unwrap();
+        fs::write(&stdout,b"abcde").unwrap();
+        fs::write(&stderr,b"abcd").unwrap();
+        assert!(combined.poll().is_err(),
+            "Combined stdout/stderr must never exceed the total byte budget");
+
+        let mut missing=BoundedLogBroker::open(dir.path(),8).unwrap();
+        fs::remove_file(&stderr).unwrap();
+        assert!(missing.finish().is_err(),
+            "A missing final stderr stream must fail closed");
+    }
+
+    #[test]
+    fn production_log_budget_kills_running_appcontainer_job(){
+        let profile=Profile::create().unwrap();
+        let outputs=profile.prepare_results().unwrap();
+        let private=profile.folder().unwrap().join("LocalState/EndlessVibe");
+        fs::create_dir_all(&private).unwrap();
+        let executable=private.join("budgeted-log-worker.exe");
+        fs::copy(std::env::current_exe().unwrap(),&executable).unwrap();
+        let stdout=outputs.join("child-stdout.log");
+        let stderr=outputs.join("child-stderr.log");
+        let ack=outputs.join("stream-observed.ack");
+        let mut logs=BoundedLogBroker::open(&outputs,4096).unwrap();
+        let worker="tools::windows_appcontainer::tests::isolated_process_writes_separate_stdout_stderr_files";
+        let outcome=launch_controlled(
+            &profile,&executable,&format!("--exact {worker} --nocapture"),
+            &[
+                ("ENDLESSVIBE_DIRECT_STDIO_CHILD","1".into()),
+                ("ENDLESSVIBE_STDIO_OVERFLOW","1".into()),
+                ("ENDLESSVIBE_STDOUT_FILE",stdout.to_string_lossy().into_owned()),
+                ("ENDLESSVIBE_STDERR_FILE",stderr.to_string_lossy().into_owned()),
+                ("ENDLESSVIBE_STDIO_ACK_FILE",ack.to_string_lossy().into_owned()),
+            ],
+            std::time::Duration::from_secs(7),
+            &std::sync::atomic::AtomicBool::new(false),
+            Some(&mut logs),
+        );
+        assert!(outcome.is_err(),
+            "An overflowing worker must be aborted instead of accepted");
+        assert!(profile.collect_result("child-stdout.log",4096).is_err(),
+            "Oversized logs must not be brokered as output");
+    }
 
     #[test]
     fn incremental_log_reader_rejects_replacements_and_unbounded_output(){

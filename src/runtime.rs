@@ -21,6 +21,13 @@ fn windows_sandbox_status(config:&Config)->Value{
             "status":"fixed_operation_probe_only",
             "local_self_check":"--probe-windows-sandbox",
             "production_worker_entrypoint":true,
+            "fixed_worker_logs":{
+                "private_stdout_stderr":true,
+                "combined_limit_bytes":crate::tools::windows_appcontainer::MAX_PRODUCTION_LOG_BYTES,
+                "cancel_on_violation":true,
+                "tamper_detection":true,
+                "general_command_capture":false,
+            },
             "crash_recovery_journaled":true,
             "supported_operation":"hash_input",
             "protocol_version":crate::tools::sandbox_protocol::VERSION,
@@ -175,6 +182,10 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["backend_selectable"],false);
         assert_eq!(reported["appcontainer"]["status"],"fixed_operation_probe_only");
         assert_eq!(reported["appcontainer"]["production_worker_entrypoint"],true);
+        assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["combined_limit_bytes"],65536);
+        assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["tamper_detection"],true);
+        assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["cancel_on_violation"],true);
+        assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["general_command_capture"],false);
         assert_eq!(reported["appcontainer"]["crash_recovery_journaled"],true);
         assert_eq!(reported["appcontainer"]["arbitrary_program_execution"],false);
         assert_eq!(reported["profile_recovery"]["startup_scan_enabled"],true);
