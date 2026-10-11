@@ -257,15 +257,25 @@ fn sandbox_environment(profile:&Profile,extras:&[(&str,String)])->Result<Vec<u16
     let root=profile.folder()?;
     let temp=root.join("Temp");
     fs::create_dir_all(&temp)?;
-    let system_root=std::env::var("SystemRoot").unwrap_or_else(|_|r"C:\Windows".into());
-    let system_dir=PathBuf::from(&system_root).join("System32");
-    let system_drive=std::env::var("SystemDrive").unwrap_or_else(|_|"C:".into());
+    // Derive Windows loader environment strictly from the OS APIs. Never
+    // trust a parent process's SystemRoot, SystemDrive, PATH or ComSpec.
+    let system_dir=crate::tools::windows_trusted_worker::system32_directory()?;
+    let system_root=system_dir.parent()
+        .context("Windows System32 path has no parent")?
+        .to_string_lossy().into_owned();
+    let drive=match system_dir.components().next(){
+        Some(std::path::Component::Prefix(prefix))=>match prefix.kind(){
+            std::path::Prefix::Disk(letter)|std::path::Prefix::VerbatimDisk(letter)=>letter,
+            _=>bail!("Windows System32 must be on a local disk volume"),
+        },
+        _=>bail!("Windows System32 path is missing its disk prefix"),
+    };
+    let system_drive=format!("{}:",(drive as char).to_ascii_uppercase());
     let mut values=vec![
         ("SystemRoot".to_owned(),system_root.clone()),
         ("WINDIR".to_owned(),system_root),
         ("SystemDrive".to_owned(),system_drive),
         ("PATH".to_owned(),system_dir.to_string_lossy().into_owned()),
-        ("ComSpec".to_owned(),system_dir.join("cmd.exe").to_string_lossy().into_owned()),
         ("LOCALAPPDATA".to_owned(),root.to_string_lossy().into_owned()),
         ("APPDATA".to_owned(),root.to_string_lossy().into_owned()),
         ("USERPROFILE".to_owned(),root.to_string_lossy().into_owned()),
@@ -277,7 +287,8 @@ fn sandbox_environment(profile:&Profile,extras:&[(&str,String)])->Result<Vec<u16
         let mut chars=name.bytes();
         let safe_name=matches!(chars.next(),Some(b)if b.is_ascii_alphabetic()||b==b'_')
             &&chars.all(|b|b.is_ascii_alphanumeric()||b==b'_');
-        if !safe_name||name.len()>128||value.contains('\0')||value.len()>4096{
+        if !safe_name||name.len()>128||value.contains('\0')||value.len()>4096
+            ||!name.starts_with("ENDLESSVIBE_"){
             bail!("Invalid AppContainer worker environment variable");
         }
         if values.iter().any(|(existing,_):&(String,String)|existing.eq_ignore_ascii_case(name)){
@@ -863,6 +874,36 @@ mod tests{
 
 
     #[test]
+    fn sandbox_environment_uses_native_system_directories_only(){
+        let profile=Profile::create().unwrap();
+        let wide=sandbox_environment(&profile,&[]).unwrap();
+        let entries=wide.split(|value|*value==0)
+            .filter(|value|!value.is_empty())
+            .map(|value|String::from_utf16(value).unwrap())
+            .collect::<Vec<_>>();
+        let lookup=|name:&str|{
+            entries.iter().filter_map(|entry|entry.split_once('='))
+                .find(|(key,_)|*key==name).map(|(_,value)|value.to_owned())
+        };
+        let system32=crate::tools::windows_trusted_worker::system32_directory().unwrap();
+        assert_eq!(lookup("PATH").unwrap(),system32.display().to_string());
+        let expected_root=system32.parent().unwrap().display().to_string();
+        assert_eq!(lookup("SystemRoot").unwrap(),expected_root);
+        assert_eq!(lookup("WINDIR").unwrap(),expected_root);
+        assert!(lookup("SystemDrive").unwrap().ends_with(':'));
+        assert!(lookup("ComSpec").is_none(),"Restricted Worker must not advertise a shell");
+        assert!(lookup("PATHEXT").is_none());
+        assert_eq!(entries.len(),9,"Only reviewed native/private paths may be inherited");
+        assert!(sandbox_environment(&profile,&[
+            ("ENDLESSVIBE_LOADER_GATE","1".into())
+        ]).is_ok());
+        for name in ["ComSpec","PATH","Powershell","SystemRoot","TEMP","ENDLESSVIBE_BAD=KEY"]{
+            assert!(sandbox_environment(&profile,&[(name,"x".into())]).is_err(),
+                "Unreviewed lowbox environment key {name} was accepted");
+        }
+    }
+
+    #[test]
     fn sandbox_worker_environment_cannot_override_protected_values(){
         let profile=Profile::create().unwrap();
         assert!(sandbox_environment(&profile,&[]).is_ok());
@@ -877,10 +918,10 @@ mod tests{
             assert!(sandbox_environment(&profile,&[(name,"invalid".into())]).is_err());
         }
         assert!(sandbox_environment(&profile,&[
-            ("SANDBOX_KEY","first".into()),("sandbox_key","second".into())
+            ("ENDLESSVIBE_TEST_KEY","first".into()),("ENDLESSVIBE_TEST_KEY","second".into())
         ]).is_err(),"Case-insensitive duplicate environment variable accepted");
         assert!(sandbox_environment(&profile,&[
-            ("SANDBOX_KEY","x".repeat(4097))
+            ("ENDLESSVIBE_TEST_KEY","x".repeat(4097))
         ]).is_err());
     }
 

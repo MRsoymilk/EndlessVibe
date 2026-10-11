@@ -21,6 +21,12 @@ fn windows_sandbox_status(config:&Config)->Value{
             "status":"fixed_operation_probe_only",
             "local_self_check":"--probe-windows-sandbox",
             "production_worker_entrypoint":true,
+            "worker_environment":{
+                "system_paths_from_native_windows_api":true,
+                "host_loader_path_inherited":false,
+                "comspec_exposed":false,
+                "extra_key_namespace":"ENDLESSVIBE_",
+            },
             "fixed_worker_logs":{
                 "private_stdout_stderr":true,
                 "combined_limit_bytes":crate::tools::windows_appcontainer::MAX_PRODUCTION_LOG_BYTES,
@@ -203,6 +209,10 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["backend_selectable"],false);
         assert_eq!(reported["appcontainer"]["status"],"fixed_operation_probe_only");
         assert_eq!(reported["appcontainer"]["production_worker_entrypoint"],true);
+        assert_eq!(reported["appcontainer"]["worker_environment"]["system_paths_from_native_windows_api"],true);
+        assert_eq!(reported["appcontainer"]["worker_environment"]["host_loader_path_inherited"],false);
+        assert_eq!(reported["appcontainer"]["worker_environment"]["comspec_exposed"],false);
+        assert_eq!(reported["appcontainer"]["worker_environment"]["extra_key_namespace"],"ENDLESSVIBE_");
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["combined_limit_bytes"],65536);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["max_bytes"],134217728);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["sha256_verified_before_and_after"],true);

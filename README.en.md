@@ -212,6 +212,8 @@ The setting persists in `config.toml`, preserving all Workspace/Project grants a
 
 The sandbox self-check now stages only the already-running EndlessVibe EXE (up to 128 MiB), copies through a pinned file handle, verifies SHA-256 before and after the lowbox worker runs, and reports success only after profile and recovery journal cleanup. It does not accept Project binaries or third-party executables. A bounded PE64 static-import audit rejects unknown DLLs and delay-load imports; MSVC runtimes are checked in Windows System32 and rehashed after execution. This is not complete Windows loader-path attestation. The fixed Worker now pauses at two private gates so its parent can inspect mapped DLL paths via Toolhelp before and after the operation; modules outside System32 are rejected. These snapshots cannot detect transient loads between checks or prove Authenticode identity.
 
+Worker SystemRoot, SystemDrive and PATH now come from native Windows system-directory APIs instead of inherited host variables. ComSpec is absent and extra variables are limited to the ENDLESSVIBE_ namespace.
+
 - Local MCP (OAuth): `http://127.0.0.1:20000/mcp`, **loopback only**, not an HTTP endpoint for other LAN computers.
 - Local Dashboard: `http://127.0.0.1:20001/nodes`, **loopback only**.
 - Node Transfer: **TCP 20002 / TLS 1.3**; discovery: **UDP 20003 / multicast**. Open these only on a trusted LAN.
