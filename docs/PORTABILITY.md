@@ -148,12 +148,21 @@ Object. Missing, modified or timed-out handshake markers also fail closed.
 The command reports two sanitized module-name snapshots and system DLL counts,
 not the workstation's absolute DLL paths.
 
-**Scope:** Toolhelp supplies module names and mapped path strings at two
-instants; resolving their current filesystem paths does not prove the exact
-underlying section's byte identity or Authenticode signatures, and the two
-snapshots cannot detect a library loaded and unloaded between them. This is
-stronger than PE static import-name checks, but does not make arbitrary
-Windows EXEs trustworthy, nor enable an AppContainer backend for run_command.
+For each Toolhelp module base address, the broker also asks the kernel for the
+mapped section's backing file name using K32GetMappedFileNameW. QueryDosDeviceW
+resolves the drive-letter mapping to the NT device path; the resulting name
+must agree with the independently canonicalized Toolhelp file path at both
+inspection barriers. Unexpected, truncated, non-local and mismatching device
+names are rejected. Native tests verify valid mappings and reject forged
+Toolhelp paths and invalid mapped base addresses.
+
+**Scope:** These checks compare an in-memory section's kernel-reported backing
+path with a separately resolved filesystem path at two instants. They do not
+prove stable underlying file IDs, the bytes in the loaded section or
+Authenticode signatures, nor detect a module loaded and unloaded between
+snapshots. This is stronger than static import-name or Toolhelp path checks,
+but does not make arbitrary Windows EXEs trustworthy or enable an AppContainer
+backend for run_command.
 
 ### Native-only lowbox startup environment
 
@@ -172,6 +181,7 @@ execution environment and network flags are not silently forwarded. Native
 tests inspect the exact Windows wide-string environment block, and verify
 that this change preserves the AppContainer identity, file/network restrictions
 and two-gate loaded-module checks.
+
 **This does not authenticate arbitrary executables** or provide a secure
 loading path for user code. A future general sandbox backend still needs
 a separate executable identity/allowlist policy, verified dependencies,

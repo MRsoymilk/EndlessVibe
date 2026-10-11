@@ -214,6 +214,8 @@ LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限
 
 Worker 启动时的 SystemRoot、SystemDrive 和 PATH 现在由 Windows 原生系统目录 API 推导，不继承宿主同名变量，也不提供 ComSpec；额外变量限定为 ENDLESSVIBE_ 命名空间。
 
+新增 GetMappedFileNameW + QueryDosDeviceW 交叉核验实际映像映射路径，执行前后均要求与 Toolhelp 路径一致。此检查不代表签名或底层文件字节身份验证。
+
 - 本机 MCP（OAuth）：`http://127.0.0.1:20000/mcp`，**只监听 loopback**，不是供局域网设备直接调用的 HTTP 地址。
 - 本机 Dashboard：`http://127.0.0.1:20001/nodes`，**只允许本机访问**。
 - 局域网通信：TCP **20002 / TLS 1.3**；自动发现：UDP **20003 / multicast**。仅在可信 LAN 内放行所需端口。

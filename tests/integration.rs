@@ -1050,6 +1050,7 @@ fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     assert_eq!(result["job_object_enforced"],true);
     let mapped=&result["loaded_modules"];
     assert_eq!(mapped["toolhelp_parent_verified"],true);
+    assert_eq!(mapped["mapped_section_backing_paths_verified"],true);
     assert_eq!(mapped["snapshot_count"],2);
     assert_eq!(mapped["expected_worker_identity"],true);
     assert_eq!(mapped["outside_system32_module_rejected"],true);

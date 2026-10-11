@@ -10,7 +10,7 @@
 use anyhow::{bail,Context,Result};
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
+    ffi::{OsString,c_void},
     fs,
     mem::{size_of,zeroed},
     os::windows::{ffi::OsStringExt,fs::MetadataExt,io::{AsRawHandle,FromRawHandle,OwnedHandle}},
@@ -19,9 +19,12 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{GetLastError,ERROR_BAD_LENGTH,ERROR_NO_MORE_FILES,INVALID_HANDLE_VALUE},
-    System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot,Module32FirstW,Module32NextW,MODULEENTRY32W,
-        TH32CS_SNAPMODULE,TH32CS_SNAPMODULE32,
+    System::{
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot,Module32FirstW,Module32NextW,MODULEENTRY32W,
+            TH32CS_SNAPMODULE,TH32CS_SNAPMODULE32,
+        },
+        Threading::{OpenProcess,PROCESS_QUERY_INFORMATION,PROCESS_VM_READ},
     },
 };
 
@@ -30,12 +33,13 @@ const SNAPSHOT_RETRIES:usize=8;
 const REPARSE_POINT:u32=0x400;
 
 #[derive(Clone,Debug)]
-struct LoadedImage {name:String,path:PathBuf}
+struct LoadedImage {name:String,path:PathBuf,base:usize}
 #[derive(Debug)]
 pub(crate) struct ModuleAudit {
     pub(crate) basenames:Vec<String>,
     pub(crate) system32_modules:usize,
     pub(crate) executable_verified:bool,
+    pub(crate) backing_mapping_verified:bool,
 }
 fn nul_terminated(chars:&[u16])->Result<OsString>{
     let end=chars.iter().position(|&c|c==0)
@@ -78,7 +82,8 @@ fn snapshot(pid:u32)->Result<Vec<LoadedImage>>{
         if !stem.eq_ignore_ascii_case(&name){
             bail!("Loaded module basename and image path disagree");
         }
-        modules.push(LoadedImage{name,path});
+        if entry.modBaseAddr.is_null(){bail!("Windows returned a null mapped-module base");}
+        modules.push(LoadedImage{name,path,base:entry.modBaseAddr as usize});
         entry.dwSize=size_of::<MODULEENTRY32W>() as u32;
         if unsafe{Module32NextW(snapshot.as_raw_handle() as _,&mut entry)}==0{
             let code=unsafe{GetLastError()};
@@ -141,12 +146,102 @@ fn classify(modules:&[LoadedImage],expected_executable:&Path,system32:&Path)
         basenames:seen.into_iter().collect(),
         system32_modules:windows_count,
         executable_verified:true,
+        backing_mapping_verified:false,
     })
 }
+// GetMappedFileNameW returns the *mapped section's* NT device name for a
+// base address, independently of Toolhelp's module path string. The caller
+// compares the two via the current QueryDosDeviceW drive mapping. This is
+// not a filesystem file-ID or Authenticode signature attestation.
+#[link(name="kernel32")]
+unsafe extern "system" {
+    fn K32GetMappedFileNameW(process:*mut c_void,base:*mut c_void,
+        output:*mut u16,length:u32)->u32;
+    fn QueryDosDeviceW(drive:*const u16,output:*mut u16,length:u32)->u32;
+}
+fn device_prefix(letter:u8)->Result<String>{
+    if !letter.is_ascii_alphabetic(){
+        bail!("Mapped image must use a local Windows drive");
+    }
+    let drive=[letter.to_ascii_uppercase() as u16,b':' as u16,0u16];
+    let mut buffer=[0u16;32768];
+    let len=unsafe{QueryDosDeviceW(drive.as_ptr(),buffer.as_mut_ptr(),buffer.len() as u32)};
+    if len==0||len as usize>=buffer.len(){
+        return Err(std::io::Error::last_os_error()).context("Resolve Windows drive NT-device mapping");
+    }
+    let zero=buffer[..len as usize].iter().position(|v|*v==0)
+        .context("Windows device mapping is not NUL-terminated")?;
+    let path=String::from_utf16(&buffer[..zero])
+        .context("Windows device mapping contains invalid UTF-16")?;
+    if !path.to_ascii_lowercase().starts_with(r"\device\"){
+        bail!("Unexpected non-local Windows device mapping");
+    }
+    Ok(path)
+}
+fn expected_device_path(path:&Path,drives:&mut std::collections::BTreeMap<u8,String>)
+    ->Result<String>{
+    let canonical=fs::canonicalize(path)?;
+    let canonical=canonical.to_str().context("Mapped module path is not Unicode")?;
+    let ordinary=canonical.strip_prefix(r"\\?\").unwrap_or(canonical);
+    let bytes=ordinary.as_bytes();
+    if bytes.len()<4||!bytes[0].is_ascii_alphabetic()||bytes[1]!=b':'
+        ||bytes[2]!=b'\\'{
+        bail!("Expected a fully qualified local Windows drive path");
+    }
+    let letter=bytes[0].to_ascii_uppercase();
+    if let std::collections::btree_map::Entry::Vacant(entry)=drives.entry(letter){
+        entry.insert(device_prefix(letter)?);
+    }
+    let prefix=drives.get(&letter).context("Missing Windows drive device mapping")?;
+    Ok(format!("{}{}",prefix,&ordinary[2..]).to_lowercase())
+}
+fn mapped_section_name(
+    process:windows_sys::Win32::Foundation::HANDLE,base:usize,
+)->Result<String>{
+    if base==0{bail!("Mapped Windows image base is null");}
+    let mut characters=[0u16;32768];
+    let count=unsafe{
+        K32GetMappedFileNameW(process,base as *mut c_void,
+            characters.as_mut_ptr(),characters.len() as u32)
+    };
+    if count==0{
+        return Err(std::io::Error::last_os_error()).context("Inspect Windows mapped section backing path");
+    }
+    if count as usize>=characters.len()-1{
+        bail!("Windows mapped image path exceeds bounded output buffer");
+    }
+    let name=String::from_utf16(&characters[..count as usize])
+        .context("Windows mapped image path is invalid UTF-16")?;
+    if !name.to_lowercase().starts_with(r"\device\"){
+        bail!("Windows mapped image did not resolve to an NT device path");
+    }
+    Ok(name.to_lowercase())
+}
+fn verify_mapped_sections(pid:u32,modules:&[LoadedImage])->Result<()>{
+    let raw=unsafe{OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,0,pid)};
+    if raw.is_null(){
+        return Err(std::io::Error::last_os_error()).context("Open AppContainer for mapped-section auditing");
+    }
+    let process=unsafe{OwnedHandle::from_raw_handle(raw as _)};
+    let mut drives=std::collections::BTreeMap::new();
+    for module in modules{
+        let expected=expected_device_path(&module.path,&mut drives)?;
+        let actual=mapped_section_name(process.as_raw_handle() as _,module.base)
+            .with_context(||format!("Audit memory-mapped module {}",module.name))?;
+        if actual!=expected{
+            bail!("Mapped image backing section and Toolhelp path disagree for {}",module.name);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn audit(pid:u32,expected_executable:&Path)->Result<ModuleAudit>{
     let sys=crate::tools::windows_trusted_worker::system32_directory()?;
     let modules=snapshot(pid)?;
-    classify(&modules,expected_executable,&sys)
+    let mut reviewed=classify(&modules,expected_executable,&sys)?;
+    verify_mapped_sections(pid,&modules)?;
+    reviewed.backing_mapping_verified=true;
+    Ok(reviewed)
 }
 
 /// Two short fixed-operation barriers keep the trusted lowbox Worker alive
@@ -198,6 +293,7 @@ impl LoaderGate{
             "pre_system32_count":before.system32_modules,
             "post_system32_count":after.system32_modules,
             "expected_worker_identity":before.executable_verified&&after.executable_verified,
+            "mapped_section_backing_paths_verified":before.backing_mapping_verified&&after.backing_mapping_verified,
             "outside_system32_module_rejected":true,
             "snapshot_count":2,
             "future_or_transient_module_loads_proven":false,
@@ -225,6 +321,24 @@ mod tests{
         assert!(summary.basenames.iter().any(|n|n.ends_with(".exe")));
     }
     #[test]
+    fn mapped_backing_name_matches_toolhelp_module_and_rejects_mismatch(){
+        let pid=unsafe{GetCurrentProcessId()};
+        let modules=snapshot(pid).unwrap();
+        assert!(modules.len()>1);
+        verify_mapped_sections(pid,&modules).unwrap();
+        let reviewed=audit(pid,&std::env::current_exe().unwrap()).unwrap();
+        assert!(reviewed.backing_mapping_verified);
+        let mut invalid=modules.clone();
+        invalid[0].base=usize::MAX;
+        assert!(verify_mapped_sections(pid,&invalid).is_err(),
+            "An invalid loaded image base address must fail closed");
+        let mut wrong=modules;
+        let other=wrong.iter().find(|m|m.path!=wrong[0].path).unwrap().path.clone();
+        wrong[0].path=other;
+        assert!(verify_mapped_sections(pid,&wrong).is_err(),
+            "A Toolhelp image path that differs from mapped section identity must be refused");
+    }
+    #[test]
     fn untrusted_image_paths_and_duplicate_mappings_fail_closed(){
         let expected=std::env::current_exe().unwrap();
         let mut images=snapshot(unsafe{GetCurrentProcessId()}).unwrap();
@@ -240,7 +354,7 @@ mod tests{
         let temporary=tempfile::tempdir().unwrap();
         let untrusted=temporary.path().join("evil.dll");
         fs::write(&untrusted,b"untrusted DLL").unwrap();
-        images.push(LoadedImage{name:"evil.dll".into(),path:untrusted});
+        images.push(LoadedImage{name:"evil.dll".into(),path:untrusted,base:0});
         assert!(classify(&images,&expected,&system).is_err(),
             "File outside System32 must be rejected");
     }
@@ -265,7 +379,7 @@ mod tests{
         assert!(classify(&[],Path::new("C:\\missing.exe"),Path::new("C:\\Windows\\System32")).is_err());
         let current=std::env::current_exe().unwrap();
         let name=current.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
-        let fake=LoadedImage{name,path:current};
+        let fake=LoadedImage{name,path:current,base:0};
         assert!(classify(&[fake],Path::new("C:\\missing.exe"),
             &crate::tools::windows_trusted_worker::system32_directory().unwrap()).is_err());
     }

@@ -214,6 +214,8 @@ The sandbox self-check now stages only the already-running EndlessVibe EXE (up t
 
 Worker SystemRoot, SystemDrive and PATH now come from native Windows system-directory APIs instead of inherited host variables. ComSpec is absent and extra variables are limited to the ENDLESSVIBE_ namespace.
 
+The broker now compares each mapped section's kernel-reported NT-device filename against its Toolhelp path through GetMappedFileNameW and QueryDosDeviceW at both barriers; this is not a signature or loaded-file-byte identity proof.
+
 - Local MCP (OAuth): `http://127.0.0.1:20000/mcp`, **loopback only**, not an HTTP endpoint for other LAN computers.
 - Local Dashboard: `http://127.0.0.1:20001/nodes`, **loopback only**.
 - Node Transfer: **TCP 20002 / TLS 1.3**; discovery: **UDP 20003 / multicast**. Open these only on a trusted LAN.
