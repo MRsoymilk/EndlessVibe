@@ -935,6 +935,55 @@ async fn windows_git_tools_accept_verbatim_project_and_temporary_paths(){
     assert_eq!(history["commits"][0]["subject"],"test: Windows Git subprocess path compatibility");
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_git_review_normalizes_checked_out_crlf_without_filters(){
+    let fixture=fixture(|_|{});
+    let project=fixture.rt.project("demo","demo").unwrap();
+    let git=|arguments:&[&str]|{
+        let output=std::process::Command::new(&fixture.rt.config.git.executable)
+            .current_dir(&project.root.path).args(arguments).output().unwrap();
+        assert!(output.status.success(),
+                "git {arguments:?}: {}",String::from_utf8_lossy(&output.stderr));
+        output.stdout
+    };
+    git(&["init","--quiet","--initial-branch=dev"]);
+    git(&["config","core.autocrlf","true"]);
+    let source=project.root.path.join("src/main.rs");
+    std::fs::write(&source,b"first\r\nsecond\r\n").unwrap();
+    git(&["add","--","src/main.rs"]);
+    git(&["-c","user.name=Test","-c","user.email=test@example.invalid",
+          "commit","--quiet","-m","initial"]);
+    let args=||DiffArgs{
+        workspace:"demo".into(),project:"demo".into(),
+        paths:vec!["src/main.rs".into()],offset:0,limit:16384,
+        task_id:None,stage:None,
+    };
+    let clean=git::diff(&fixture.rt,&project,args()).await.unwrap();
+    assert_eq!(clean["has_changes"],false,
+              "CRLF checkout must not appear to modify an LF-indexed file");
+    assert_eq!(clean["added_lines"],0);
+    assert_eq!(clean["removed_lines"],0);
+
+    std::fs::write(&source,b"first\r\nupdated\r\n").unwrap();
+    let changed=git::diff(&fixture.rt,&project,args()).await.unwrap();
+    assert_eq!(changed["has_changes"],true);
+    assert_eq!(changed["added_lines"],1,
+              "Only the edited line should appear in the review");
+    assert_eq!(changed["removed_lines"],1);
+    let commit=git::commit(&fixture.rt,&project,CommitArgs{
+        workspace:"demo".into(),project:"demo".into(),
+        paths:vec!["src/main.rs".into()],
+        message:"test: Windows CRLF normalized snapshot".into(),
+        expected_head:changed["head"].as_str().unwrap().into(),
+        expected_diff_sha256:changed["diff_sha256"].as_str().unwrap().into(),
+        task_id:None,stage:None,
+    }).await.unwrap();
+    assert_eq!(git::status(&fixture.rt,&project).await.unwrap()["head"],commit["commit"]);
+    assert_eq!(git(&["show","HEAD:src/main.rs"]),b"first\nupdated\n");
+    assert_eq!(std::fs::read(&source).unwrap(),b"first\r\nupdated\r\n");
+}
+
 #[tokio::test]async fn file_edits_require_current_hash_and_backup(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let r=filesystem::read(&f.rt,&w,ReadArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),start_line:1,max_lines:2,task_id:None,stage:None}).unwrap();let hash=r["sha256"].as_str().unwrap().to_owned();let result=filesystem::patch(&f.rt,&w,PatchArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),expected_sha256:hash.clone(),edits:vec![Edit{old_text:"hello".into(),new_text:"world".into(),expected_occurrences:1}],task_id:None,stage:None}).unwrap();assert!(result["backup_id"].is_string());assert!(String::from_utf8(w.root.read("src/main.rs",4096).unwrap()).unwrap().contains("world"));let stale=filesystem::write(&f.rt,&w,WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),content:"lost edit".into(),expected_sha256:hash,create_parents:false,task_id:None,stage:None});assert!(stale.is_err());}
 #[tokio::test]async fn new_files_do_not_overwrite_existing_work(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let a=WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"docs/new.txt".into(),content:"new\n".into(),expected_sha256:"MISSING".into(),create_parents:true,task_id:None,stage:None};filesystem::write(&f.rt,&w,a.clone()).unwrap();assert!(filesystem::write(&f.rt,&w,a).is_err());}
 #[tokio::test]async fn read_only_projects_refuse_changes(){let f=fixture(|c|{c.workspaces[0].projects[0].allow_write=false;c.workspaces[0].projects[0].allow_exec=false;c.workspaces[0].projects[0].allow_git_commit=false;});let w=f.rt.project("demo","demo").unwrap();assert!(filesystem::mkdir(&w,MakeDirectoryArgs{workspace:"demo".into(),project:"demo".into(),path:"new".into(),task_id:None,stage:None}).is_err());assert!(w.exec_allowed().is_err());}
