@@ -694,6 +694,23 @@ async fn nodes_request_history_ui_assets_are_served(){
 }
 
 #[tokio::test]
+async fn remote_file_browser_assets_are_served(){
+ let f=fixture(|_|{});
+ let router=server::create_dashboard_router(f.rt.clone());
+ for (path,needles) in [
+  ("/nodes",vec!["id=\"node-remote-browser\"","id=\"node-remote-file-list\"","id=\"node-remote-file-more\""]),
+  ("/assets/js/nodes.js",vec!["async function listRemoteFiles","async function readRemoteFile","childEntryPath(path,entry.name)","await listRemoteFiles(peer,w,p,\".\")"]),
+  ("/assets/app.css",vec![".node-file-browser{",".node-file-entry{"]),
+ ]{
+  let response=http(&router,"GET",path,Body::empty(),None,None,None).await;
+  assert_eq!(response.status(),StatusCode::OK,"{path}");
+  let body=to_bytes(response.into_body(),2*1024*1024).await.unwrap();
+  let text=String::from_utf8_lossy(&body);
+  for needle in needles{assert!(text.contains(needle),"{path} missing {needle}");}
+ }
+}
+
+#[tokio::test]
 async fn transfer_metrics_are_local_only_and_aggregate(){
  let child=fixture(|c|c.transfer.enabled=true);
  child.rt.db.put("transfer_requests","secret-record",

@@ -1,6 +1,7 @@
 import {$,node,setText,formatTime} from "./common.js";
 let configRevision="",configDirty=false,localConfig=null,selected=null,working=false;
 let localRole="unassigned",refreshingNodes=false;
+let browserDir=".",selectedFilePath=null;
 export function apiErrorMessage(response,payload){const error=payload?.error;return [error?.message,payload?.message,typeof error==="string"?error:null,payload?.detail].find(v=>typeof v==="string"&&v.trim())||`HTTP ${response.status} ${response.statusText||"Request failed"}`}
 const get=async(url)=>{const r=await fetch(url,{cache:"no-store",headers:{Accept:"application/json"}});const v=await r.json().catch(()=>({}));if(!r.ok)throw new Error(apiErrorMessage(r,v));return v};
 const send=async(url,method,data)=>{const r=await fetch(url,{method,cache:"no-store",headers:{"Content-Type":"application/json",Accept:"application/json"},body:data==null?undefined:JSON.stringify(data)});const v=await r.json().catch(()=>({}));if(!r.ok)throw new Error(apiErrorMessage(r,v));return v};
@@ -125,8 +126,106 @@ async function loadRequestHistory(peer,w,p,cursor=null,append=false){
  }
 }
 
-async function openProject(peer,w,p){selected={node:peer.node_id,workspace:w,project:p};const historyRoot=$("node-request-history");if(historyRoot)historyRoot.hidden=true;if($("node-remote-args"))$("node-remote-args").value=JSON.stringify({program:"git",args:["status"],request_id:crypto.randomUUID()},null,2);const root=clear("node-remote-buttons");if(!root)return;const args=()=>({workspace:w,project:p});root.append(btn("Request history",()=>loadRequestHistory(peer,w,p)),btn("Request status",async()=>{const id=window.prompt("请输入此前远程操作的 request_id");if(!id)return;detail(w+"/"+p+" · Request "+id,await remote(peer.node_id,"request_status",{...args(),request_id:id.trim()}))}),btn("Inspect",async()=>detail(w+"/"+p,await remote(peer.node_id,"inspect_project",args()))),btn("Git status",async()=>detail(w+"/"+p+" · Git",await remote(peer.node_id,"git_status",args()))),btn("List files",async()=>{const path=$("node-remote-path").value||".";detail(w+"/"+p+" · "+path,await remote(peer.node_id,"list_directory",{...args(),path,limit:100}))}),btn("Read file",async()=>{const path=$("node-remote-path").value.trim();if(!path||path===".")throw new Error("请填写相对文件路径");const result=await remote(peer.node_id,"read_file",{...args(),path,start_line:1,max_lines:200});detail(w+"/"+p+"/"+path,result)}));detail("Selected "+w+"/"+p,"选择文件或 Git 操作。子节点会再次验证该 Project 的读取授权。")}
-async function browse(peer){const historyRoot=$("node-request-history");if(historyRoot)historyRoot.hidden=true;const v=await remote(peer.node_id,"list_workspaces",{});const root=$("node-project-detail");if(root)root.hidden=false;const actions=clear("node-remote-buttons");if(!actions)return;for(const workspace of v.workspaces||[]){const projects=await remote(peer.node_id,"list_projects",{workspace:workspace.id});for(const p of projects.projects||[]){actions.append(btn(workspace.id+"/"+p.id,()=>openProject(peer,workspace.id,p.id)))}}detail(peer.name+" · Projects",actions.children.length?"选择左侧 Project 查看详情。":"没有授权可见的 Project")}
+function isSelectedProject(peer,workspace,project){
+ return selected?.node===peer.node_id&&selected.workspace===workspace&&selected.project===project;
+}
+function parentRemoteDir(directory){
+ const parts=directory.replace(/\\/g,"/").replace(/\/+$/,"").split("/");
+ parts.pop();
+ return parts.join("/")||".";
+}
+function childEntryPath(directory,name){
+ // Treat filenames from the child as untrusted: never turn separators or traversal into links.
+ if(typeof name!=="string"||!name||name==="."||name===".."||
+    name.includes("/")||name.includes("\\")||name.includes("\0"))return null;
+ return directory==="."?name:directory.replace(/[\\/]+$/,"")+"/"+name;
+}
+async function readRemoteFile(peer,workspace,project,path){
+ path=path.trim();
+ if(!path||path===".")throw new Error("请先点击文件列表中的文件，或输入相对文件路径（例如 README.md）");
+ const input=$("node-remote-path");
+ if(input)input.value=path;
+ selectedFilePath=path;
+ const result=await remote(peer.node_id,"read_file",{workspace,project,path,start_line:1,max_lines:200});
+ if(isSelectedProject(peer,workspace,project))detail(workspace+"/"+project+"/"+path,result);
+}
+async function listRemoteFiles(peer,workspace,project,directory=".",offset=0){
+ const path=directory.trim()||".";
+ const result=await remote(peer.node_id,"list_directory",{workspace,project,path,offset,limit:100});
+ if(!isSelectedProject(peer,workspace,project)||(offset>0&&browserDir!==path))return;
+ const browser=$("node-remote-browser"),location=$("node-remote-location");
+ const entries=$("node-remote-file-list"),more=$("node-remote-file-more");
+ if(!browser||!location||!entries||!more)return;
+ if(offset===0){
+  browserDir=path;
+  selectedFilePath=null;
+  const input=$("node-remote-path");if(input)input.value=path;
+  entries.replaceChildren();
+  location.replaceChildren();
+  if(path!==".")location.append(btn("↑ 上一级",()=>listRemoteFiles(peer,workspace,project,parentRemoteDir(path))));
+  const pathLabel=node("span","node-file-location-path",path);
+  pathLabel.setAttribute("data-i18n-ignore","");
+  location.append(node("span","node-muted","目录："),pathLabel,node("span","node-muted"," · "+result.total+" 项"));
+  browser.hidden=false;
+ }
+ for(const entry of Array.isArray(result.entries)?result.entries:[]){
+  const fullPath=childEntryPath(path,entry.name);
+  if(!fullPath)continue;
+  const row=node("div","node-file-entry");
+  if(entry.type==="directory"||entry.type==="file"){
+   const directoryEntry=entry.type==="directory";
+   const control=btn((directoryEntry?"📁 ":"📄 ")+entry.name,()=>directoryEntry
+     ?listRemoteFiles(peer,workspace,project,fullPath)
+     :readRemoteFile(peer,workspace,project,fullPath));
+   control.classList.add("node-file-open");
+   control.title=fullPath;
+   control.setAttribute("data-i18n-ignore","");
+   row.append(control);
+  }else{
+   const unsupported=node("span","node-file-unsupported","↪ "+entry.name);
+   unsupported.setAttribute("data-i18n-ignore","");
+   row.append(unsupported);
+  }
+  if(entry.type==="file"&&Number.isFinite(entry.bytes)&&entry.bytes>=0){
+   row.append(node("span","node-file-size",entry.bytes.toLocaleString()+" B"));
+  }
+  entries.append(row);
+ }
+ if(offset===0&&!entries.children.length)entries.append(node("span","node-muted","目录为空"));
+ more.replaceChildren();
+ if(Number.isSafeInteger(result.next_offset)&&result.next_offset>offset)
+  more.append(btn("加载更多文件",()=>listRemoteFiles(peer,workspace,project,path,result.next_offset)));
+ detail(workspace+"/"+project+" · "+path,result);
+}
+async function openProject(peer,w,p){
+ selected={node:peer.node_id,workspace:w,project:p};
+ browserDir=".";
+ selectedFilePath=null;
+ const browser=$("node-remote-browser");if(browser)browser.hidden=true;
+ const input=$("node-remote-path");if(input)input.value=".";
+ const historyRoot=$("node-request-history");if(historyRoot)historyRoot.hidden=true;
+ if($("node-remote-args"))$("node-remote-args").value=JSON.stringify({program:"git",args:["status"],request_id:crypto.randomUUID()},null,2);
+ const root=clear("node-remote-buttons");if(!root)return;
+ const args=()=>({workspace:w,project:p});
+ root.append(
+  btn("Request history",()=>loadRequestHistory(peer,w,p)),
+  btn("Request status",async()=>{
+   const id=window.prompt("请输入此前远程操作的 request_id");
+   if(!id)return;
+   detail(w+"/"+p+" · Request "+id,await remote(peer.node_id,"request_status",{...args(),request_id:id.trim()}));
+  }),
+  btn("Inspect",async()=>detail(w+"/"+p,await remote(peer.node_id,"inspect_project",args()))),
+  btn("Git status",async()=>detail(w+"/"+p+" · Git",await remote(peer.node_id,"git_status",args()))),
+  btn("List files",()=>{
+   const typed=input?.value.trim()||".";
+   return listRemoteFiles(peer,w,p,typed===selectedFilePath?browserDir:typed);
+  }),
+  btn("Read file",()=>readRemoteFile(peer,w,p,input?.value||""))
+ );
+ detail("Selected "+w+"/"+p,"点击文件列表中的文件即可读取，或输入项目内的相对路径。");
+ await listRemoteFiles(peer,w,p,".");
+}
+async function browse(peer){selected=null;browserDir=".";selectedFilePath=null;const browser=$("node-remote-browser");if(browser)browser.hidden=true;const historyRoot=$("node-request-history");if(historyRoot)historyRoot.hidden=true;const v=await remote(peer.node_id,"list_workspaces",{});const root=$("node-project-detail");if(root)root.hidden=false;const actions=clear("node-remote-buttons");if(!actions)return;for(const workspace of v.workspaces||[]){const projects=await remote(peer.node_id,"list_projects",{workspace:workspace.id});for(const p of projects.projects||[]){actions.append(btn(workspace.id+"/"+p.id,()=>openProject(peer,workspace.id,p.id)))}}detail(peer.name+" · Projects",actions.children.length?"选择左侧 Project 查看详情。":"没有授权可见的 Project")}
 async function revoke(peer){if(!window.confirm("撤销节点 "+peer.name+" 的本地配对？两端均须撤销才能完全解除双向信任。"))return;await send("/api/nodes/peers/"+encodeURIComponent(peer.node_id),"DELETE",{});status("本地已撤销 "+peer.name);if(selected?.node===peer.node_id){selected=null;const detailRoot=$("node-project-detail");if(detailRoot)detailRoot.hidden=true;}await refreshNodes()}
 async function savePeerGrants(peer,grants){
  if(!peer.grants_revision)throw new Error("缺少授权版本信息，请刷新 Nodes 页面后重试");
