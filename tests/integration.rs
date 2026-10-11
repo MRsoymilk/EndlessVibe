@@ -512,6 +512,102 @@ async fn cached_chatgpt_tools_read_paired_child_via_virtual_project(){
     stop.cancel();tls.await.unwrap().unwrap();
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn cached_chatgpt_tools_commit_and_poll_paired_child(){
+    let socket=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=socket.local_addr().unwrap();drop(socket);
+    let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});
+    let parent=fixture(|c|{c.transfer.enabled=true;});
+    initialize_git(&child,true);
+    let stop=tokio_util::sync::CancellationToken::new();
+    let tls=tokio::spawn(child.rt.transfer.clone().run_tls(stop.clone(),Some(child.rt.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let offer=parent.rt.transfer.start_pair(address).await.unwrap();
+    let grant=endlessvibe::transfer::secure::Grant{
+        workspace:"demo".into(),project:"demo".into(),read:true,write:true,execute:true,git:true};
+    child.rt.transfer.approve_pair(endlessvibe::transfer::secure::PairApprove{
+        id:offer["id"].as_str().unwrap().into(),grants:vec![grant]
+    },&child.rt).unwrap();
+    parent.rt.transfer.reconcile_pending().await.unwrap();
+    let alias=format!("node:{}:demo:demo",child.rt.transfer.node_id);
+    let app=server::create_router(parent.rt.clone());
+    let token=parent.rt.auth.issue_local_token().unwrap();
+    async fn call(app:&Router,token:&str,name:&str,args:Value)->Value{
+        let message=json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+                           "params":{"name":name,"arguments":args}});
+        let response=http(app,"POST","/mcp",Body::from(message.to_string()),
+                         Some("application/json"),Some(token),None).await;
+        assert_eq!(response.status(),StatusCode::OK);
+        json_body(response).await["result"].clone()
+    }
+    let original=call(&app,&token,"read_file",json!({"workspace":alias,"path":"tracked.txt"})).await;
+    assert_ne!(original["isError"],true,"{original}");
+    let hash=original["structuredContent"]["sha256"].as_str().unwrap();
+    let change=json!({"workspace":alias,"path":"tracked.txt","content":"changed from cached client\n",
+                     "expected_sha256":hash});
+    let written=call(&app,&token,"write_file",change.clone()).await;
+    assert_ne!(written["isError"],true,"{written}");
+    let request_id=written["structuredContent"]["remote_request_id"].as_str().unwrap();
+    assert!(request_id.starts_with("legacy_"));
+    let replay=call(&app,&token,"write_file",change).await;
+    assert_ne!(replay["isError"],true,"Idempotent re-request must reuse first result: {replay}");
+    assert_eq!(written["structuredContent"]["sha256"],replay["structuredContent"]["sha256"]);
+    let diff=call(&app,&token,"git_diff",json!({"workspace":alias,"paths":["tracked.txt"]})).await;
+    assert_ne!(diff["isError"],true,"{diff}");
+    let review=&diff["structuredContent"];
+    assert_eq!(review["has_more"],false);
+    let commit=call(&app,&token,"git_commit",json!({
+        "workspace":alias,"paths":["tracked.txt"],"message":"fix(test): verify cached child commit",
+        "expected_head":review["head"],"expected_diff_sha256":review["diff_sha256"]
+    })).await;
+    assert_ne!(commit["isError"],true,"{commit}");
+    let committed_head=commit["structuredContent"]["commit"].as_str().unwrap();
+    let status=call(&app,&token,"git_status",json!({"workspace":alias})).await;
+    assert_ne!(status["isError"],true,"{status}");
+    assert_eq!(status["structuredContent"]["head"],committed_head);
+    let history=call(&app,&token,"git_log",json!({"workspace":alias,"limit":1})).await;
+    assert_ne!(history["isError"],true,"{history}");
+    assert_eq!(history["structuredContent"]["commits"][0]["subject"],"fix(test): verify cached child commit");
+    let command=call(&app,&token,"run_command",json!({
+        "workspace":alias,"program":"git","args":["--version"],
+        "request_id":"cached-child-git-version","timeout_seconds":20
+    })).await;
+    assert_ne!(command["isError"],true,"{command}");
+    let handle=command["structuredContent"]["job_id"].as_str().unwrap().to_owned();
+    assert!(handle.starts_with("nodejob:"),"remote jobs must have a routable handle");
+    let mut state=Value::Null;
+    for _ in 0..50{
+        let result=call(&app,&token,"get_job",json!({"job_id":handle})).await;
+        assert_ne!(result["isError"],true,"{result}");
+        state=result["structuredContent"].clone();
+        if state["status"]=="succeeded"{break;}
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(state["status"],"succeeded");
+    let output=call(&app,&token,"get_job_output",json!({"job_id":handle,"limit":4096})).await;
+    assert_ne!(output["isError"],true,"{output}");
+    assert!(output["structuredContent"]["output"].as_str().unwrap().contains("git version"));
+    let op:i64=parent.rt.db.transaction(|tx|Ok(tx.query_row(
+        "SELECT MAX(seq) FROM operation_log WHERE tool='node_write'",[],|r|r.get(0))?)).unwrap();
+    let stored=parent.rt.db.operation(op).unwrap();
+    assert_eq!(stored["output"]["redacted"],true);
+    assert!(!stored.to_string().contains("changed from cached client"));
+    let revision=child.rt.transfer.peers().unwrap()["peers"][0]["grants_revision"].as_str().unwrap().to_owned();
+    child.rt.transfer.update_peer_grants(&parent.rt.transfer.node_id,
+        endlessvibe::transfer::secure::GrantUpdate{
+            expected_grants_revision:revision,
+            grants:vec![endlessvibe::transfer::secure::Grant{
+                workspace:"demo".into(),project:"demo".into(),read:true,
+                write:false,execute:false,git:false
+            }],
+        },&child.rt).unwrap();
+    let denied=call(&app,&token,"create_directory",json!({"workspace":alias,"path":"denied"})).await;
+    assert_eq!(denied["isError"],true,"Child grant revocation must block cached clients");
+    assert!(!child.rt.project("demo","demo").unwrap().root.path.join("denied").exists());
+    stop.cancel();tls.await.unwrap().unwrap();
+}
+
 #[tokio::test]async fn transfer_parent_mutates_and_polls_child_jobs_over_tls(){
 let sock=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=sock.local_addr().unwrap();drop(sock);
 let child=fixture(|c|{c.transfer.enabled=true;c.transfer.listen=address;});let parent=fixture(|c|c.transfer.enabled=true);initialize_git(&child,true);
