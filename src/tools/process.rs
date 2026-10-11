@@ -305,10 +305,15 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     fn trusted_host_can_run_installed_programs_without_global_allowlisting(){
         let temp=tempfile::tempdir().unwrap();
         let base=crate::security::paths::Root::open(temp.path()).unwrap();
+        // Only construct commands: the current test executable supplies a real
+        // native program without depending on /bin/sh or an inherited PATH.
+        let executable=std::env::current_exe().unwrap();
+        let program=executable.file_stem().unwrap().to_str().unwrap();
         let mut config=Config::default();
         config.execution.backend="host".into();
         config.execution.acknowledge_unsafe_host_execution=true;
-        config.execution.path="/usr/bin:/bin".into();
+        config.execution.path=std::env::join_paths([executable.parent().unwrap()])
+            .unwrap().to_string_lossy().into_owned();
         config.execution.allow_shell=false;
         let mut project=Project{
             workspace_id:"demo".into(),
@@ -320,19 +325,22 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
             lock:std::sync::Arc::new(tokio::sync::Mutex::new(()))
         };
         let env=BTreeMap::new();
-        assert!(!config.execution.allowed_programs.iter().any(|v|v=="sh"));
-        assert!(build_job_command(&config,&project,"sh",&["-c".into(),"true".into()],
-            ".",false,&[],&env,true,"/tmp/job-summary.json").is_err());
+        let args=["--help".into()];
+        let summary=temp.path().join("job-summary.json").to_string_lossy().into_owned();
+        assert!(!config.execution.allowed_programs.iter().any(|v|v==program));
+        assert!(build_job_command(&config,&project,program,&args,
+            ".",false,&[],&env,true,&summary).is_err());
         project.config.execution_profile="trusted_host".into();
         assert!(config.validate().is_ok());
-        assert!(build_job_command(&config,&project,"sh",&["-c".into(),"true".into()],
-            ".",false,&[],&env,true,"/tmp/job-summary.json").is_ok());
+        assert!(build_job_command(&config,&project,program,&args,
+            ".",false,&[],&env,true,&summary).is_ok());
         assert!(build_job_command(&config,&project,"not-a-real-program", &[],
-            ".",false,&[],&env,true,"/tmp/job-summary.json").is_err());
+            ".",false,&[],&env,true,&summary).is_err());
         config.execution.backend="bubblewrap".into();
-        assert!(config.validate().is_ok()); // No Project registered; direct call still fails closed.
-        assert!(build_job_command(&config,&project,"sh",&[],
-            ".",false,&[],&env,true,"/tmp/job-summary.json").is_err());
+        // No Project is registered; bubblewrap itself is available only on Linux.
+        assert_eq!(config.validate().is_ok(),cfg!(target_os="linux"));
+        assert!(build_job_command(&config,&project,program,&[],
+            ".",false,&[],&env,true,&summary).is_err());
     }
     #[test]fn required_programs_do_not_grant_run_permission(){let mut c=Config::default();c.execution.required_programs=vec!["postgres".into()];assert!(!c.execution.allowed_programs.contains(&"postgres".to_owned()));}
     #[test]fn diagnostics_always_include_joint_gate_tools(){let c=Config::default();let programs=diagnostic_programs(&c);for program in DIAGNOSTIC_PROGRAMS{assert!(programs.contains(&program.to_owned()));}}
@@ -343,7 +351,24 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn suggested_toml_is_copyable_and_preserves_existing_path(){let mounts=vec![json!({"source":"/host/rust","target":"/opt/rust"})];let text=suggested_toml("/usr/bin:/bin",&["/opt/rust/bin".into()],&mounts);assert!(text.contains("path = \"/opt/rust/bin:/usr/bin:/bin\""));assert!(text.contains("source = \"/host/rust\", target = \"/opt/rust\""));}
     #[test]fn cargo_preflight_also_requires_rustc(){assert_eq!(job_preflight_programs("cargo",&[],false).unwrap(),vec!["cargo".to_owned(),"rustc".to_owned()]);}
     #[test]fn shell_preflight_is_explicit(){assert_eq!(job_preflight_programs("bash",&["postgres".into()],true).unwrap(),vec!["postgres".to_owned()]);}
-    #[test]fn summary_contract_uses_private_cache_path(){let d=tempfile::tempdir().unwrap();let mut c=Config::default();c.security.data_dir=d.path().to_owned();let contract=job_summary_contract(&c,"root","demo","abc-123").unwrap();assert!(contract.host_path.starts_with(d.path().join("exec-cache/root/demo")));assert_eq!(contract.exposed_path,"/cache/job-summary-abc-123.json");}
+    #[test]
+    fn summary_contract_uses_private_cache_path(){
+        let d=tempfile::tempdir().unwrap();
+        let mut c=Config::default();
+        c.security.data_dir=d.path().to_owned();
+        c.execution.backend="bubblewrap".into();
+        let contract=job_summary_contract(&c,"root","demo","abc-123").unwrap();
+        assert!(contract.host_path.starts_with(d.path().join("exec-cache/root/demo")));
+        assert_eq!(contract.exposed_path,"/cache/job-summary-abc-123.json");
+        c.execution.backend="host".into();
+        c.execution.acknowledge_unsafe_host_execution=true;
+        let host=job_summary_contract(&c,"root","demo","abc-123").unwrap();
+        assert_eq!(host.host_path,contract.host_path);
+        assert_eq!(host.exposed_path,host.host_path.to_string_lossy().into_owned());
+        c.execution.backend="disabled".into();
+        assert!(job_summary_contract(&c,"root","demo","abc-123").unwrap_err()
+            .to_string().contains("disabled"));
+    }
     #[cfg(windows)]
     #[test]
     fn windows_host_environment_preserves_required_system_paths_only(){
@@ -369,7 +394,7 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     #[test]fn python_compile_modes_skip_runtime_tool_scan(){assert!(python_compile_only(&["-m".into(),"py_compile".into(),"tools/check.py".into()]));assert!(python_compile_only(&["-m".into(),"compileall".into(),"tools".into()]));assert!(!python_compile_only(&["tools/check.py".into()]));}
     #[test]fn gentoo_install_hint_is_search_only(){let hint=install_hint_for_os("gentoo","postgres");assert!(hint.contains("emerge -s postgresql"));assert!(!hint.contains("emerge -av"));}
     #[test]fn job_environment_accepts_external_service_variables_and_reserves_runtime_keys(){let mut env=BTreeMap::new();env.insert("TEST_DATABASE_URL".into(),"postgres://user:password@127.0.0.1:19031/test".into());assert!(validate_job_environment(&env).is_ok());env.insert("PATH".into(),"/tmp".into());assert!(validate_job_environment(&env).is_err());let mut invalid=BTreeMap::new();invalid.insert("1BAD".into(),"x".into());assert!(validate_job_environment(&invalid).is_err());}
-    #[test]fn bubblewrap_network_is_per_job_and_project_profile(){let mut c=Config::default();assert!(validate_job_network(&c,false,false).is_ok());assert!(validate_job_network(&c,false,true).is_err());assert!(validate_job_network(&c,true,true).is_ok());c.execution.allow_network=true;assert!(validate_job_network(&c,false,true).is_ok());}
+    #[test]fn bubblewrap_network_is_per_job_and_project_profile(){let mut c=Config::default();c.execution.backend="bubblewrap".into();assert!(validate_job_network(&c,false,false).is_ok());assert!(validate_job_network(&c,false,true).is_err());assert!(validate_job_network(&c,true,true).is_ok());c.execution.allow_network=true;assert!(validate_job_network(&c,false,true).is_ok());}
     #[test]fn project_docker_socket_access_requires_separate_opt_in(){let c=Config::default();assert!(!c.docker.allow_project_socket);assert!(!c.docker.enabled);let mut d=c.clone();d.docker.enabled=true;d.docker.allowed_containers.push("endlessvibe".into());assert!(!d.docker.allow_project_socket);#[cfg(unix)]assert!(d.validate().is_ok());#[cfg(windows)]assert!(d.validate().is_err());}
     #[cfg(unix)]
     #[test]fn docker_socket_detection_rejects_regular_files(){let d=tempfile::tempdir().unwrap();let regular=d.path().join("docker.sock");std::fs::write(&regular,b"not a socket").unwrap();assert!(existing_unix_socket(&regular).is_none());let socket=d.path().join("real.sock");let _listener=std::os::unix::net::UnixListener::bind(&socket).unwrap();assert_eq!(existing_unix_socket(&socket),Some(socket));}

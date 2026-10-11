@@ -301,14 +301,15 @@ impl Config {
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }
     #[test] fn ids_are_bounded() { assert!(valid_id("DemoApp")); assert!(!valid_id("../DemoApp")); assert!(!valid_id("")); }
-    #[test] fn projects_are_relative_to_workspace_roots(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];assert!(c.validate().is_ok());c.workspaces[0].projects[0].path="/tmp/root/app".into();assert!(c.validate().is_err());}
-    #[test] fn git_mutation_requires_write_and_exec(){let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:true,allow_git_push:false,execution_profile:default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];assert!(c.validate().is_err());c.workspaces[0].projects[0].allow_exec=true;assert!(c.validate().is_ok());}
+    #[test] fn projects_are_relative_to_workspace_roots(){let root=tempfile::tempdir().unwrap();let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:root.path().to_owned(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];assert!(c.validate().is_ok());c.workspaces[0].projects[0].path=root.path().join("app");assert!(c.validate().is_err());}
+    #[test] fn git_mutation_requires_write_and_exec(){let root=tempfile::tempdir().unwrap();let mut c=Config::default();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:root.path().to_owned(),projects:vec![ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:true,allow_git_push:false,execution_profile:default_project_profile(),environment:vec![]}],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];assert!(c.validate().is_err());c.workspaces[0].projects[0].allow_exec=true;assert!(c.validate().is_ok());}
     #[test] fn allowed_programs_are_simple_and_unique(){let mut c=Config::default();c.execution.allowed_programs=vec!["cargo".into(),"cargo".into()];assert!(c.validate().is_err());c.execution.allowed_programs=vec!["/usr/bin/cargo".into()];assert!(c.validate().is_err());c.execution.allowed_programs=vec!["cargo".into(),"rustc".into()];assert!(c.validate().is_ok());}
     #[test] fn required_programs_are_simple_and_may_overlap_allowed(){let mut c=Config::default();c.execution.required_programs=vec!["cargo".into(),"postgres".into()];assert!(c.validate().is_ok());c.execution.required_programs=vec!["postgres".into(),"postgres".into()];assert!(c.validate().is_err());c.execution.required_programs=vec!["/opt/postgres/bin/postgres".into()];assert!(c.validate().is_err());}
     #[test]
     fn trusted_host_profile_requires_explicit_host_acknowledgement(){
+      let root=tempfile::tempdir().unwrap();
       let mut c=Config::default();
-      c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:"/tmp/root".into(),projects:vec![
+      c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:root.path().to_owned(),projects:vec![
         ProjectConfig{id:"kernel".into(),path:"kernel".into(),allow_write:true,allow_exec:true,
           allow_git_commit:false,allow_git_mutation:false,allow_git_push:false,
           execution_profile:"trusted_host".into(),environment:vec![]}
@@ -325,7 +326,7 @@ impl Config {
       c.workspaces[0].projects[0].execution_profile="development".into();
       assert!(c.validate().is_ok());
       c.execution.backend="bubblewrap".into();
-      assert!(c.validate().is_ok());
+      assert_eq!(c.validate().is_ok(),cfg!(target_os="linux"));
     }
     #[test]fn project_environment_and_profiles_are_validated(){assert!(parse_environment_entries(&["TEST_DATABASE_URL=postgres://localhost/test".into()]).is_ok());assert!(parse_environment_entries(&["PATH=/tmp".into()]).is_err());let p=ProjectConfig{id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:"development".into(),environment:vec!["A=1".into()]};assert!(p.development());assert_eq!(p.environment_map().unwrap()["A"],"1");}
 }

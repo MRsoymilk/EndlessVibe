@@ -763,6 +763,51 @@ impl BoundedLogBroker{
 mod tests{
     use super::*;
 
+    // Diagnostics stay inside the synthetic profile and retain the same
+    // pinned-path checks. Oversized files report their length, not contents.
+    fn stdio_probe_evidence(directory:&Path)->String{
+        let root=match crate::security::paths::Root::open(directory){
+            Ok(root)=>root,
+            Err(error)=>return crate::util::bounded_text(&format!("diagnostics unavailable: {error:#}"),256),
+        };
+        let mut evidence=Vec::new();
+        for name in ["stream-observed.ack","child-stdout.log","child-stderr.log"]{
+            let length=fs::symlink_metadata(directory.join(name)).ok().map(|m|m.len());
+            let detail=match root.read_optional(name,1024){
+                Ok(Some(bytes))=>format!("{:?}",String::from_utf8_lossy(&bytes)),
+                Ok(None)=>"missing".into(),
+                Err(error)=>format!("{error:#}"),
+            };
+            evidence.push(format!("{name}: bytes={length:?}, {}",
+                crate::util::bounded_text(&detail,384)));
+        }
+        evidence.join("; ")
+    }
+
+    fn wait_for_stdio_probe_ready(
+        root:&crate::security::paths::Root,
+        finished:&std::sync::atomic::AtomicBool,
+    )->Result<()>{
+        use std::sync::atomic::Ordering;
+        let until=std::time::Instant::now()+std::time::Duration::from_secs(10);
+        loop{
+            if let Some(ready)=root.read_optional("stream-observed.ack",16)?{
+                if ready==b"0"{return Ok(());}
+                // create_new publishes the empty file before write_all publishes readiness.
+                if !ready.is_empty(){
+                    bail!("Unexpected AppContainer stdio readiness marker");
+                }
+            }
+            if finished.load(Ordering::SeqCst){
+                bail!("AppContainer probe exited before publishing stdio readiness");
+            }
+            if std::time::Instant::now()>=until{
+                bail!("AppContainer probe did not publish stdio readiness within 10 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn protocol_hash_worker_runs_with_verified_appcontainer_token(){
         if std::env::var("ENDLESSVIBE_PROTOCOL_WORKER").ok().as_deref()!=Some("1"){
@@ -987,10 +1032,17 @@ mod tests{
             &std::sync::atomic::AtomicBool::new(false),
             Some(&mut logs),
         );
-        assert!(outcome.is_err(),
-            "An overflowing worker must be aborted instead of accepted");
+        let evidence=stdio_probe_evidence(&outputs);
+        let error=outcome.expect_err(&format!(
+            "An overflowing worker must be aborted instead of accepted; {evidence}"));
+        let error=format!("{error:#}");
+        assert!(error.contains("AppContainer output rejected")
+            &&(error.contains("maximum size")||error.contains("exceeds byte budget")),
+            "The production broker must reject actual log overflow, not another launch failure: {error}; {evidence}");
+        assert!(fs::symlink_metadata(&stdout).is_ok_and(|m|m.is_file()&&m.len()>4096),
+            "The fixture must actually produce more than 4096 stdout bytes; {evidence}");
         assert!(profile.collect_result("child-stdout.log",4096).is_err(),
-            "Oversized logs must not be brokered as output");
+            "Oversized logs must not be brokered as output; {evidence}");
     }
 
     #[test]
@@ -1039,24 +1091,37 @@ mod tests{
         let ack=outputs.join("stream-observed.ack");
         let cancel=Arc::new(AtomicBool::new(false));
         let monitor_cancel=cancel.clone();
+        let finished=Arc::new(AtomicBool::new(false));
+        let monitor_finished=finished.clone();
         let observer_dir=outputs.clone();
-        let observer=std::thread::spawn(move||{
-            let root=crate::security::paths::Root::open(&observer_dir).unwrap();
+        let observer=std::thread::spawn(move||->Result<()>{
+            let root=crate::security::paths::Root::open(&observer_dir)?;
+            wait_for_stdio_probe_ready(&root,&monitor_finished)?;
             let mut cursor=LogCursor::default();
+            // Measure the observation window from the child's ready marker,
+            // excluding process creation and loader scheduling under load.
             let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
             while std::time::Instant::now()<until{
                 match next_log_chunk(&root,"child-stdout.log",&mut cursor,512,4096){
                     Ok(_)=>{},
                     Err(error)=>{
-                        assert!(error.to_string().contains("maximum size"),
-                            "Unexpected security check failure: {error}");
+                        if !error.to_string().contains("maximum size"){
+                            return Err(error).context("Unexpected log security check failure");
+                        }
+                        if !fs::symlink_metadata(observer_dir.join("child-stdout.log"))
+                            .is_ok_and(|m|m.is_file()&&m.len()>4096){
+                            bail!("Log overflow was reported without an oversized stdout file");
+                        }
                         monitor_cancel.store(true,Ordering::SeqCst);
-                        return true;
+                        return Ok(());
                     }
+                }
+                if monitor_finished.load(Ordering::SeqCst){
+                    bail!("AppContainer probe exited before stdout overflow was observed");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            false
+            bail!("No stdout overflow within five seconds of child readiness")
         });
         let name="tools::windows_appcontainer::tests::isolated_process_writes_separate_stdout_stderr_files";
         let result=launch_controlled_test(&profile,&exe,&format!("--exact {name} --nocapture"),
@@ -1067,11 +1132,18 @@ mod tests{
                 ("ENDLESSVIBE_STDERR_FILE",stderr.to_string_lossy().into_owned()),
                 ("ENDLESSVIBE_STDIO_ACK_FILE",ack.to_string_lossy().into_owned()),
             ],
-            std::time::Duration::from_secs(7),&cancel).unwrap();
-        assert!(observer.join().unwrap(),"Log budget violation should be observed");
-        assert!(result.cancelled&&!result.timed_out);
+            std::time::Duration::from_secs(7),&cancel);
+        finished.store(true,Ordering::SeqCst);
+        let observation=observer.join().unwrap();
+        let evidence=stdio_probe_evidence(&outputs);
+        let result=result.unwrap_or_else(|error|panic!(
+            "Quota probe launch failed: {error:#}; observation={observation:?}; {evidence}"));
+        assert!(observation.is_ok(),
+            "Log budget violation should be observed; outcome={result:?}; observation={observation:?}; {evidence}");
+        assert!(result.cancelled&&!result.timed_out,
+            "Confirmed stdout overflow must cancel the Job Object; outcome={result:?}; {evidence}");
         assert!(profile.collect_result("child-stdout.log",4096).is_err(),
-            "Oversized logs must never be brokered into the Project");
+            "Oversized logs must never be brokered into the Project; {evidence}");
     }
 
 
@@ -1089,14 +1161,19 @@ mod tests{
         let out_name=std::env::var("ENDLESSVIBE_STDOUT_FILE").unwrap();
         let err_name=std::env::var("ENDLESSVIBE_STDERR_FILE").unwrap();
         let ack_name=std::env::var("ENDLESSVIBE_STDIO_ACK_FILE").unwrap();
+        // SetStdHandle stores borrowed handle values. Preserve the owning
+        // Files before installing them, including overflow returns and panic
+        // unwinding; libtest may still print after this test function exits.
+        let out=std::mem::ManuallyDrop::new(
+            fs::OpenOptions::new().write(true).create_new(true).open(out_name).unwrap());
+        let err=std::mem::ManuallyDrop::new(
+            fs::OpenOptions::new().write(true).create_new(true).open(err_name).unwrap());
+        assert_ne!(unsafe{SetStdHandle(STD_OUTPUT_HANDLE,out.as_raw_handle() as _)},0);
+        assert_ne!(unsafe{SetStdHandle(STD_ERROR_HANDLE,err.as_raw_handle() as _)},0);
         let mut ack=fs::OpenOptions::new().write(true).create_new(true).open(&ack_name).unwrap();
         ack.write_all(b"0").unwrap();
         ack.sync_all().unwrap();
         drop(ack);
-        let out=fs::OpenOptions::new().write(true).create_new(true).open(out_name).unwrap();
-        let err=fs::OpenOptions::new().write(true).create_new(true).open(err_name).unwrap();
-        assert_ne!(unsafe{SetStdHandle(STD_OUTPUT_HANDLE,out.as_raw_handle() as _)},0);
-        assert_ne!(unsafe{SetStdHandle(STD_ERROR_HANDLE,err.as_raw_handle() as _)},0);
         std::io::stdout().write_all(b"APPCONTAINER-STDOUT-EARLY\n").unwrap();
         std::io::stdout().flush().unwrap();
         std::io::stderr().write_all(b"APPCONTAINER-STDERR-EARLY\n").unwrap();
@@ -1119,10 +1196,6 @@ mod tests{
         std::io::stdout().flush().unwrap();
         std::io::stderr().write_all(b"APPCONTAINER-STDERR-DONE\n").unwrap();
         std::io::stderr().flush().unwrap();
-        // The test harness may print after this function returns; preserve
-        // the handles until the entire restricted test process terminates.
-        std::mem::forget(out);
-        std::mem::forget(err);
     }
 
     #[test]
@@ -1137,44 +1210,52 @@ mod tests{
         let stdout_name=outputs.join("child-stdout.log");
         let stderr_name=outputs.join("child-stderr.log");
         let ack_name=outputs.join("stream-observed.ack");
-        let observed=Arc::new(AtomicBool::new(false));
-        let signal=observed.clone();
+        let finished=Arc::new(AtomicBool::new(false));
+        let watch_finished=finished.clone();
         let watch_dir=outputs.clone();
         let watch_ack=ack_name.clone();
-        let watcher=std::thread::spawn(move||{
-            let root=crate::security::paths::Root::open(&watch_dir).unwrap();
+        let watcher=std::thread::spawn(move||->Result<()>{
+            let root=crate::security::paths::Root::open(&watch_dir)?;
+            wait_for_stdio_probe_ready(&root,&watch_finished)?;
             let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
             let mut cursor=LogCursor::default();
             let mut seen=Vec::new();
             while std::time::Instant::now()<until{
-                if let Ok(chunk)=next_log_chunk(&root,"child-stdout.log",&mut cursor,512,4096){
-                    seen.extend_from_slice(&chunk);
-                    if seen.windows(b"APPCONTAINER-STDOUT-EARLY".len())
-                        .any(|bytes|bytes==b"APPCONTAINER-STDOUT-EARLY")
-                        && !seen.windows(b"APPCONTAINER-STDOUT-DONE".len())
-                           .any(|bytes|bytes==b"APPCONTAINER-STDOUT-DONE"){
-                        if fs::write(&watch_ack,b"1").is_ok(){
-                            signal.store(true,Ordering::SeqCst);
-                            break;
-                        }
-                    }
+                let chunk=next_log_chunk(&root,"child-stdout.log",&mut cursor,512,4096)?;
+                seen.extend_from_slice(&chunk);
+                if seen.windows(b"APPCONTAINER-STDOUT-EARLY".len())
+                    .any(|bytes|bytes==b"APPCONTAINER-STDOUT-EARLY")
+                    && !seen.windows(b"APPCONTAINER-STDOUT-DONE".len())
+                       .any(|bytes|bytes==b"APPCONTAINER-STDOUT-DONE"){
+                    fs::write(&watch_ack,b"1").context("Acknowledge first AppContainer stdout bytes")?;
+                    return Ok(());
+                }
+                if watch_finished.load(Ordering::SeqCst){
+                    bail!("AppContainer probe exited before early stdout was observed");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
+            bail!("No early stdout within five seconds of child readiness")
         });
         let name="tools::windows_appcontainer::tests::isolated_process_writes_separate_stdout_stderr_files";
-        let exit=launch_isolated_test(&profile,&exe,&format!("--exact {name} --nocapture"),
+        let result=launch_controlled_test(&profile,&exe,&format!("--exact {name} --nocapture"),
             &[
                 ("ENDLESSVIBE_DIRECT_STDIO_CHILD","1".into()),
                 ("ENDLESSVIBE_STDOUT_FILE",stdout_name.to_string_lossy().into_owned()),
                 ("ENDLESSVIBE_STDERR_FILE",stderr_name.to_string_lossy().into_owned()),
                 ("ENDLESSVIBE_STDIO_ACK_FILE",ack_name.to_string_lossy().into_owned()),
-            ]
-        ).unwrap();
-        watcher.join().unwrap();
-        assert_eq!(exit,0,"AppContainer redirected standard output probe failed");
-        assert!(observed.load(Ordering::SeqCst),
-            "Parent must observe first stdout bytes before the final output is written");
+            ],
+            std::time::Duration::from_secs(10),&AtomicBool::new(false),
+        );
+        finished.store(true,Ordering::SeqCst);
+        let observation=watcher.join().unwrap();
+        let evidence=stdio_probe_evidence(&outputs);
+        let result=result.unwrap_or_else(|error|panic!(
+            "Direct stdio probe launch failed: {error:#}; observation={observation:?}; {evidence}"));
+        assert!(!result.cancelled&&!result.timed_out&&result.exit_code==0,
+            "AppContainer redirected standard output probe failed; outcome={result:?}; observation={observation:?}; {evidence}");
+        assert!(observation.is_ok(),
+            "Parent must observe early stdout before final output; outcome={result:?}; observation={observation:?}; {evidence}");
         let stdout=profile.collect_result("child-stdout.log",2048).unwrap();
         let stderr=profile.collect_result("child-stderr.log",2048).unwrap();
         assert!(String::from_utf8_lossy(&stdout.bytes).contains("APPCONTAINER-STDOUT-EARLY"));
