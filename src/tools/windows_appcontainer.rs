@@ -303,6 +303,8 @@ impl ProbeProcess{
         &self,job:&crate::tools::windows_job::JobObject,
         timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
         mut logs:Option<&mut BoundedLogBroker>,
+        mut gate:Option<&mut crate::tools::windows_loaded_modules::LoaderGate>,
+        pid:u32,
     )->Result<ProbeOutcome>{
         use std::sync::atomic::Ordering;
         if unsafe{ResumeThread(self.thread.as_raw_handle() as _)}==u32::MAX{
@@ -311,6 +313,12 @@ impl ProbeProcess{
         let deadline=std::time::Instant::now()+timeout;
         let(mut cancelled,mut timed_out)=(false,false);
         loop{
+            if let Some(verifier)=gate.as_deref_mut(){
+                if let Err(error)=verifier.observe(pid){
+                    job.terminate();
+                    return Err(error).context("AppContainer loaded-module identity rejected; Job Object terminated");
+                }
+            }
             if let Some(broker)=logs.as_deref_mut(){
                 if let Err(error)=broker.poll(){
                     job.terminate();
@@ -350,10 +358,19 @@ impl Drop for ProbeProcess{
     }
 }
 
+#[cfg(test)]
 fn launch_controlled(
     profile:&Profile,program:&Path,args:&str,extras:&[(&str,String)],
     timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
     logs:Option<&mut BoundedLogBroker>,
+)->Result<ProbeOutcome>{
+    launch_controlled_with_gate(profile,program,args,extras,timeout,cancel,logs,None)
+}
+fn launch_controlled_with_gate(
+    profile:&Profile,program:&Path,args:&str,extras:&[(&str,String)],
+    timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
+    logs:Option<&mut BoundedLogBroker>,
+    gate:Option<&mut crate::tools::windows_loaded_modules::LoaderGate>,
 )->Result<ProbeOutcome>{
     let caps=profile.capabilities();
     let mut attrs=Attributes::create(&caps)?;
@@ -382,7 +399,7 @@ fn launch_controlled(
     }
     job.assign(child.dwProcessId)?;
     if !job.contains(child.dwProcessId)?{bail!("AppContainer worker escaped its Job Object");}
-    process.resume_and_wait(&job,timeout,cancel,logs)
+    process.resume_and_wait(&job,timeout,cancel,logs,gate,child.dwProcessId)
 }
 
 #[cfg(test)]
@@ -409,6 +426,44 @@ fn launch_isolated_test(
 }
 
 
+// Fixed two-phase loader gate used only by the trusted hash_input Worker.
+// The child waits for its parent to inspect live mapped modules before doing
+// any input work, then waits for a second inspection before returning.
+fn worker_loader_marker(root:&cap_std::fs::Dir,name:&str,bytes:&[u8])->Result<()>{
+    use cap_std::fs::OpenOptions;
+    let outputs=root.open_dir("outputs")?;
+    let mut options=OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file=outputs.open_with(name,&options)?.into_std();
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+fn worker_loader_wait(root:&cap_std::fs::Dir,name:&str,required:&[u8])->Result<()>{
+    use std::io::Read;
+    for _ in 0..400{
+        match root.open(name){
+            Ok(file)=>{
+                let file=file.into_std();
+                if !crate::platform::single_link(&file){
+                    bail!("AppContainer loader authorization is not a single-link file");
+                }
+                let mut bytes=Vec::new();
+                file.take(32).read_to_end(&mut bytes)?;
+                if bytes!=required{
+                    bail!("AppContainer loader authorization contains unexpected data");
+                }
+                return Ok(());
+            },
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            },
+            Err(error)=>return Err(error).context("Read AppContainer module gate"),
+        }
+    }
+    bail!("AppContainer module gate was not authorized in time")
+}
+
 /// Internal worker entrypoint. Never parses normal server CLI arguments, owner
 /// credentials or Workspace configuration. The AppContainer token is mandatory.
 pub fn run_fixed_worker_from_env()->Result<()>{
@@ -430,6 +485,11 @@ pub fn run_fixed_worker_from_env()->Result<()>{
     // privileged package ancestors. Start from one opened directory handle.
     let root=Dir::open_ambient_dir(root_path,ambient_authority())
         .context("Open isolated worker's private directory handle")?;
+    let gated=std::env::var("ENDLESSVIBE_LOADER_GATE").ok().as_deref()==Some("1");
+    if gated{
+        worker_loader_marker(&root,"worker-loader-ready.ack",b"ready")?;
+        worker_loader_wait(&root,"worker-loader-allow.ack",b"allow")?;
+    }
     if root.symlink_metadata("worker-request.json")?.file_type().is_symlink(){
         bail!("Sandbox request cannot be a symlink");
     }
@@ -479,6 +539,10 @@ pub fn run_fixed_worker_from_env()->Result<()>{
     stdout.sync_all()?;
     let stderr=outputs.open_with("child-stderr.log",&options)?.into_std();
     stderr.sync_all()?;
+    if gated{
+        worker_loader_marker(&root,"worker-loader-done.ack",b"done")?;
+        worker_loader_wait(&root,"worker-loader-release.ack",b"release")?;
+    }
     Ok(())
 }
 
@@ -508,16 +572,22 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     )?;
     let trusted=crate::tools::windows_trusted_worker::TrustedWorker::stage_current(&private)?;
     trusted.verify()?;
+    let mut gate=crate::tools::windows_loaded_modules::LoaderGate::new(&private,trusted.path())?;
     let cancel=std::sync::atomic::AtomicBool::new(false);
-    let run=launch_controlled(
+    let run=launch_controlled_with_gate(
         &profile,trusted.path(),"--internal-sandbox-worker",
-        &[("ENDLESSVIBE_PROTOCOL_ROOT",private.to_string_lossy().into_owned())],
-        std::time::Duration::from_secs(15),&cancel,Some(&mut logs),
+        &[
+            ("ENDLESSVIBE_PROTOCOL_ROOT",private.to_string_lossy().into_owned()),
+            ("ENDLESSVIBE_LOADER_GATE","1".into()),
+        ],
+        std::time::Duration::from_secs(15),&cancel,Some(&mut logs),Some(&mut gate),
     )?;
     if run.cancelled||run.timed_out||run.exit_code!=0{
         bail!("Fixed AppContainer worker failed: exit={}, cancelled={}, timed_out={}",
             run.exit_code,run.cancelled,run.timed_out);
     }
+    let loaded_modules=gate.summary()
+        .context("Require pre- and post-operation live Windows module identity checks")?;
     trusted.verify().context("Verify lowbox Worker EXE after execution")?;
     let log_report=logs.finish()?;
     let artifact=profile.collect_result(RECEIPT_NAME,
@@ -535,6 +605,7 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
         "input_sha256":receipt.sha256,
         "receipt_sha256":artifact.sha256,
         "logs":log_report,
+        "loaded_modules":loaded_modules,
         "trusted_worker":{"origin":"current_endlessvibe_executable","sha256":trusted.sha256(),
                           "bytes":trusted.bytes(),"verified_before_and_after":true,
                           "arbitrary_project_executables":false,
@@ -559,6 +630,7 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     // Windows may retain the loaded EXE section briefly after process exit.
     // Close all broker directory handles before explicit profile deletion.
     drop(logs);
+    drop(gate);
     drop(trusted);
     profile.finish().context("Complete and verify AppContainer profile cleanup")?;
     Ok(result)

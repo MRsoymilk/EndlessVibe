@@ -16,5 +16,7 @@ pub mod windows_appcontainer;
 pub mod windows_trusted_worker;
 #[cfg(windows)]
 pub mod windows_pe;
+#[cfg(windows)]
+pub mod windows_loaded_modules;
 pub mod tasks;
 pub mod types;

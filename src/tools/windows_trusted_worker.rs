@@ -133,7 +133,7 @@ fn inspect_staged_imports(path:&Path,bytes:u64)
 }
 // Get the actual Windows system directory from Kernel32, never PATH,
 // current working directory or a caller-supplied SystemRoot variable.
-fn system32_directory()->Result<PathBuf>{
+pub(crate) fn system32_directory()->Result<PathBuf>{
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
     let mut chars=[0u16;512];
     let len=unsafe{GetSystemDirectoryW(chars.as_mut_ptr(),chars.len() as u32)} as usize;

@@ -130,6 +130,31 @@ sandbox command runner is enabled by this stage. The diagnostic response
 reports the approved module names, separately identified System32 MSVC
 runtime modules and explicit limits, without revealing local file paths.
 
+### Live AppContainer module mapping checks (Windows)
+
+The production fixed hash_input Worker now uses two short, bounded, private
+file-backed handshakes. It stops after the Windows loader reaches the trusted
+lowbox entrypoint, **before reading its staged input**; the privileged parent
+uses Toolhelp to inspect the *actual running child PID's* mapped images. It
+requires exactly the hash-verified fixed Worker EXE and DLL mappings directly
+under the canonical Windows System32 directory. The parent refuses duplicate
+basenames, unexpected paths, non-regular/reparse-point mappings and missing
+module records. It writes the fixed allow marker only after that check.
+
+After the Worker finishes its fixed hash operation, it waits at a second
+barrier while the parent repeats the same live inspection; only after that
+check does the Worker exit. Parent-detected violations abort the entire Job
+Object. Missing, modified or timed-out handshake markers also fail closed.
+The command reports two sanitized module-name snapshots and system DLL counts,
+not the workstation's absolute DLL paths.
+
+**Scope:** Toolhelp supplies module names and mapped path strings at two
+instants; resolving their current filesystem paths does not prove the exact
+underlying section's byte identity or Authenticode signatures, and the two
+snapshots cannot detect a library loaded and unloaded between them. This is
+stronger than PE static import-name checks, but does not make arbitrary
+Windows EXEs trustworthy, nor enable an AppContainer backend for run_command.
+
 **This does not authenticate arbitrary executables** or provide a secure
 loading path for user code. A future general sandbox backend still needs
 a separate executable identity/allowlist policy, verified dependencies,

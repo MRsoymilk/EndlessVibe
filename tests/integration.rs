@@ -1048,6 +1048,19 @@ fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     assert_eq!(result["operation"],"hash_input");
     assert_eq!(result["appcontainer_token_verified"],true);
     assert_eq!(result["job_object_enforced"],true);
+    let mapped=&result["loaded_modules"];
+    assert_eq!(mapped["toolhelp_parent_verified"],true);
+    assert_eq!(mapped["snapshot_count"],2);
+    assert_eq!(mapped["expected_worker_identity"],true);
+    assert_eq!(mapped["outside_system32_module_rejected"],true);
+    assert_eq!(mapped["future_or_transient_module_loads_proven"],false);
+    assert_eq!(mapped["authenticode_signatures_verified"],false);
+    assert!(mapped["pre_system32_count"].as_u64().unwrap()>0);
+    assert!(mapped["post_system32_count"].as_u64().unwrap()>0);
+    assert!(mapped["startup_snapshot_modules"].as_array().unwrap().iter()
+        .any(|entry|entry=="fixed-worker.exe"));
+    assert!(mapped["completed_snapshot_modules"].as_array().unwrap().iter()
+        .any(|entry|entry=="fixed-worker.exe"));
     assert_eq!(result["network_capabilities_granted"],0);
     assert_eq!(result["arbitrary_commands_supported"],false);
     assert_eq!(result["general_execution_backend"],false);

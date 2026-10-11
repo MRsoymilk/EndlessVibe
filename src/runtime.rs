@@ -41,7 +41,11 @@ fn windows_sandbox_status(config:&Config)->Value{
                     "reject_delay_load_imports":true,
                     "msvc_runtime_attested_from_system32":true,
                     "runtime_digest_rechecked":true,
-                    "actual_loader_module_path_attestation":false,
+                    "actual_loader_module_path_attestation":true,
+                    "parent_toolhelp_pre_and_post_operation":true,
+                    "only_worker_exe_and_system32_direct_dlls":true,
+                    "transient_or_future_loads_attested":false,
+                    "authenticode_signatures_verified":false,
                 },
                 "cleanup_verified_before_reporting_success":true,
                 "arbitrary_project_executables":false,
@@ -206,7 +210,9 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["arbitrary_project_executables"],false);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["reject_delay_load_imports"],true);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["msvc_runtime_attested_from_system32"],true);
-        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["actual_loader_module_path_attestation"],false);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["actual_loader_module_path_attestation"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["parent_toolhelp_pre_and_post_operation"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["transient_or_future_loads_attested"],false);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["tamper_detection"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["cancel_on_violation"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["general_command_capture"],false);
