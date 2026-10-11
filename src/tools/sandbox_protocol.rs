@@ -55,6 +55,17 @@ fn valid_job_id(value: &str) -> bool {
 /// Only relative files under the per-job input tree are accepted.
 /// Reject Windows drive and alternate data-stream syntax independently of
 /// the host OS to avoid cross-platform path interpretation differences.
+fn reserved_windows_name(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or("").to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL"
+        | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
+        | "COM6" | "COM7" | "COM8" | "COM9"
+        | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
+        | "LPT6" | "LPT7" | "LPT8" | "LPT9")
+}
+
+/// Use exactly the same restricted spelling on Windows and other hosts:
+/// Win32 strips trailing dots and treats DOS device names as special handles.
 fn valid_input_path(value: &str) -> bool {
     if value.len() > 256 || value.contains(['\\', ':', '\0']) {
         return false;
@@ -69,6 +80,8 @@ fn valid_input_path(value: &str) -> bool {
             !segment.is_empty()
                 && segment.len() <= 64
                 && !segment.starts_with('.')
+                && !segment.ends_with('.')
+                && !reserved_windows_name(segment)
                 && segment.bytes().all(|byte| {
                     byte.is_ascii_alphanumeric()
                         || matches!(byte, b'_' | b'-' | b'.')
@@ -188,6 +201,9 @@ mod tests {
             "inputs//bad", "inputs/file:stream", "inputs\\secret.txt",
             r"C:\Users\Public\secret", "inputs/file/./source",
             "inputs/trailing/", "inputs/file?",
+            "inputs/file.", "inputs/src/COM1", "inputs/CON.txt",
+            "inputs/aux.JSON", "inputs/LpT9.log", "inputs/NUL",
+            "inputs/sub/PrN", "inputs/foo..",
         ] {
             assert!(WorkerRequest::new("job_a-12", input).is_err(), "{input}");
         }
