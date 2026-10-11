@@ -185,9 +185,26 @@ Use **`--lan-only`** to connect EndlessVibe instances via **TLS 1.3 Transfer pai
 # Stop the running EndlessVibe instance, then convert the config once
 .\target\debug\endlessvibe.exe --lan-only
 
-# Start normally
-.\target\debug\endlessvibe.exe
+# Start the installed copy, not Cargo's build output
+.\deploy\windows\EndlessVibe.ps1 -Action Update
 ```
+
+**Windows `cargo build` fails with `Access is denied (os error 5)`:** Windows cannot replace a running `target\debug\endlessvibe.exe`. Restarting Windows and launching the same executable simply locks it again. From the project root in Windows PowerShell, run this once:
+
+```powershell
+.\deploy\windows\EndlessVibe.ps1 -Action Update
+```
+
+The script builds into `target\windows-stage`, installs an immutable executable copy under `%LOCALAPPDATA%\Programs\EndlessVibe\releases\<SHA256>\endlessvibe.exe`, gracefully stops the previous service using its verified `--stop` control, then starts the installed copy. It never force-kills a process or replaces config, owner keys, or Project grants. Afterwards, an ordinary `cargo build` can overwrite its default `target\debug` output without colliding with the running program.
+
+```powershell
+.\deploy\windows\EndlessVibe.ps1 -Action Update   # Build, install, restart
+.\deploy\windows\EndlessVibe.ps1 -Action Start    # Start installed version without building
+.\deploy\windows\EndlessVibe.ps1 -Action Status   # Report state and installed path
+.\deploy\windows\EndlessVibe.ps1 -Action Stop     # Graceful stop
+```
+
+For custom configuration, pass an absolute `-ConfigPath 'C:\path\to\config.toml'` on the initial update; subsequent starts reuse it. **Update any Task Scheduler/NSSM/service startup entry to invoke this script with `-Action Start`**, instead of launching the Cargo target executable. If the previous binary does not support `--stop`, or it runs under another logon session, stop it through its existing supervisor first. The script never force-kills an unrelated process.
 
 The setting persists in `config.toml`, preserving all Workspace/Project grants and the owner key. Tokens issued for the previous public OAuth resource become invalid.
 

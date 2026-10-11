@@ -984,6 +984,21 @@ async fn windows_git_review_normalizes_checked_out_crlf_without_filters(){
     assert_eq!(std::fs::read(&source).unwrap(),b"first\r\nupdated\r\n");
 }
 
+#[test]
+fn windows_deployment_keeps_cargo_build_output_separate_from_service(){
+    let script=include_str!("../deploy/windows/EndlessVibe.ps1");
+    for marker in ["target\\windows-stage", "Programs\\EndlessVibe",
+                   "Get-FileHash", "Invoke-ServiceControl", "Start-Process",
+                   "\"stop\"", "\"Update\"", "\"Start\"", "\"Status\""]{
+        assert!(script.contains(marker),"Windows launcher missing {marker}");
+    }
+    for unsafe_action in ["Stop-Process", "taskkill /F", "Remove-Item -Recurse"]{
+        assert!(!script.contains(unsafe_action),"Unsafe installer action {unsafe_action}");
+    }
+    assert!(include_str!("../README.md").contains("deploy\\windows\\EndlessVibe.ps1"));
+    assert!(include_str!("../README.en.md").contains("deploy\\windows\\EndlessVibe.ps1"));
+}
+
 #[tokio::test]async fn file_edits_require_current_hash_and_backup(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let r=filesystem::read(&f.rt,&w,ReadArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),start_line:1,max_lines:2,task_id:None,stage:None}).unwrap();let hash=r["sha256"].as_str().unwrap().to_owned();let result=filesystem::patch(&f.rt,&w,PatchArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),expected_sha256:hash.clone(),edits:vec![Edit{old_text:"hello".into(),new_text:"world".into(),expected_occurrences:1}],task_id:None,stage:None}).unwrap();assert!(result["backup_id"].is_string());assert!(String::from_utf8(w.root.read("src/main.rs",4096).unwrap()).unwrap().contains("world"));let stale=filesystem::write(&f.rt,&w,WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),content:"lost edit".into(),expected_sha256:hash,create_parents:false,task_id:None,stage:None});assert!(stale.is_err());}
 #[tokio::test]async fn new_files_do_not_overwrite_existing_work(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let a=WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"docs/new.txt".into(),content:"new\n".into(),expected_sha256:"MISSING".into(),create_parents:true,task_id:None,stage:None};filesystem::write(&f.rt,&w,a.clone()).unwrap();assert!(filesystem::write(&f.rt,&w,a).is_err());}
 #[tokio::test]async fn read_only_projects_refuse_changes(){let f=fixture(|c|{c.workspaces[0].projects[0].allow_write=false;c.workspaces[0].projects[0].allow_exec=false;c.workspaces[0].projects[0].allow_git_commit=false;});let w=f.rt.project("demo","demo").unwrap();assert!(filesystem::mkdir(&w,MakeDirectoryArgs{workspace:"demo".into(),project:"demo".into(),path:"new".into(),task_id:None,stage:None}).is_err());assert!(w.exec_allowed().is_err());}

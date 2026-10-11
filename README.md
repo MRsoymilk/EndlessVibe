@@ -185,9 +185,26 @@ Authentication: OAuth 2.0
 # 先停止正在运行的 EndlessVibe，然后只执行一次转换
 .\target\debug\endlessvibe.exe --lan-only
 
-# 正常启动
-.\target\debug\endlessvibe.exe
+# 正常启动：从安装目录运行，避免锁定 Cargo 输出的 EXE
+.\deploy\windows\EndlessVibe.ps1 -Action Update
 ```
+
+**Windows 开发时 `cargo build` 报 `Access is denied (os error 5)`：** Windows 无法覆盖正在运行的 `target\debug\endlessvibe.exe`，即使重启电脑后继续运行同一个 EXE 也会再次锁定。请在 Windows PowerShell 的项目根目录执行一次：
+
+```powershell
+.\deploy\windows\EndlessVibe.ps1 -Action Update
+```
+
+脚本在 `target\windows-stage` 构建，把运行程序安装至 `%LOCALAPPDATA%\Programs\EndlessVibe\releases\<SHA256>\endlessvibe.exe`，通过经过进程身份校验的 `--stop` 优雅停止旧进程，再启动新的安装副本；不会强制结束进程，也不更改 `config.toml`、Owner Key 或 Project 授权。之后普通 `cargo build`（默认 `target\debug`）不再与正在运行的 EXE 冲突。更新与启动命令为：
+
+```powershell
+.\deploy\windows\EndlessVibe.ps1 -Action Update   # 构建、安装并重启服务
+.\deploy\windows\EndlessVibe.ps1 -Action Start    # 从已安装版本启动（不构建）
+.\deploy\windows\EndlessVibe.ps1 -Action Status   # 查看运行状态及路径
+.\deploy\windows\EndlessVibe.ps1 -Action Stop     # 优雅停止
+```
+
+使用非默认配置时，首次更新附加 `-ConfigPath 'C:\path\to\config.toml'`（必须是绝对路径），后续将沿用该路径。如使用任务计划程序、NSSM 或 Windows 服务自动启动，**也要将启动入口改为上述脚本的 `-Action Start`**，不能再次从 `target\debug` 运行。旧版本无法处理 `--stop` 或服务位于其他登录会话时，应先用原服务管理器停止；脚本不会强制结束任何进程。
 
 LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限与 Owner Key。原公网地址签发的 OAuth Token 不再对新的本机资源有效。
 
