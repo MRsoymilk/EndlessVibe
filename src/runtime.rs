@@ -35,6 +35,14 @@ fn windows_sandbox_status(config:&Config)->Value{
                 "non_reparse_private_copy":true,
                 "single_link_staged_copy":true,
                 "sha256_verified_before_and_after":true,
+                "pe_dependency_audit":{
+                    "amd64_pe32_plus_only":true,
+                    "static_module_name_allowlist":true,
+                    "reject_delay_load_imports":true,
+                    "msvc_runtime_attested_from_system32":true,
+                    "runtime_digest_rechecked":true,
+                    "actual_loader_module_path_attestation":false,
+                },
                 "cleanup_verified_before_reporting_success":true,
                 "arbitrary_project_executables":false,
             },
@@ -196,6 +204,9 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["sha256_verified_before_and_after"],true);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["cleanup_verified_before_reporting_success"],true);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["arbitrary_project_executables"],false);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["reject_delay_load_imports"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["msvc_runtime_attested_from_system32"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["actual_loader_module_path_attestation"],false);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["tamper_detection"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["cancel_on_violation"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["general_command_capture"],false);

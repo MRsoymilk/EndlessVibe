@@ -1063,6 +1063,15 @@ fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     assert_eq!(result["trusted_worker"]["verified_before_and_after"],true);
     assert_eq!(result["profile_cleanup_verified"],true);
     assert_eq!(result["trusted_worker"]["arbitrary_project_executables"],false);
+    let imports=&result["trusted_worker"]["dependency_audit"];
+    assert_eq!(imports["format"],"pe32_plus_amd64");
+    assert_eq!(imports["static_import_allowlist"],true);
+    assert_eq!(imports["system32_runtime_integrity_rechecked"],true);
+    assert_eq!(imports["delay_loaded_modules"],0);
+    assert_eq!(imports["unknown_modules_allowed"],false);
+    assert_eq!(imports["relative_dll_paths_allowed"],false);
+    assert!(imports["approved_import_modules"].as_array().is_some_and(|v|!v.is_empty()));
+    assert!(imports["msvc_runtime_modules_verified_in_system32"].is_array());
     let trusted_bytes=std::fs::read(binary).unwrap();
     assert_eq!(result["trusted_worker"]["bytes"],trusted_bytes.len());
     assert_eq!(result["trusted_worker"]["sha256"],util::digest(&trusted_bytes));

@@ -110,6 +110,26 @@ Windows image-section release failures within a bounded interval; persistent
 failure retains the journal for exclusive-startup recovery and returns an
 error rather than reporting successful cleanup.
 
+### Bounded PE dependency preflight (Windows)
+
+Before the current trusted Worker EXE starts inside AppContainer, the broker
+parses its PE32+ AMD64 static import directory with explicit file/section/RVA
+bounds. It rejects unknown DLL names, imports containing path syntax, malformed
+or overlapping PE sections, missing descriptor terminators, and delay-load
+imports. Allowed static names are fixed Windows OS/API-set contracts and a
+small, separately classified MSVC redistributable list. For MSVC DLLs such as
+vcruntime140.dll, the broker obtains the System32 location via the native
+GetSystemDirectoryW API (never PATH or a user-provided SystemRoot), rejects
+reparse-point DLL files, and hashes the System32 runtime before and after
+the fixed Worker runs. The fixed executable copy is still verified by SHA-256.
+
+This is a **static dependency-name preflight**, not full Windows loader
+attestation: Windows may resolve transitive or forwarded imports and OS DLL
+loading rules are more complex than import table inspection. No general
+sandbox command runner is enabled by this stage. The diagnostic response
+reports the approved module names, separately identified System32 MSVC
+runtime modules and explicit limits, without revealing local file paths.
+
 **This does not authenticate arbitrary executables** or provide a secure
 loading path for user code. A future general sandbox backend still needs
 a separate executable identity/allowlist policy, verified dependencies,

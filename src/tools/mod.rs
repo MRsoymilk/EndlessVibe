@@ -14,5 +14,7 @@ pub mod windows_recovery;
 pub mod windows_appcontainer;
 #[cfg(windows)]
 pub mod windows_trusted_worker;
+#[cfg(windows)]
+pub mod windows_pe;
 pub mod tasks;
 pub mod types;
