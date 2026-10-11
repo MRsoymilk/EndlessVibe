@@ -58,6 +58,51 @@ This atomically **replaces** the full grant list. Set `"grants":[]` to revoke al
 
 For browser use the parent exposes loopback-only `POST /api/nodes/read` with `{\"node_id\":\"...\",\"tool\":\"read_file\",\"arguments\":{\"workspace\":\"...\",\"project\":\"...\",\"path\":\"src/main.rs\"}}`.
 
+### Cached ChatGPT MCP tool catalogs (legacy 20-tool clients)
+
+Some clients retain the pre-Workspace/Project MCP tool signatures and do not expose
+the later node_list, node_read and node_write tools even though the server
+publishes all of them in tools/list. Reauthorizing such a connection does not
+necessarily refresh its tool catalog. A compatibility route is available in
+the existing project/file/Git/Job tools without adding new OAuth scopes.
+
+Call list_projects **without** workspace on a parent configured with one
+Workspace. It preserves local Projects and appends remote Projects that are
+currently read-authorized by each paired child. The remote Project ID is a
+synthetic legacy workspace selector:
+
+    node:<24-hex-child-node-id>:<child-workspace-id>:<child-project-id>
+
+Pass the **full ID** as workspace and omit project when using the cached tools:
+
+    read_file({"workspace":"node:0123456789abcdef01234567:root:app","path":"src/main.rs"})
+    git_status({"workspace":"node:0123456789abcdef01234567:root:app"})
+
+The same selector works with inspect_project, list_directory, search_code,
+git_diff, git_log, write_file, apply_patch, create_directory, run_command,
+and git_commit. The parent does **not** mount the child Project locally:
+each call traverses pinned TLS Transfer, and the child validates exact
+Workspace/Project grants and its own current permissions. Unsupported
+remote tools (notably run_shell, git_push and Docker) stay disabled.
+
+Remote run_command returns a routable Job handle in job_id:
+
+    nodejob:<child-node-id>:<child-workspace>:<child-project>:<child-job-id>
+
+Pass this handle unchanged to cached get_job, get_job_output or cancel_job.
+Only the child stores and runs the Job. Remote write_file, apply_patch,
+create_directory and git_commit use deterministic request IDs derived from
+the operation and complete argument snapshot. Remote commands keep the
+caller's explicit request_id. Remote results expose remote_request_id for
+reconciliation via the Nodes Dashboard. Mutations are **never replayed**
+automatically after timeouts, and parent operation logs store only argument
+digests and redacted remote output. If a result is uncertain, inspect the
+child's request status and Git/filesystem state before retrying.
+
+This is a compatibility path for already-cached tool schemas, **not** a
+claim that ChatGPT's tool list has refreshed. Clients with the complete
+tool catalog should continue to use explicit node_read/node_write.
+
 ## Phase 4 — Remote Mutations, Jobs and Git Checkpoints
 
 The parent exposes `node_write` for explicitly supported remote operations: `write_file`, `apply_patch`, `create_directory`, `run_command`, `get_job`, `get_job_output`, `cancel_job`, and `git_commit`. The request contains `node_id`, `tool`, and `arguments` with exact child `workspace` and `project`. The child re-checks the pairing grant and its current local Project permissions, preserves local file hash and Git commit/diff concurrency checks, and stores Jobs in its own SQLite database. Remote shell, push, Docker and recursive forwarding are disabled. Parent MCP requires `files:write`, `commands:execute` and `git:write`; this is an intentional conservative scope combination. File-content mutation requests are represented by digests in parent/child operation logs.
