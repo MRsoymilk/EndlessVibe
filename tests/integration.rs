@@ -1059,6 +1059,13 @@ fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     assert_eq!(result["logs"]["stdout_sha256"],util::digest(b"hash_input: receipt generated\n"));
     assert_eq!(result["logs"]["stderr_bytes"],0);
     assert_eq!(result["logs"]["stderr_sha256"],util::digest(b""));
+    assert_eq!(result["trusted_worker"]["origin"],"current_endlessvibe_executable");
+    assert_eq!(result["trusted_worker"]["verified_before_and_after"],true);
+    assert_eq!(result["profile_cleanup_verified"],true);
+    assert_eq!(result["trusted_worker"]["arbitrary_project_executables"],false);
+    let trusted_bytes=std::fs::read(binary).unwrap();
+    assert_eq!(result["trusted_worker"]["bytes"],trusted_bytes.len());
+    assert_eq!(result["trusted_worker"]["sha256"],util::digest(&trusted_bytes));
     assert!(!result.to_string().contains("isolated fixed-operation hash probe"),
         "Sensitive staged input content must not appear in diagnostic output");
 

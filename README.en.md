@@ -195,7 +195,7 @@ Use **`--lan-only`** to connect EndlessVibe instances via **TLS 1.3 Transfer pai
 .\deploy\windows\EndlessVibe.ps1 -Action Update
 ```
 
-The script builds into `target\windows-stage`, installs an immutable executable copy under `%LOCALAPPDATA%\Programs\EndlessVibe\releases\<SHA256>\endlessvibe.exe`, gracefully stops the previous service using its verified `--stop` control, then starts the installed copy. It never force-kills a process or replaces config, owner keys, or Project grants. Afterwards, an ordinary `cargo build` can overwrite its default `target\debug` output without colliding with the running program.
+The script builds into `target\windows-stage`, installs an immutable executable copy under `%LOCALAPPDATA%\Programs\EndlessVibe\releases\<SHA256>\endlessvibe.exe`, gracefully stops the previous service using its verified `--stop` control, then starts the installed copy. It never force-kills a process or replaces config, owner keys, or Project grants. The manifest is now published atomically using a non-empty backup path *before* stopping the service; if the new instance cannot start, the script attempts to restore both the old manifest and service. Afterwards, an ordinary `cargo build` can overwrite its default `target\debug` output without colliding with the running program.
 
 ```powershell
 .\deploy\windows\EndlessVibe.ps1 -Action Update   # Build, install, restart
@@ -209,6 +209,8 @@ For custom configuration, pass an absolute `-ConfigPath 'C:\path\to\config.toml'
 The setting persists in `config.toml`, preserving all Workspace/Project grants and the owner key. Tokens issued for the previous public OAuth resource become invalid.
 
 **Windows AppContainer self-check:** After stopping the Windows service, run `cargo build --locked --target-dir target/windows-stage` and `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`. This verifies the native lowbox token, Job Object and fixed `hash_input` receipt, with a combined 64 KiB private stdout/stderr limit, tamper detection and Job termination on overflow; it does not enable a general command sandbox or read user Projects. See [Windows sandbox limitations](docs/PORTABILITY.md).
+
+The sandbox self-check now stages only the already-running EndlessVibe EXE (up to 128 MiB), copies through a pinned file handle, verifies SHA-256 before and after the lowbox worker runs, and reports success only after profile and recovery journal cleanup. It does not accept Project binaries or third-party executables.
 
 - Local MCP (OAuth): `http://127.0.0.1:20000/mcp`, **loopback only**, not an HTTP endpoint for other LAN computers.
 - Local Dashboard: `http://127.0.0.1:20001/nodes`, **loopback only**.

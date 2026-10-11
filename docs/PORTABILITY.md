@@ -89,9 +89,34 @@ is hidden and refuses a normal host-user token. Output reports
 failed checks return nonzero. The Windows Dashboard reports the availability
 and restrictions but does not run the self-check automatically.
 
-Production support is intentionally **limited to this fixed self-check**.
-General AppContainer command execution still requires audited executable
-staging, stdout/stderr cancellation and quotas, and verified cleanup.
+### Trusted Worker executable staging and verification
+
+The fixed-operation self-check now copies the **currently running EndlessVibe
+EXE only** into the unique private AppContainer profile. It does not accept a
+Project executable path, script, shell, external EXE or user-defined command.
+The source is read through one pinned Windows file handle, is required to be
+a regular non-reparse file and has an upper bound of 128 MiB. Windows Cargo
+builds may hardlink the running EXE to its build artifact; that does not
+invalidate the source handle. The newly staged copy, however, must have
+exactly one filesystem link and must not be a reparse point.
+
+The broker computes SHA-256 from the same pinned source handle used for
+copying, verifies the private copy before process creation and again after
+the contained worker exits. The diagnostic response exposes only the SHA-256,
+byte count and explicit trust boundary, not the host executable path.
+Profile deletion and removal of the protected recovery journal must succeed
+before a self-check reports status=passed. Native cleanup retries transient
+Windows image-section release failures within a bounded interval; persistent
+failure retains the journal for exclusive-startup recovery and returns an
+error rather than reporting successful cleanup.
+
+**This does not authenticate arbitrary executables** or provide a secure
+loading path for user code. A future general sandbox backend still needs
+a separate executable identity/allowlist policy, verified dependencies,
+cancellation, quotas, filesystem boundaries and security review.
+
+Production support remains limited to the fixed hash_input self-check;
+general AppContainer command execution is not available.
 ### Versioned isolated-worker protocol
 
 src/tools/sandbox_protocol.rs defines a size-bounded, strict JSON request

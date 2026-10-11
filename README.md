@@ -195,7 +195,7 @@ Authentication: OAuth 2.0
 .\deploy\windows\EndlessVibe.ps1 -Action Update
 ```
 
-脚本在 `target\windows-stage` 构建，把运行程序安装至 `%LOCALAPPDATA%\Programs\EndlessVibe\releases\<SHA256>\endlessvibe.exe`，通过经过进程身份校验的 `--stop` 优雅停止旧进程，再启动新的安装副本；不会强制结束进程，也不更改 `config.toml`、Owner Key 或 Project 授权。之后普通 `cargo build`（默认 `target\debug`）不再与正在运行的 EXE 冲突。更新与启动命令为：
+脚本在 `target\windows-stage` 构建，把运行程序安装至 `%LOCALAPPDATA%\Programs\EndlessVibe\releases\<SHA256>\endlessvibe.exe`，通过经过进程身份校验的 `--stop` 优雅停止旧进程，再启动新的安装副本；不会强制结束进程，也不更改 `config.toml`、Owner Key 或 Project 授权。脚本现已将安装清单的原子替换提前到停服之前，并使用非空备份路径；如果新服务启动失败，将尝试恢复旧清单与旧实例。之后普通 `cargo build`（默认 `target\debug`）不再与正在运行的 EXE 冲突。更新与启动命令为：
 
 ```powershell
 .\deploy\windows\EndlessVibe.ps1 -Action Update   # 构建、安装并重启服务
@@ -209,6 +209,8 @@ Authentication: OAuth 2.0
 LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限与 Owner Key。原公网地址签发的 OAuth Token 不再对新的本机资源有效。
 
 **Windows AppContainer 沙箱自检：** 在 Windows 服务停止后执行 `cargo build --locked --target-dir target/windows-stage`，然后运行 `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`。该功能验证真实低权限令牌、Job Object 和固定 `hash_input` 回执，并以 64 KiB 合计预算校验私有 stdout/stderr、检测篡改并在超限时终止 Job；它不会启用任意命令沙箱，也不读取用户项目。详情见 [Windows 沙箱状态与限制](docs/PORTABILITY.md)。
+
+沙箱自检现在只暂存正在运行的 EndlessVibe 自身 EXE（最多 128 MiB），通过已打开文件句柄拷贝，并在低权限进程执行前后进行 SHA-256 校验；确认 Profile 清理及恢复记录移除后才报告成功。它不接受用户项目或第三方 EXE。
 
 - 本机 MCP（OAuth）：`http://127.0.0.1:20000/mcp`，**只监听 loopback**，不是供局域网设备直接调用的 HTTP 地址。
 - 本机 Dashboard：`http://127.0.0.1:20001/nodes`，**只允许本机访问**。

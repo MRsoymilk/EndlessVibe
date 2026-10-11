@@ -167,12 +167,37 @@ impl Profile{
         Ok(OutputArtifact{relative_path:relative_path.to_string_lossy().into_owned(),bytes,sha256})
     }
 }
+impl Profile{
+    /// Complete cleanup after the child and all private file handles exit.
+    /// A completed self-check must never report success with pending journals.
+    fn finish(&mut self)->Result<()>{
+        if self.name.is_empty(){return Ok(());}
+        if !self.sid.is_null(){unsafe{FreeSid(self.sid)};self.sid=ptr::null_mut();}
+        const PROFILE_NOT_FOUND:u32=0x80070490;
+        let mut deleted=false;
+        let mut code=0i32;
+        for attempt in 0..8{
+            code=unsafe{DeleteAppContainerProfile(self.name.as_ptr())};
+            if code>=0||code as u32==PROFILE_NOT_FOUND{
+                deleted=true;
+                break;
+            }
+            if attempt<7{std::thread::sleep(std::time::Duration::from_millis(100));}
+        }
+        if !deleted{
+            bail!("AppContainer cleanup deferred to protected recovery: HRESULT 0x{:08x}",code as u32);
+        }
+        if let Some(path)=&self.journal{
+            fs::remove_file(path).context("Clear verified AppContainer profile journal")?;
+        }
+        self.name.clear();
+        Ok(())
+    }
+}
 impl Drop for Profile{
     fn drop(&mut self){
-        if !self.sid.is_null(){unsafe{FreeSid(self.sid)};self.sid=ptr::null_mut();}
-        let result=unsafe{DeleteAppContainerProfile(self.name.as_ptr())};
-        if result>=0{
-            if let Some(path)=&self.journal{let _=fs::remove_file(path);}
+        if let Err(error)=self.finish(){
+            eprintln!("AppContainer profile cleanup deferred: {error:#}");
         }
     }
 }
@@ -471,7 +496,7 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     fs::write(sample.path().join("probe.txt"),sample_data)?;
     let project=crate::security::paths::Root::open(sample.path())?;
     let journal=crate::tools::windows_recovery::journal_dir(state_dir);
-    let profile=Profile::create_journaled(&journal)?;
+    let mut profile=Profile::create_journaled(&journal)?;
     let staged=profile.stage_project_file(&project,"probe.txt")?;
     if !staged.is_file(){bail!("Sandbox input was not staged");}
     let output_dir=profile.prepare_results()?;
@@ -481,12 +506,11 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     crate::util::private_create(
         &private.join("worker-request.json"),&request.encode()?,
     )?;
-    let program=private.join("fixed-worker.exe");
-    fs::copy(std::env::current_exe()?,&program)
-        .context("Stage trusted EndlessVibe worker binary in private profile")?;
+    let trusted=crate::tools::windows_trusted_worker::TrustedWorker::stage_current(&private)?;
+    trusted.verify()?;
     let cancel=std::sync::atomic::AtomicBool::new(false);
     let run=launch_controlled(
-        &profile,&program,"--internal-sandbox-worker",
+        &profile,trusted.path(),"--internal-sandbox-worker",
         &[("ENDLESSVIBE_PROTOCOL_ROOT",private.to_string_lossy().into_owned())],
         std::time::Duration::from_secs(15),&cancel,Some(&mut logs),
     )?;
@@ -494,6 +518,7 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
         bail!("Fixed AppContainer worker failed: exit={}, cancelled={}, timed_out={}",
             run.exit_code,run.cancelled,run.timed_out);
     }
+    trusted.verify().context("Verify lowbox Worker EXE after execution")?;
     let log_report=logs.finish()?;
     let artifact=profile.collect_result(RECEIPT_NAME,
         crate::tools::sandbox_protocol::MAX_RECEIPT_BYTES)?;
@@ -502,7 +527,7 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     let independently_read=project.read("probe.txt",
         crate::tools::sandbox_protocol::MAX_INPUT_BYTES)?;
     receipt.verify_against(&request,&independently_read)?;
-    Ok(serde_json::json!({
+    let result=serde_json::json!({
         "status":"passed",
         "worker":"appcontainer_fixed_operation",
         "operation":"hash_input",
@@ -510,6 +535,9 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
         "input_sha256":receipt.sha256,
         "receipt_sha256":artifact.sha256,
         "logs":log_report,
+        "trusted_worker":{"origin":"current_endlessvibe_executable","sha256":trusted.sha256(),
+                          "bytes":trusted.bytes(),"verified_before_and_after":true,
+                          "arbitrary_project_executables":false},
         "protocol_version":crate::tools::sandbox_protocol::VERSION,
         "appcontainer_token_verified":true,
         "job_object_enforced":true,
@@ -518,7 +546,14 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
         "arbitrary_commands_supported":false,
         "general_execution_backend":false,
         "profile_crash_recovery_journaled":true,
-    }))
+        "profile_cleanup_verified":true,
+    });
+    // Windows may retain the loaded EXE section briefly after process exit.
+    // Close all broker directory handles before explicit profile deletion.
+    drop(logs);
+    drop(trusted);
+    profile.finish().context("Complete and verify AppContainer profile cleanup")?;
+    Ok(result)
 }
 
 /// Append-only raw-byte log cursor. The parent owns this state; child-provided
@@ -692,6 +727,18 @@ mod tests{
         assert_eq!(authorized.read("data.rs",2048).unwrap(),b"fn sandboxed() {}\n");
     }
 
+
+    #[test]
+    fn explicit_profile_finish_is_idempotent_and_cleans_journal(){
+        let temp=tempfile::tempdir().unwrap();
+        let journal=temp.path().join("pending-profiles");
+        let mut profile=Profile::create_journaled(&journal).unwrap();
+        assert_eq!(fs::read_dir(&journal).unwrap().count(),1);
+        profile.finish().unwrap();
+        profile.finish().unwrap();
+        drop(profile);
+        assert_eq!(fs::read_dir(&journal).unwrap().count(),0);
+    }
 
     #[test]
     fn durable_profile_journal_is_cleared_after_normal_cleanup(){

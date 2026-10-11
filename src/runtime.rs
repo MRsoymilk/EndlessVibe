@@ -29,6 +29,15 @@ fn windows_sandbox_status(config:&Config)->Value{
                 "general_command_capture":false,
             },
             "crash_recovery_journaled":true,
+            "trusted_worker_executable":{
+                "origin":"running_endlessvibe_executable_only",
+                "max_bytes":crate::tools::windows_trusted_worker::MAX_WORKER_EXECUTABLE_BYTES,
+                "non_reparse_private_copy":true,
+                "single_link_staged_copy":true,
+                "sha256_verified_before_and_after":true,
+                "cleanup_verified_before_reporting_success":true,
+                "arbitrary_project_executables":false,
+            },
             "supported_operation":"hash_input",
             "protocol_version":crate::tools::sandbox_protocol::VERSION,
             "arbitrary_program_execution":false,
@@ -183,6 +192,10 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["status"],"fixed_operation_probe_only");
         assert_eq!(reported["appcontainer"]["production_worker_entrypoint"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["combined_limit_bytes"],65536);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["max_bytes"],134217728);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["sha256_verified_before_and_after"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["cleanup_verified_before_reporting_success"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["arbitrary_project_executables"],false);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["tamper_detection"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["cancel_on_violation"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["general_command_capture"],false);
