@@ -1001,6 +1001,29 @@ fn windows_deployment_keeps_cargo_build_output_separate_from_service(){
 
 #[cfg(windows)]
 #[test]
+fn windows_install_manifest_can_publish_and_roll_back(){
+    let script=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("deploy/windows/Test-Manifest.ps1");
+    let output=std::process::Command::new("powershell.exe")
+        .args(["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File"])
+        .arg(script).output().unwrap();
+    assert!(output.status.success(),
+        "PowerShell manifest transaction regression failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "Windows manifest atomic publish and rollback tests passed"));
+    let installer=include_str!("../deploy/windows/EndlessVibe.ps1");
+    assert!(installer.contains("Restore-EndlessVibeManifest"));
+    assert!(installer.contains("Start-Installed -Exe $previous.Exe"));
+    let publish=installer.find("$transaction = Publish-EndlessVibeManifest").unwrap();
+    let stop=installer.find("Write-Host (Invoke-ServiceControl -Exe $controller -Verb \"stop\"").unwrap();
+    assert!(publish<stop,
+        "Manifest publication must succeed before gracefully stopping the service");
+}
+
+#[cfg(windows)]
+#[test]
 fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     let temp=tempfile::tempdir().unwrap();
     let mut config=Config::default();

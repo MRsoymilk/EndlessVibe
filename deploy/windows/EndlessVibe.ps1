@@ -29,6 +29,8 @@ if (-not $env:LOCALAPPDATA) {
     throw "LOCALAPPDATA is not set; this script requires a Windows user session."
 }
 
+. (Join-Path $PSScriptRoot "Manifest.ps1")
+
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $installRoot = Join-Path $env:LOCALAPPDATA "Programs\EndlessVibe"
 $releasesRoot = Join-Path $installRoot "releases"
@@ -200,30 +202,41 @@ switch ($Action) {
             throw "Installed executable checksum mismatch. The running service was not stopped."
         }
 
-        # Stop through EndlessVibe's verified PID + creation-time Windows event.
-        # A legacy process, protected session, or supervisor must be stopped manually.
-        $controller = if ($null -ne $previous) { $previous.Exe } else { $installed }
-        Write-Host (Invoke-ServiceControl -Exe $controller -Verb "stop" -Configuration $previousConfiguration)
-
+        # Publish a verified atomic manifest BEFORE stopping the service. A
+        # filesystem/permission failure must never leave a stopped instance.
         $manifest = @{ sha256 = $digest; config_path = $ConfigPath } | ConvertTo-Json -Compress
-        New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-        $temporaryManifest = Join-Path $installRoot ("current-" + [guid]::NewGuid().ToString("N") + ".tmp")
-        [System.IO.File]::WriteAllText($temporaryManifest, $manifest,
-            ([System.Text.UTF8Encoding]::new($false)))
+        $transaction = Publish-EndlessVibeManifest -ManifestPath $currentFile -Json $manifest
+
         try {
-            if (Test-Path -LiteralPath $currentFile) {
-                [System.IO.File]::Replace($temporaryManifest, $currentFile, $null)
-            }
-            else {
-                Move-Item -LiteralPath $temporaryManifest -Destination $currentFile
-            }
+            # Verified PID + creation-time Windows event; never force-kill.
+            $controller = if ($null -ne $previous) { $previous.Exe } else { $installed }
+            Write-Host (Invoke-ServiceControl -Exe $controller -Verb "stop" -Configuration $previousConfiguration)
+            Start-Installed -Exe $installed -Configuration $ConfigPath -RequireStopped
         }
-        finally {
-            if (Test-Path -LiteralPath $temporaryManifest) {
-                Remove-Item -LiteralPath $temporaryManifest -Force
+        catch {
+            $failure = $_
+            try {
+                Restore-EndlessVibeManifest -Transaction $transaction
             }
+            catch {
+                Write-Warning "Failed to restore the old installation manifest: $_"
+            }
+            if ($null -ne $previous) {
+                try {
+                    Start-Installed -Exe $previous.Exe -Configuration $previousConfiguration
+                }
+                catch {
+                    Write-Warning "Old EndlessVibe instance could not be restarted: $_"
+                }
+            }
+            throw $failure
         }
-        Start-Installed -Exe $installed -Configuration $ConfigPath -RequireStopped
+        try {
+            Complete-EndlessVibeManifest -Transaction $transaction
+        }
+        catch {
+            Write-Warning "Updated service is running, but the previous manifest backup could not be cleaned: $_"
+        }
         Write-Host "Done. Regular 'cargo build' can now overwrite target\debug\endlessvibe.exe because the service runs outside target."
         break
     }
