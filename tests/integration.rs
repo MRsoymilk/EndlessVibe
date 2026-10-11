@@ -999,6 +999,51 @@ fn windows_deployment_keeps_cargo_build_output_separate_from_service(){
     assert!(include_str!("../README.en.md").contains("deploy\\windows\\EndlessVibe.ps1"));
 }
 
+#[cfg(windows)]
+#[test]
+fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
+    let temp=tempfile::tempdir().unwrap();
+    let mut config=Config::default();
+    config.security.data_dir=temp.path().join("state");
+    util::private_dir(&config.security.data_dir).unwrap();
+    let config_path=temp.path().join("config.toml");
+    util::private_create(&config_path,toml::to_string(&config).unwrap().as_bytes()).unwrap();
+    let binary=env!("CARGO_BIN_EXE_endlessvibe");
+
+    let invalid=std::process::Command::new(binary)
+        .arg("--internal-sandbox-worker").output().unwrap();
+    assert!(!invalid.status.success(),
+        "Host-user process must not invoke the restricted AppContainer worker");
+
+    let output=std::process::Command::new(binary)
+        .args(["--config",config_path.to_str().unwrap(),"--probe-windows-sandbox"])
+        .output().unwrap();
+    assert!(output.status.success(),"Native AppContainer CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr));
+    let result:Value=serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"],"passed");
+    assert_eq!(result["operation"],"hash_input");
+    assert_eq!(result["appcontainer_token_verified"],true);
+    assert_eq!(result["job_object_enforced"],true);
+    assert_eq!(result["network_capabilities_granted"],0);
+    assert_eq!(result["arbitrary_commands_supported"],false);
+    assert_eq!(result["general_execution_backend"],false);
+    assert_eq!(result["profile_crash_recovery_journaled"],true);
+
+    let journal=endlessvibe::tools::windows_recovery::journal_dir(&config.security.data_dir);
+    assert_eq!(std::fs::read_dir(journal).unwrap().count(),0,
+        "Completed fixed AppContainer operations must clear recovery records");
+    let guard=util::single_instance(&config.security.data_dir.join("service.lock")).unwrap();
+    let busy=std::process::Command::new(binary)
+        .args(["--config",config_path.to_str().unwrap(),"--probe-windows-sandbox"])
+        .output().unwrap();
+    assert!(!busy.status.success(),
+        "Probe must not run while another process holds the service identity lock");
+    drop(guard);
+    assert!(!temp.path().join("state").join("service.pid").exists(),
+        "Probing must not install a long-running Windows service instance");
+}
+
 #[tokio::test]async fn file_edits_require_current_hash_and_backup(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let r=filesystem::read(&f.rt,&w,ReadArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),start_line:1,max_lines:2,task_id:None,stage:None}).unwrap();let hash=r["sha256"].as_str().unwrap().to_owned();let result=filesystem::patch(&f.rt,&w,PatchArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),expected_sha256:hash.clone(),edits:vec![Edit{old_text:"hello".into(),new_text:"world".into(),expected_occurrences:1}],task_id:None,stage:None}).unwrap();assert!(result["backup_id"].is_string());assert!(String::from_utf8(w.root.read("src/main.rs",4096).unwrap()).unwrap().contains("world"));let stale=filesystem::write(&f.rt,&w,WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),content:"lost edit".into(),expected_sha256:hash,create_parents:false,task_id:None,stage:None});assert!(stale.is_err());}
 #[tokio::test]async fn new_files_do_not_overwrite_existing_work(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let a=WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"docs/new.txt".into(),content:"new\n".into(),expected_sha256:"MISSING".into(),create_parents:true,task_id:None,stage:None};filesystem::write(&f.rt,&w,a.clone()).unwrap();assert!(filesystem::write(&f.rt,&w,a).is_err());}
 #[tokio::test]async fn read_only_projects_refuse_changes(){let f=fixture(|c|{c.workspaces[0].projects[0].allow_write=false;c.workspaces[0].projects[0].allow_exec=false;c.workspaces[0].projects[0].allow_git_commit=false;});let w=f.rt.project("demo","demo").unwrap();assert!(filesystem::mkdir(&w,MakeDirectoryArgs{workspace:"demo".into(),project:"demo".into(),path:"new".into(),task_id:None,stage:None}).is_err());assert!(w.exec_allowed().is_err());}

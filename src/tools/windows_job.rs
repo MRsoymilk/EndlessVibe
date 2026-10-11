@@ -29,7 +29,8 @@ use windows_sys::Win32::{
     },
 };
 
-#[cfg(test)]use windows_sys::Win32::System::JobObjects::{IsProcessInJob,QueryInformationJobObject};
+use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+#[cfg(test)]use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
 
 pub struct JobObject{
     handle:OwnedHandle,
@@ -82,7 +83,6 @@ impl JobObject {
         // never survive a completed/cancelled user command.
         let _=unsafe{TerminateJobObject(self.handle.as_raw_handle() as _,1)};
     }
-    #[cfg(test)]
     pub(super) fn contains(&self,pid:u32)->Result<bool>{
         let raw=unsafe{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,pid)};
         if raw.is_null(){return Err(std::io::Error::last_os_error()).context("Open child for job membership check");}

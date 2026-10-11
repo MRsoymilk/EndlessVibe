@@ -10,7 +10,7 @@ pub mod windows_msvc;
 pub mod windows_job;
 #[cfg(windows)]
 pub mod windows_recovery;
-#[cfg(all(windows,test))]
+#[cfg(windows)]
 pub mod windows_appcontainer;
 pub mod tasks;
 pub mod types;

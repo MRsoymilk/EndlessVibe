@@ -2,11 +2,11 @@ use anyhow::{bail,Context,Result};
 use endlessvibe::{config::{self,Config,ProjectConfig,WorkspaceConfig},runtime::Runtime,security::auth::Auth,server,store::Store,tools::process,util,workspace};
 use std::{path::{Path,PathBuf},sync::Arc};
 
-#[derive(Default)]struct Cli{config:Option<PathBuf>,init:bool,lan_only:bool,workspaces:Vec<String>,add_projects:Vec<String>,public_url:Option<String>,bind:Option<String>,read_only:bool,no_exec:bool,allow_shell:bool,unsafe_host:bool,check_sandbox:bool,issue_token:bool,revoke_all:bool,rotate_key:bool,audit:bool,status:bool,stop:bool,restart:bool}
+#[derive(Default)]struct Cli{config:Option<PathBuf>,init:bool,lan_only:bool,workspaces:Vec<String>,add_projects:Vec<String>,public_url:Option<String>,bind:Option<String>,read_only:bool,no_exec:bool,allow_shell:bool,unsafe_host:bool,check_sandbox:bool,probe_windows_sandbox:bool,issue_token:bool,revoke_all:bool,rotate_key:bool,audit:bool,status:bool,stop:bool,restart:bool}
 fn arguments()->Result<Option<Cli>>{
     let mut c=Cli::default();let mut args=std::env::args().skip(1);
     while let Some(arg)=args.next(){match arg.as_str(){
-        "--help"|"-h"=>{println!("EndlessVibe {}\n\nInitialize a workspace root once:\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Create a new configuration and an owner key; never overwrite config\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override bind address (default 0.0.0.0:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWindows process control verifies PID creation time and uses a local graceful shutdown event.\nWhen upgrading an older Windows process, stop it once manually and relaunch before --restart.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
+        "--help"|"-h"=>{println!("EndlessVibe {}\n\nInitialize a workspace root once:\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Create a new configuration and an owner key; never overwrite config\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override bind address (default 0.0.0.0:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --probe-windows-sandbox       Run the fixed AppContainer hash-input self-check (service must be stopped)\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWindows process control verifies PID creation time and uses a local graceful shutdown event.\nWhen upgrading an older Windows process, stop it once manually and relaunch before --restart.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--version"|"-V"=>{println!("EndlessVibe {}",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--config"=>c.config=Some(PathBuf::from(args.next().context("--config needs a path")?)),
         "--workspace"=>c.workspaces.push(args.next().context("--workspace needs ID=/absolute/path")?),
@@ -14,7 +14,7 @@ fn arguments()->Result<Option<Cli>>{
         "--public-url"=>c.public_url=Some(args.next().context("--public-url needs an origin")?),
         "--lan-only"=>c.lan_only=true,
         "--bind"=>c.bind=Some(args.next().context("--bind needs IP:port")?),
-        "--init"=>c.init=true,"--read-only"=>c.read_only=true,"--no-exec"=>c.no_exec=true,"--allow-shell"=>c.allow_shell=true,"--unsafe-host-exec"=>c.unsafe_host=true,"--check-sandbox"=>c.check_sandbox=true,"--issue-token"=>c.issue_token=true,"--revoke-all"=>c.revoke_all=true,"--rotate-owner-key"=>c.rotate_key=true,"--audit-tail"=>c.audit=true,"--status"=>c.status=true,"--stop"=>c.stop=true,"--restart"=>c.restart=true,
+        "--init"=>c.init=true,"--read-only"=>c.read_only=true,"--no-exec"=>c.no_exec=true,"--allow-shell"=>c.allow_shell=true,"--unsafe-host-exec"=>c.unsafe_host=true,"--check-sandbox"=>c.check_sandbox=true,"--probe-windows-sandbox"=>c.probe_windows_sandbox=true,"--issue-token"=>c.issue_token=true,"--revoke-all"=>c.revoke_all=true,"--rotate-owner-key"=>c.rotate_key=true,"--audit-tail"=>c.audit=true,"--status"=>c.status=true,"--stop"=>c.stop=true,"--restart"=>c.restart=true,
         _=>bail!("Unknown argument {arg}; use --help"),
     }}Ok(Some(c))
 }
@@ -192,9 +192,42 @@ fn initialize(c:&Cli,path:&std::path::Path)->Result<()>{
 async fn main()->Result<()>{
     // Credentials, jobs and backups must not become group/world-readable, including SQLite sidecars.
     #[cfg(unix)]unsafe{libc::umask(0o077);}
+    #[cfg(windows)]
+    {
+        // Internal lowbox worker never loads config or owner credentials.
+        // Non-AppContainer invocations fail inside the verified worker.
+        let args=std::env::args_os().skip(1).collect::<Vec<_>>();
+        if args.first().is_some_and(|arg|arg.to_string_lossy()=="--internal-sandbox-worker"){
+            if args.len()!=1{bail!("Internal AppContainer worker accepts no other arguments");}
+            return endlessvibe::tools::windows_appcontainer::run_fixed_worker_from_env();
+        }
+    }
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"endlessvibe=info,rmcp=warn".into())).init();
     let Some(cli)=arguments()? else{return Ok(());};
     #[cfg(unix)]if unsafe{libc::geteuid()}==0{bail!("Run EndlessVibe as a non-root user; root service execution is refused");}validate_process_control(&cli)?;validate_lan_only_flags(&cli)?;let path=cli.config.clone().unwrap_or_else(config::default_config_path);let path=if path.is_absolute(){path}else{std::env::current_dir()?.join(path)};
+    if cli.probe_windows_sandbox {
+        if cli.init||cli.lan_only||cli.check_sandbox||cli.status||cli.stop||cli.restart
+           ||cli.issue_token||cli.revoke_all||cli.rotate_key||cli.audit
+           ||cli.public_url.is_some()||cli.bind.is_some()||!cli.workspaces.is_empty()
+           ||!cli.add_projects.is_empty()||cli.read_only||cli.no_exec
+           ||cli.allow_shell||cli.unsafe_host{
+            bail!("--probe-windows-sandbox can be combined only with --config");
+        }
+        #[cfg(windows)]
+        {
+            let settings=Config::load(&path)?;
+            util::private_dir(&settings.security.data_dir)?;
+            let _lock=util::single_instance(&settings.security.data_dir.join("service.lock"))
+                .context("Stop the Windows EndlessVibe service before running the AppContainer self-check")?;
+            let result=endlessvibe::tools::windows_appcontainer::probe_fixed_operation(
+                &settings.security.data_dir
+            )?;
+            println!("{}",serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        bail!("--probe-windows-sandbox is supported only on Windows");
+    }
     if cli.status||cli.stop||cli.restart{let settings=Config::load(&path)?;if cli.status{match service_state(&settings)?{ServiceState::Stopped=>println!("stopped"),ServiceState::Running(identity)=>println!("running pid={} start_ticks={}",identity.pid,identity.start_ticks),ServiceState::LegacyRunning=>println!("running legacy_instance=true pid_file=false")};return Ok(());}if cli.stop{return stop_service(&settings).await.map(|_|());}if cli.restart{let _=stop_service(&settings).await?;println!("Starting EndlessVibe with {}",path.display());}}
     if cli.init{if !cli.add_projects.is_empty(){bail!("Use --workspace with --init; --add-project modifies an existing config");}if cli.check_sandbox{bail!("--check-sandbox probes an existing config; do not combine it with --init");}return initialize(&cli,&path);}
     if cli.lan_only {return convert_to_lan_only(&path);}

@@ -63,10 +63,35 @@ On Windows this is a policy/status check: it does not execute Project code,
 launch a sandboxed task or claim that AppContainer is production-ready.
 It reports whether Job Objects resource limits apply to currently enabled
 command jobs, marks filesystem/network isolation as absent for host mode,
-shows the fixed-operation AppContainer worker protocol version, and reports
-the protected startup profile-recovery facility. AppContainer remains
-unselectable as a general command execution backend.
+shows the fixed-operation AppContainer worker protocol version and native
+self-check CLI, and reports the protected startup profile-recovery facility.
+AppContainer remains unselectable as a general command execution backend.
 
+### Native fixed AppContainer self-check (Windows)
+
+To validate the real lowbox token, zero network capabilities, Job Object
+containment, versioned hash_input request and independently verified receipt,
+stop the Windows EndlessVibe service and run the **separate** local command:
+
+```powershell
+# Run from the EndlessVibe project root. Do not overwrite the running EXE.
+cargo build --locked --target-dir target/windows-stage
+.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox
+```
+
+The CLI takes only an optional `--config ABSOLUTE_PATH`, and requires the
+service's exclusive `service.lock` so recovery cannot race with another
+instance. It never starts an MCP listener, launches Project code, reads
+the Owner Key, changes Workspace grants, or enables `execution.backend`.
+Only the private, non-secret probe fixture is staged. The worker entrypoint
+is hidden and refuses a normal host-user token. Output reports
+`status=passed`, token/Job Object verification and the hashed receipt;
+failed checks return nonzero. The Windows Dashboard reports the availability
+and restrictions but does not run the self-check automatically.
+
+Production support is intentionally **limited to this fixed self-check**.
+General AppContainer command execution still requires audited executable
+staging, stdout/stderr cancellation and quotas, and verified cleanup.
 ### Versioned isolated-worker protocol
 
 src/tools/sandbox_protocol.rs defines a size-bounded, strict JSON request
@@ -79,9 +104,10 @@ broker must recompute the input SHA-256 using independently opened files
 before it accepts the receipt. Unknown fields, versions and operations
 fail closed.
 
-This protocol is a security boundary prerequisite for a future AppContainer
-worker, not a production command-execution backend. Passing a receipt does
-not imply that cargo or another external executable can run.
+The fixed hash_input worker is now compiled into the Windows executable and
+can run only within a verified AppContainer process. This does not make it
+a production command-execution backend: cargo, arbitrary Project binaries,
+scripts, shell commands and general file writes remain unsupported.
 
 ### Verified AppContainer protocol round trip
 
@@ -95,11 +121,12 @@ the original authorized Project file to verify size, SHA-256, job ID and path.
 Tampered receipts fail closed and never overwrite original files.
 
 Windows denies the privileged workspace-root resolution inside AppContainer.
-The restricted worker instead reads only its own pre-staged inputs through
-read-only, non-reparse-point file handles, after validating the strict
-inputs/... path grammar. The privileged parent continues to use its secure
-capability-rooted Project APIs. These are native test-only workflows, not
-an unrestricted command runner or selectable AppContainer execution backend.
+The restricted worker instead opens its private staging directory as a
+capability handle (without canonicalize), resolves only relative, validated
+inputs/... paths and rejects reparse-point or hard-linked inputs. The broker
+continues to use its secure capability-rooted Project APIs. Native tests may
+stage authorized Project files; the production CLI self-check stages only a
+synthetic private sample, not user Project content.
 
 ### Windows AppContainer identity verification
 
@@ -159,8 +186,10 @@ Malformed journals fail closed rather than deleting unrelated profiles.
 
 Native Windows tests share this production recovery implementation and
 simulate interrupted service cleanup by leaving profiles registered.
-The worker prototype still creates its journal only in test builds, so
-production startup currently has no AppContainer jobs to recover.
+The production fixed-operation self-check now journals every AppContainer
+profile *before* creating it. Normal completion removes the record only after
+native profile cleanup; after an interrupted CLI probe, the next exclusive
+service startup can recover and remove the orphaned profile.
 The previous CreateProcess cross-token handle inheritance experiment
 failed native validation and was discarded. General-purpose command
 execution, crash-safe job lifecycle and filesystem quotas are still

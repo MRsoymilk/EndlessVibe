@@ -18,7 +18,10 @@ fn windows_sandbox_status(config:&Config)->Value{
         },
         "appcontainer":{
             "backend_selectable":false,
-            "status":"test_only",
+            "status":"fixed_operation_probe_only",
+            "local_self_check":"--probe-windows-sandbox",
+            "production_worker_entrypoint":true,
+            "crash_recovery_journaled":true,
             "supported_operation":"hash_input",
             "protocol_version":crate::tools::sandbox_protocol::VERSION,
             "arbitrary_program_execution":false,
@@ -170,7 +173,9 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["job_objects"]["filesystem_isolation"],false);
         assert_eq!(reported["job_objects"]["network_isolation"],false);
         assert_eq!(reported["appcontainer"]["backend_selectable"],false);
-        assert_eq!(reported["appcontainer"]["status"],"test_only");
+        assert_eq!(reported["appcontainer"]["status"],"fixed_operation_probe_only");
+        assert_eq!(reported["appcontainer"]["production_worker_entrypoint"],true);
+        assert_eq!(reported["appcontainer"]["crash_recovery_journaled"],true);
         assert_eq!(reported["appcontainer"]["arbitrary_program_execution"],false);
         assert_eq!(reported["profile_recovery"]["startup_scan_enabled"],true);
         config.execution.backend="disabled".into();

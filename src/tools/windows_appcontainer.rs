@@ -1,9 +1,9 @@
 //! Windows AppContainer identity, safe Project input staging, and native probes.
 //!
-//! The launch path remains test-only until an audited command runner can
-//! forward bounded stdout/stderr and handle cancellation. AppContainer denies
-//! network capabilities by default; copies in the per-job profile avoid
-//! persistent ACL changes to the original Project.
+//! The production launcher supports only the fixed hash_input self-check.
+//! It cannot execute arbitrary Project commands. AppContainer denies network
+//! capabilities by default; copies in the per-job profile avoid persistent
+//! ACL changes to the original Project.
 use anyhow::{bail,Context,Result};
 use std::{
     ffi::{c_void,OsString},
@@ -68,6 +68,7 @@ pub(super) struct Profile{
     journal:Option<PathBuf>,
 }
 impl Profile{
+    #[cfg(test)]
     pub(super) fn create()->Result<Self>{
         let random=crate::util::random_secret()?;
         let name=format!("EndlessVibe.Isolated.{}",&crate::util::digest(random)[..32]);
@@ -76,7 +77,6 @@ impl Profile{
 
     /// Persist the profile identity *before* creating it so a service crash
     /// never leaves an untracked lowbox profile registered in Windows.
-    #[cfg(test)]
     fn create_journaled(journal_dir:&Path)->Result<Self>{
         crate::util::private_dir(journal_dir)?;
         let random=crate::util::random_secret()?;
@@ -228,7 +228,6 @@ fn has_appcontainer_token(process:windows_sys::Win32::Foundation::HANDLE)->Resul
     Ok(flag!=0)
 }
 
-#[cfg(test)]
 fn sandbox_environment(profile:&Profile,extras:&[(&str,String)])->Result<Vec<u16>>{
     let root=profile.folder()?;
     let temp=root.join("Temp");
@@ -264,12 +263,9 @@ fn sandbox_environment(profile:&Profile,extras:&[(&str,String)])->Result<Vec<u16
     Ok(output)
 }
 
-#[cfg(test)]
 #[derive(Debug)]
 struct ProbeOutcome{exit_code:u32,cancelled:bool,timed_out:bool}
-#[cfg(test)]
 struct ProbeProcess{process:OwnedHandle,thread:OwnedHandle}
-#[cfg(test)]
 impl ProbeProcess{
     fn resume_and_wait(
         &self,job:&crate::tools::windows_job::JobObject,
@@ -305,7 +301,6 @@ impl ProbeProcess{
         Ok(ProbeOutcome{exit_code:code,cancelled,timed_out})
     }
 }
-#[cfg(test)]
 impl Drop for ProbeProcess{
     fn drop(&mut self){
         if unsafe{WaitForSingleObject(self.process.as_raw_handle() as _,0)}==WAIT_TIMEOUT{
@@ -315,7 +310,6 @@ impl Drop for ProbeProcess{
     }
 }
 
-#[cfg(test)]
 fn launch_controlled_test(
     profile:&Profile,program:&Path,args:&str,extras:&[(&str,String)],
     timeout:std::time::Duration,cancel:&std::sync::atomic::AtomicBool,
@@ -346,7 +340,7 @@ fn launch_controlled_test(
         bail!("Isolated child did not have a real AppContainer token");
     }
     job.assign(child.dwProcessId)?;
-    assert!(job.contains(child.dwProcessId)?,"AppContainer probe escaped its Job Object");
+    if !job.contains(child.dwProcessId)?{bail!("AppContainer worker escaped its Job Object");}
     process.resume_and_wait(&job,timeout,cancel)
 }
 
@@ -365,6 +359,133 @@ fn launch_isolated_test(
     Ok(outcome.exit_code)
 }
 
+
+/// Internal worker entrypoint. Never parses normal server CLI arguments, owner
+/// credentials or Workspace configuration. The AppContainer token is mandatory.
+pub fn run_fixed_worker_from_env()->Result<()>{
+    use cap_std::{ambient_authority,fs::{Dir,OpenOptions}};
+    use crate::tools::sandbox_protocol::{
+        WorkerRequest,WorkerReceipt,MAX_INPUT_BYTES,MAX_REQUEST_BYTES,RECEIPT_NAME,
+    };
+    use std::io::Read;
+    if !has_appcontainer_token(unsafe{GetCurrentProcess()})?{
+        bail!("Internal sandbox worker requires a real AppContainer token");
+    }
+    let path=std::env::var_os("ENDLESSVIBE_PROTOCOL_ROOT")
+        .context("Internal sandbox worker has no private root")?;
+    let root_path=Path::new(&path);
+    if !root_path.is_absolute()||!root_path.ends_with("LocalState/EndlessVibe"){
+        bail!("Internal sandbox worker requires its private AppContainer staging root");
+    }
+    // Windows lowbox can open these files but cannot canonicalize its
+    // privileged package ancestors. Start from one opened directory handle.
+    let root=Dir::open_ambient_dir(root_path,ambient_authority())
+        .context("Open isolated worker's private directory handle")?;
+    if root.symlink_metadata("worker-request.json")?.file_type().is_symlink(){
+        bail!("Sandbox request cannot be a symlink");
+    }
+    let request_file=root.open("worker-request.json")?.into_std();
+    if !crate::platform::single_link(&request_file){
+        bail!("Sandbox request must be a single-link file");
+    }
+    let mut request_data=Vec::new();
+    request_file.take((MAX_REQUEST_BYTES+1) as u64)
+        .read_to_end(&mut request_data)?;
+    let request=WorkerRequest::decode(&request_data)?;
+    // Strict path grammar plus directory-handle traversal; each component
+    // must be a real file or directory, not a reparse point.
+    let mut current=PathBuf::new();
+    let segments=request.input.split('/').collect::<Vec<_>>();
+    for (index,part) in segments.iter().enumerate(){
+        current.push(part);
+        let metadata=root.symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink(){
+            bail!("AppContainer input path contains a symlink");
+        }
+        if index+1<segments.len()&&!metadata.is_dir(){
+            bail!("AppContainer input parent is not a directory");
+        }
+    }
+    let input_file=root.open(&request.input)?.into_std();
+    if !input_file.metadata()?.is_file()||!crate::platform::single_link(&input_file){
+        bail!("AppContainer input must be a single-link regular file");
+    }
+    let mut input=Vec::new();
+    input_file.take((MAX_INPUT_BYTES+1) as u64).read_to_end(&mut input)?;
+    let receipt=WorkerReceipt::for_input(&request,&input)?;
+    if root.symlink_metadata("outputs")?.file_type().is_symlink(){
+        bail!("Sandbox output directory cannot be a symlink");
+    }
+    let outputs=root.open_dir("outputs")?;
+    let mut options=OpenOptions::new();
+    options.write(true).create_new(true);
+    let bytes=receipt.encode()?;
+    let mut file=outputs.open_with(RECEIPT_NAME,&options)?.into_std();
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Explicit local self-check of the production fixed-operation worker.
+/// This is intentionally NOT a selectable backend for run_command or run_shell:
+/// only a synthetic, private, non-secret sample is ever staged into a new
+/// lowbox profile with no network capabilities.
+pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
+    use crate::tools::sandbox_protocol::{WorkerRequest,WorkerReceipt,RECEIPT_NAME};
+    let temporary=state_dir.join("tmp");
+    crate::util::private_dir(&temporary)?;
+    let sample=tempfile::Builder::new().prefix("appcontainer-probe-")
+        .tempdir_in(&temporary).context("Create private sample workspace")?;
+    let sample_data=b"EndlessVibe isolated fixed-operation hash probe\n";
+    fs::write(sample.path().join("probe.txt"),sample_data)?;
+    let project=crate::security::paths::Root::open(sample.path())?;
+    let journal=crate::tools::windows_recovery::journal_dir(state_dir);
+    let profile=Profile::create_journaled(&journal)?;
+    let staged=profile.stage_project_file(&project,"probe.txt")?;
+    if !staged.is_file(){bail!("Sandbox input was not staged");}
+    profile.prepare_results()?;
+    let private=profile.folder()?.join("LocalState/EndlessVibe");
+    let request=WorkerRequest::new("local_self_check","inputs/probe.txt")?;
+    crate::util::private_create(
+        &private.join("worker-request.json"),&request.encode()?,
+    )?;
+    let program=private.join("fixed-worker.exe");
+    fs::copy(std::env::current_exe()?,&program)
+        .context("Stage trusted EndlessVibe worker binary in private profile")?;
+    let cancel=std::sync::atomic::AtomicBool::new(false);
+    let run=launch_controlled_test(
+        &profile,&program,"--internal-sandbox-worker",
+        &[("ENDLESSVIBE_PROTOCOL_ROOT",private.to_string_lossy().into_owned())],
+        std::time::Duration::from_secs(15),&cancel,
+    )?;
+    if run.cancelled||run.timed_out||run.exit_code!=0{
+        bail!("Fixed AppContainer worker failed: exit={}, cancelled={}, timed_out={}",
+            run.exit_code,run.cancelled,run.timed_out);
+    }
+    let artifact=profile.collect_result(RECEIPT_NAME,
+        crate::tools::sandbox_protocol::MAX_RECEIPT_BYTES)?;
+    let receipt=WorkerReceipt::decode(&artifact.bytes)?;
+    if artifact.relative_path!=RECEIPT_NAME{bail!("Unexpected sandbox output artifact");}
+    let independently_read=project.read("probe.txt",
+        crate::tools::sandbox_protocol::MAX_INPUT_BYTES)?;
+    receipt.verify_against(&request,&independently_read)?;
+    Ok(serde_json::json!({
+        "status":"passed",
+        "worker":"appcontainer_fixed_operation",
+        "operation":"hash_input",
+        "input_bytes":receipt.input_bytes,
+        "input_sha256":receipt.sha256,
+        "receipt_sha256":artifact.sha256,
+        "protocol_version":crate::tools::sandbox_protocol::VERSION,
+        "appcontainer_token_verified":true,
+        "job_object_enforced":true,
+        "network_capabilities_granted":0,
+        "project_source_unmodified":true,
+        "arbitrary_commands_supported":false,
+        "general_execution_backend":false,
+        "profile_crash_recovery_journaled":true,
+    }))
+}
 
 /// Append-only raw-byte log cursor. The parent owns this state; child-provided
 /// metadata is never trusted for offset, content identity or output limits.
@@ -415,42 +536,13 @@ mod tests{
         if std::env::var("ENDLESSVIBE_PROTOCOL_WORKER").ok().as_deref()!=Some("1"){
             return;
         }
-        assert!(has_appcontainer_token(unsafe{GetCurrentProcess()}).unwrap(),
-            "Protocol worker must actually run with a restricted Windows token");
-        let private_root=PathBuf::from(std::env::var("ENDLESSVIBE_PROTOCOL_ROOT").unwrap());
-        use std::{io::Read,os::windows::fs::OpenOptionsExt};
-        use crate::tools::sandbox_protocol::{MAX_INPUT_BYTES,MAX_REQUEST_BYTES,WorkerRequest};
-        // AppContainer cannot resolve the privileged workspace root. The
-        // broker has already created this one-job profile, and the request
-        // path grammar restricts reads to its private inputs/ subtree.
-        let request_file=fs::OpenOptions::new().read(true)
-            .custom_flags(0x0020_0000)
-            .open(private_root.join("worker-request.json")).unwrap();
-        let mut request_bytes=Vec::new();
-        request_file.take((MAX_REQUEST_BYTES+1) as u64)
-            .read_to_end(&mut request_bytes).unwrap();
-        let request=WorkerRequest::decode(&request_bytes).unwrap();
-        let input_path=private_root.join(&request.input);
-        let input_dir=private_root.join("inputs");
-        let directory_meta=fs::symlink_metadata(&input_dir).unwrap();
-        assert!(directory_meta.is_dir()&&!directory_meta.file_type().is_symlink());
-        let md=fs::symlink_metadata(&input_path).unwrap();
-        assert!(md.is_file()&&!md.file_type().is_symlink());
-        let file=fs::OpenOptions::new().read(true)
-            .custom_flags(0x0020_0000).open(&input_path).unwrap();
-        assert!(file.metadata().unwrap().is_file());
-        let mut input=Vec::new();
-        file.take((MAX_INPUT_BYTES+1) as u64)
-            .read_to_end(&mut input).unwrap();
-        let receipt=crate::tools::sandbox_protocol::WorkerReceipt::for_input(&request,&input).unwrap();
-        let bytes=receipt.encode().unwrap();
-        let output=private_root.join("outputs").join(
-            crate::tools::sandbox_protocol::RECEIPT_NAME
-        );
-        let mut file=fs::OpenOptions::new().write(true).create_new(true)
-            .open(&output).unwrap();
-        file.write_all(&bytes).unwrap();
-        file.sync_all().unwrap();
+        run_fixed_worker_from_env().unwrap();
+    }
+
+    #[test]
+    fn fixed_worker_refuses_non_appcontainer_process(){
+        assert!(!has_appcontainer_token(unsafe{GetCurrentProcess()}).unwrap());
+        assert!(run_fixed_worker_from_env().is_err());
     }
 
     #[test]
