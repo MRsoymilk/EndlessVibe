@@ -1,12 +1,53 @@
 use crate::{runtime::Runtime,tools::{process,types::LogArgs},util,workspace::Project};
 use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
-use std::{fs::OpenOptions,io::{Read,Write},path::PathBuf};
+use std::{fs::OpenOptions,io::{Read,Write},path::{Path,PathBuf}};
 #[cfg(unix)] use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)] use std::os::windows::fs::OpenOptionsExt;
 use tokio::process::Command;
 
 #[derive(Clone,Default)]pub(super) struct Environment{pub(super) index:Option<PathBuf>,pub(super) objects:Option<PathBuf>}
+/**
+ * @brief Convert a canonical Windows path into a Git-for-Windows CLI path.
+ *
+ * The OS can open \\?\F:\... handles, but git.exe rejects that verbatim
+ * prefix in --file, --git-dir, --work-tree and GIT_* path arguments.
+ * Refuse path components that Win32 would normalize to another file.
+ */
+pub(super) fn git_process_path(path:&Path)->Result<PathBuf>{
+    #[cfg(not(windows))]
+    { Ok(path.to_owned()) }
+    #[cfg(windows)]
+    {
+        use std::path::{Component,Prefix};
+        let Some(Component::Prefix(prefix))=path.components().next()else{
+            bail!("Git subprocess path must be absolute");
+        };
+        let raw=path.to_str().context("Git subprocess path is not valid Unicode")?;
+        let ordinary=match prefix.kind(){
+            Prefix::VerbatimDisk(_)=>raw.strip_prefix(r"\\?\")
+                .context("Invalid verbatim drive path")?.to_owned(),
+            Prefix::VerbatimUNC(_,_)=>format!(r"\\{}",raw.strip_prefix(r"\\?\UNC\")
+                .context("Invalid verbatim UNC path")?),
+            Prefix::Disk(_)|Prefix::UNC(_,_)=>raw.to_owned(),
+            _=>bail!("Unsupported Git subprocess path prefix"),
+        };
+        let result=PathBuf::from(ordinary);
+        // Win32 non-verbatim paths may trim trailing dots/spaces or interpret ADS.
+        for component in result.components(){
+            if let Component::Normal(name)=component{
+                let name=name.to_str().context("Invalid Windows path component")?;
+                if name.ends_with(['.',' '])||name.contains([':', '\r','\n']){
+                    bail!("Unsafe Git subprocess path component");
+                }
+            }
+        }
+        if result.to_str().context("Invalid Git subprocess path")?.encode_utf16().count()>=248{
+            bail!("Git-for-Windows CLI path exceeds safe non-verbatim length");
+        }
+        Ok(result)
+    }
+}
 #[cfg(windows)]
 fn windows_git_path_is_unsafe(path:&std::path::Path)->bool{
     path.components().any(|part|match part{
@@ -44,22 +85,22 @@ pub(super) async fn preflight(rt:&Runtime,w:&Project)->Result<()>{
         if !md.is_file()||!crate::platform::single_link(&file)||md.len()>262144||std::fs::symlink_metadata(&path)?.file_type().is_symlink(){bail!("Unsafe/oversized Git config");}
         file.take(262145).read_to_end(&mut data)?;if data.len()>262144{bail!("Oversized Git config");}}
     let mut temp=tempfile::Builder::new().prefix("git-config-").tempfile_in(rt.config.security.data_dir.join("tmp"))?;temp.write_all(&data)?;temp.flush()?;
-    let mut cmd=Command::new(&rt.config.git.executable);process::clean_environment(&mut cmd,&rt.config.execution.path);cmd.current_dir(rt.config.security.data_dir.join("empty-home")).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).args(["config","--null","--no-includes","--file"]).arg(temp.path()).arg("--list");
+    let mut cmd=Command::new(&rt.config.git.executable);process::clean_environment(&mut cmd,&rt.config.execution.path);cmd.current_dir(git_process_path(&rt.config.security.data_dir.join("empty-home"))?).env("HOME",git_process_path(&rt.config.security.data_dir.join("empty-home"))?).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).args(["config","--null","--no-includes","--file"]).arg(git_process_path(temp.path())?).arg("--list");
     let result=process::capture(cmd,None,524288,5).await?;if result.code!=Some(0){bail!("Git config cannot be safely parsed");}
     for line in result.stdout.split(|b|*b==0).filter(|b|!b.is_empty()){let key=String::from_utf8_lossy(line.split(|b|*b==b'\n').next().unwrap_or_default()).to_ascii_lowercase();if ["include.","includeif.","filter.","diff.","merge.","alias.","credential.","gpg.","lfs."].iter().any(|p|key.starts_with(*p))||(key.starts_with("remote.")&&key.ends_with(".promisor"))||(key.starts_with("extensions.")&&key!="extensions.objectformat")||matches!(key.as_str(),"core.fsmonitor"|"core.sparsecheckout"|"core.sparsecheckoutcone"){bail!("Repository config key '{key}' needs manual review; helper/filter/include/sparse/partial-clone configurations are not supported by the dedicated Git tools. Existing config was not changed.");}}
     Ok(())
 }
 
 pub(super) fn command(rt:&Runtime,w:&Project,env:&Environment)->Result<Command>{
-    let gitdir=repo(w)?;let mut c=Command::new(&rt.config.git.executable);process::clean_environment(&mut c,&rt.config.execution.path);
-    c.current_dir(&w.root.path).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).env("GIT_ATTR_NOSYSTEM","1").env("GIT_LITERAL_PATHSPECS","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_REPLACE_OBJECTS","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_AUTHOR_NAME",&rt.config.git.author_name).env("GIT_AUTHOR_EMAIL",&rt.config.git.author_email).env("GIT_COMMITTER_NAME",&rt.config.git.author_name).env("GIT_COMMITTER_EMAIL",&rt.config.git.author_email);
-    c.arg("--no-pager").arg("--git-dir").arg(&gitdir).arg("--work-tree").arg(&w.root.path);
+    let gitdir=git_process_path(&repo(w)?)?;let root=git_process_path(&w.root.path)?;let home=git_process_path(&rt.config.security.data_dir.join("empty-home"))?;let mut c=Command::new(&rt.config.git.executable);process::clean_environment(&mut c,&rt.config.execution.path);
+    c.current_dir(&root).env("HOME",&home).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).env("GIT_ATTR_NOSYSTEM","1").env("GIT_LITERAL_PATHSPECS","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_REPLACE_OBJECTS","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_AUTHOR_NAME",&rt.config.git.author_name).env("GIT_AUTHOR_EMAIL",&rt.config.git.author_email).env("GIT_COMMITTER_NAME",&rt.config.git.author_name).env("GIT_COMMITTER_EMAIL",&rt.config.git.author_email);
+    c.arg("--no-pager").arg("--git-dir").arg(&gitdir).arg("--work-tree").arg(&root);
     let null=crate::platform::null_device();
     let hooks=format!("core.hooksPath={null}");let attrs=format!("core.attributesFile={null}");
     let deny=if cfg!(windows){"cmd /c exit 1"}else{"/bin/false"};
     let git_proxy=format!("core.gitProxy={deny}");let ssh_command=format!("core.sshCommand={deny}");
     for setting in [hooks.as_str(),"core.fsmonitor=false","commit.gpgSign=false","tag.gpgSign=false",attrs.as_str(),"diff.external=","core.quotePath=false","submodule.recurse=false","protocol.allow=never",git_proxy.as_str(),ssh_command.as_str()]{c.arg("-c").arg(setting);}
-    if let Some(index)=&env.index{c.env("GIT_INDEX_FILE",index);}if let Some(objects)=&env.objects{c.env("GIT_OBJECT_DIRECTORY",objects).env("GIT_ALTERNATE_OBJECT_DIRECTORIES",gitdir.join("objects"));}Ok(c)
+    if let Some(index)=&env.index{c.env("GIT_INDEX_FILE",git_process_path(index)?);}if let Some(objects)=&env.objects{c.env("GIT_OBJECT_DIRECTORY",git_process_path(objects)?).env("GIT_ALTERNATE_OBJECT_DIRECTORIES",git_process_path(&gitdir.join("objects"))?);}Ok(c)
 }
 
 pub(super) async fn run(rt:&Runtime,w:&Project,args:Vec<String>,env:&Environment,input:Option<Vec<u8>>)->Result<process::Captured>{let mut cmd=command(rt,w,env)?;cmd.args(args);process::capture(cmd,input,rt.config.limits.max_output_bytes.max(4*1024*1024),20).await}
@@ -85,6 +126,20 @@ pub async fn log(rt:&Runtime,w:&Project,a:LogArgs)->Result<Value>{preflight(rt,w
         assert!(oid(b"bad\n".to_vec()).is_err());
         assert!(oid(format!("{}\n","a".repeat(40)).into_bytes()).is_ok());
     }
+
+    #[cfg(windows)]
+    #[test]fn git_for_windows_receives_safe_non_verbatim_paths(){
+        let disk=std::path::Path::new(r"\\?\F:\project\EndlessVibe\.git");
+        assert_eq!(git_process_path(disk).unwrap(),PathBuf::from(r"F:\project\EndlessVibe\.git"));
+        let unc=std::path::Path::new(r"\\?\UNC\server\share\repo\.git");
+        assert_eq!(git_process_path(unc).unwrap(),PathBuf::from(r"\\server\share\repo\.git"));
+        assert_eq!(git_process_path(std::path::Path::new(r"F:\project\EndlessVibe")).unwrap(),
+                   PathBuf::from(r"F:\project\EndlessVibe"));
+        for bad in [r"\\?\F:\project:ads\.git",r"\\?\F:\project\bad.",r"\\?\F:\project\bad "]{
+            assert!(git_process_path(std::path::Path::new(bad)).is_err(),"{bad:?}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]fn windows_verbatim_drive_is_not_a_git_alternate_data_stream(){
         for path in [r"F:\project\EndlessVibe\.git",r"\\?\F:\project\EndlessVibe\.git",r"\\server\share\repo\.git"]{

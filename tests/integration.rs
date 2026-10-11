@@ -890,6 +890,51 @@ fn fixture(edit:impl FnOnce(&mut Config))->Fixture{
 fn git_cli(path:&Path,args:&[&str])->Vec<u8>{let out=std::process::Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("HOME","/nonexistent").env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null").arg("-C").arg(path).args(["-c","user.name=Test","-c","user.email=test@example.invalid","-c","core.fsmonitor=false","-c","core.hooksPath=/dev/null","-c","commit.gpgSign=false"]).args(args).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));out.stdout}
 fn initialize_git(f:&Fixture,initial:bool){let w=f.rt.project("demo","demo").unwrap();git_cli(&w.root.path,&["init","-q","--initial-branch=main"]);if initial{std::fs::write(w.root.path.join("tracked.txt"),"one\n").unwrap();std::fs::write(w.root.path.join("other.txt"),"base\n").unwrap();git_cli(&w.root.path,&["add","--all"]);git_cli(&w.root.path,&["commit","-qm","initial"]);}}
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_git_tools_accept_verbatim_project_and_temporary_paths(){
+    let f=fixture(|_|{});
+    let project=f.rt.project("demo","demo").unwrap();
+    assert!(project.root.path.to_string_lossy().starts_with(r"\\?\"),
+            "Windows regression must use a verbatim canonical project path");
+    let init=std::process::Command::new(&f.rt.config.git.executable)
+        .current_dir(&project.root.path)
+        .args(["init","--quiet","--initial-branch=dev"])
+        .output().unwrap();
+    assert!(init.status.success(),"{}",String::from_utf8_lossy(&init.stderr));
+
+    // Exercises --file, --git-dir and --work-tree using the secure preflight.
+    let status=git::status(&f.rt,&project).await.unwrap();
+    assert_eq!(status["branch"],"dev");
+    assert_eq!(status["head"],"UNBORN");
+    let log=git::log(&f.rt,&project,LogArgs{
+        workspace:"demo".into(),project:"demo".into(),limit:2,task_id:None,stage:None
+    }).await.unwrap();
+    assert!(log["commits"].as_array().unwrap().is_empty());
+
+    // Exercises GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and the temporary review dir.
+    let diff=git::diff(&f.rt,&project,DiffArgs{
+        workspace:"demo".into(),project:"demo".into(),
+        paths:vec!["src/main.rs".into()],offset:0,limit:16384,task_id:None,stage:None
+    }).await.unwrap();
+    assert_eq!(diff["has_changes"],true);
+    assert_eq!(diff["has_more"],false);
+    let commit=git::commit(&f.rt,&project,CommitArgs{
+        workspace:"demo".into(),project:"demo".into(),
+        paths:vec!["src/main.rs".into()],
+        message:"test: Windows Git subprocess path compatibility".into(),
+        expected_head:diff["head"].as_str().unwrap().into(),
+        expected_diff_sha256:diff["diff_sha256"].as_str().unwrap().into(),
+        task_id:None,stage:None
+    }).await.unwrap();
+    let after=git::status(&f.rt,&project).await.unwrap();
+    assert_eq!(after["head"],commit["commit"]);
+    let history=git::log(&f.rt,&project,LogArgs{
+        workspace:"demo".into(),project:"demo".into(),limit:1,task_id:None,stage:None
+    }).await.unwrap();
+    assert_eq!(history["commits"][0]["subject"],"test: Windows Git subprocess path compatibility");
+}
+
 #[tokio::test]async fn file_edits_require_current_hash_and_backup(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let r=filesystem::read(&f.rt,&w,ReadArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),start_line:1,max_lines:2,task_id:None,stage:None}).unwrap();let hash=r["sha256"].as_str().unwrap().to_owned();let result=filesystem::patch(&f.rt,&w,PatchArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),expected_sha256:hash.clone(),edits:vec![Edit{old_text:"hello".into(),new_text:"world".into(),expected_occurrences:1}],task_id:None,stage:None}).unwrap();assert!(result["backup_id"].is_string());assert!(String::from_utf8(w.root.read("src/main.rs",4096).unwrap()).unwrap().contains("world"));let stale=filesystem::write(&f.rt,&w,WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"src/main.rs".into(),content:"lost edit".into(),expected_sha256:hash,create_parents:false,task_id:None,stage:None});assert!(stale.is_err());}
 #[tokio::test]async fn new_files_do_not_overwrite_existing_work(){let f=fixture(|_|{});let w=f.rt.project("demo","demo").unwrap();let a=WriteArgs{workspace:"demo".into(),project:"demo".into(),path:"docs/new.txt".into(),content:"new\n".into(),expected_sha256:"MISSING".into(),create_parents:true,task_id:None,stage:None};filesystem::write(&f.rt,&w,a.clone()).unwrap();assert!(filesystem::write(&f.rt,&w,a).is_err());}
 #[tokio::test]async fn read_only_projects_refuse_changes(){let f=fixture(|c|{c.workspaces[0].projects[0].allow_write=false;c.workspaces[0].projects[0].allow_exec=false;c.workspaces[0].projects[0].allow_git_commit=false;});let w=f.rt.project("demo","demo").unwrap();assert!(filesystem::mkdir(&w,MakeDirectoryArgs{workspace:"demo".into(),project:"demo".into(),path:"new".into(),task_id:None,stage:None}).is_err());assert!(w.exec_allowed().is_err());}
