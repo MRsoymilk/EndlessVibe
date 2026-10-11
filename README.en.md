@@ -216,6 +216,8 @@ Worker SystemRoot, SystemDrive and PATH now come from native Windows system-dire
 
 The broker now compares each mapped section's kernel-reported NT-device filename against its Toolhelp path through GetMappedFileNameW and QueryDosDeviceW at both barriers; this is not a signature or loaded-file-byte identity proof.
 
+It also pins each reopened image file by Windows handle and compares volume serial, file index, size and last-write time across both checks, rejecting same-name replacements. This does not prove mapped-memory bytes or Authenticode signatures.
+
 - Local MCP (OAuth): `http://127.0.0.1:20000/mcp`, **loopback only**, not an HTTP endpoint for other LAN computers.
 - Local Dashboard: `http://127.0.0.1:20001/nodes`, **loopback only**.
 - Node Transfer: **TCP 20002 / TLS 1.3**; discovery: **UDP 20003 / multicast**. Open these only on a trusted LAN.

@@ -1051,6 +1051,9 @@ fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     let mapped=&result["loaded_modules"];
     assert_eq!(mapped["toolhelp_parent_verified"],true);
     assert_eq!(mapped["mapped_section_backing_paths_verified"],true);
+    assert_eq!(mapped["pinned_file_ids_stable_across_snapshots"],true);
+    assert!(mapped["pinned_file_count"].as_u64().unwrap()>1);
+    assert_eq!(mapped["loaded_section_file_id_proven"],false);
     assert_eq!(mapped["snapshot_count"],2);
     assert_eq!(mapped["expected_worker_identity"],true);
     assert_eq!(mapped["outside_system32_module_rejected"],true);

@@ -11,9 +11,9 @@ use anyhow::{bail,Context,Result};
 use std::{
     collections::BTreeSet,
     ffi::{OsString,c_void},
-    fs,
-    mem::{size_of,zeroed},
-    os::windows::{ffi::OsStringExt,fs::MetadataExt,io::{AsRawHandle,FromRawHandle,OwnedHandle}},
+    fs::{self,File,OpenOptions},
+    mem::{size_of,zeroed,MaybeUninit},
+    os::windows::{ffi::OsStringExt,fs::{MetadataExt,OpenOptionsExt},io::{AsRawHandle,FromRawHandle,OwnedHandle}},
     path::{Path,PathBuf},
     time::Duration,
 };
@@ -27,6 +27,7 @@ use windows_sys::Win32::{
         Threading::{OpenProcess,PROCESS_QUERY_INFORMATION,PROCESS_VM_READ},
     },
 };
+use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION,GetFileInformationByHandle,GetFinalPathNameByHandleW,FILE_FLAG_OPEN_REPARSE_POINT,FILE_ATTRIBUTE_REPARSE_POINT,FILE_NAME_NORMALIZED,VOLUME_NAME_DOS};
 
 const MAX_LOADED_MODULES:usize=256;
 const SNAPSHOT_RETRIES:usize=8;
@@ -40,7 +41,18 @@ pub(crate) struct ModuleAudit {
     pub(crate) system32_modules:usize,
     pub(crate) executable_verified:bool,
     pub(crate) backing_mapping_verified:bool,
+    pinned:std::collections::BTreeMap<String,PinnedImage>,
 }
+#[derive(Clone,Copy,Debug,Eq,PartialEq)]
+struct FileStamp{
+    volume:u32,
+    file_index:u64,
+    bytes:u64,
+    last_write:u64,
+}
+#[derive(Debug)]
+struct PinnedImage{handle:File,stamp:FileStamp}
+
 fn nul_terminated(chars:&[u16])->Result<OsString>{
     let end=chars.iter().position(|&c|c==0)
         .context("Windows loaded-module path was truncated")?;
@@ -147,6 +159,7 @@ fn classify(modules:&[LoadedImage],expected_executable:&Path,system32:&Path)
         system32_modules:windows_count,
         executable_verified:true,
         backing_mapping_verified:false,
+        pinned:std::collections::BTreeMap::new(),
     })
 }
 // GetMappedFileNameW returns the *mapped section's* NT device name for a
@@ -235,12 +248,102 @@ fn verify_mapped_sections(pid:u32,modules:&[LoadedImage])->Result<()>{
     Ok(())
 }
 
+// Pin every actually enumerated image file with a non-following Windows file
+// handle. Compare stable volume/file indexes, length and last-write FILETIME
+// across the two gated observations. The section's own file ID is not
+// exposed here by documented Win32 APIs; never claim it is proven.
+fn file_stamp(handle:&File)->Result<FileStamp>{
+    let mut result=MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    if unsafe{GetFileInformationByHandle(handle.as_raw_handle() as _,result.as_mut_ptr())}==0{
+        return Err(std::io::Error::last_os_error()).context("Inspect pinned Windows file identity");
+    }
+    let info=unsafe{result.assume_init()};
+    let index=((info.nFileIndexHigh as u64)<<32)|info.nFileIndexLow as u64;
+    if index==0||info.nNumberOfLinks==0
+        ||info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT!=0{
+        bail!("Pinned Windows image has an ambiguous ID or reparse point");
+    }
+    let metadata=handle.metadata()?;
+    if !metadata.is_file(){bail!("Pinned Windows image is not a regular file");}
+    Ok(FileStamp{
+        volume:info.dwVolumeSerialNumber,
+        file_index:index,
+        bytes:((info.nFileSizeHigh as u64)<<32)|info.nFileSizeLow as u64,
+        last_write:((info.ftLastWriteTime.dwHighDateTime as u64)<<32)
+            |info.ftLastWriteTime.dwLowDateTime as u64,
+    })
+}
+fn opened_path(handle:&File)->Result<String>{
+    let mut chars=[0u16;32768];
+    let count=unsafe{GetFinalPathNameByHandleW(
+        handle.as_raw_handle() as _,chars.as_mut_ptr(),chars.len() as u32,
+        FILE_NAME_NORMALIZED|VOLUME_NAME_DOS,
+    )};
+    if count==0{
+        return Err(std::io::Error::last_os_error()).context("Resolve pinned Windows image handle");
+    }
+    if count as usize>=chars.len()-1{
+        bail!("Pinned Windows image path exceeds maximum allowed UTF-16 buffer");
+    }
+    Ok(String::from_utf16(&chars[..count as usize])
+        .context("Invalid UTF-16 in pinned Windows file handle path")?.to_lowercase())
+}
+fn pin_file(path:&Path)->Result<PinnedImage>{
+    let mut options=OpenOptions::new();
+    options.read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let handle=options.open(path).context("Pin loaded Windows image file without following reparse points")?;
+    let identity=file_stamp(&handle)?;
+    let canonical=fs::canonicalize(path)
+        .context("Resolve module path separately from opened file handle")?
+        .to_string_lossy().to_lowercase();
+    if opened_path(&handle)?!=canonical{
+        bail!("Pinned loaded image handle and canonical path do not match");
+    }
+    Ok(PinnedImage{handle,stamp:identity})
+}
+fn pin_loaded_images(modules:&[LoadedImage])
+    ->Result<std::collections::BTreeMap<String,PinnedImage>>{
+    let mut result=std::collections::BTreeMap::new();
+    for module in modules{
+        let pinned=pin_file(&module.path)
+            .with_context(||format!("Pin enumerated Windows module {}",module.name))?;
+        if result.insert(module.name.clone(),pinned).is_some(){
+            bail!("Duplicate Windows module while pinning image identity");
+        }
+    }
+    Ok(result)
+}
+fn ensure_pinned_images_stable(before:&ModuleAudit,after:&ModuleAudit)->Result<()>{
+    if before.pinned.is_empty()||after.pinned.is_empty(){
+        bail!("Missing pinned Windows image handles from live snapshots");
+    }
+    // The earlier handles stay open until after the second snapshot and
+    // completion report. A path swap then produces a different file index.
+    for (name,first) in &before.pinned{
+        if file_stamp(&first.handle)?!=first.stamp{
+            bail!("Pinned Windows module was modified after initial identity check: {name}");
+        }
+        if let Some(second)=after.pinned.get(name){
+            if first.stamp!=second.stamp{
+                bail!("Windows module file identity changed between snapshots: {name}");
+            }
+        }
+    }
+    for (name,second) in &after.pinned{
+        if file_stamp(&second.handle)?!=second.stamp{
+            bail!("Windows module changed during final identity check: {name}");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn audit(pid:u32,expected_executable:&Path)->Result<ModuleAudit>{
     let sys=crate::tools::windows_trusted_worker::system32_directory()?;
     let modules=snapshot(pid)?;
     let mut reviewed=classify(&modules,expected_executable,&sys)?;
     verify_mapped_sections(pid,&modules)?;
     reviewed.backing_mapping_verified=true;
+    reviewed.pinned=pin_loaded_images(&modules)?;
     Ok(reviewed)
 }
 
@@ -286,6 +389,7 @@ impl LoaderGate{
         if self.phase!=2{bail!("AppContainer exited before both live module checks");}
         let before=self.before.as_ref().context("Missing pre-execution module check")?;
         let after=self.after.as_ref().context("Missing post-operation module check")?;
+        ensure_pinned_images_stable(before,after)?;
         Ok(serde_json::json!({
             "toolhelp_parent_verified":true,
             "startup_snapshot_modules":before.basenames,
@@ -293,6 +397,9 @@ impl LoaderGate{
             "pre_system32_count":before.system32_modules,
             "post_system32_count":after.system32_modules,
             "expected_worker_identity":before.executable_verified&&after.executable_verified,
+            "pinned_file_ids_stable_across_snapshots":true,
+            "pinned_file_count":before.pinned.len(),
+            "loaded_section_file_id_proven":false,
             "mapped_section_backing_paths_verified":before.backing_mapping_verified&&after.backing_mapping_verified,
             "outside_system32_module_rejected":true,
             "snapshot_count":2,
@@ -337,6 +444,65 @@ mod tests{
         wrong[0].path=other;
         assert!(verify_mapped_sections(pid,&wrong).is_err(),
             "A Toolhelp image path that differs from mapped section identity must be refused");
+    }
+    #[test]
+    fn pinned_file_stamp_detects_mutation_and_wrong_file_identity(){
+        use std::io::Write;
+        let dir=tempfile::tempdir().unwrap();
+        let module=dir.path().join("system.dll");
+        let other=dir.path().join("other.dll");
+        fs::write(&module,b"original").unwrap();
+        fs::write(&other,b"unrelated").unwrap();
+        let pin=pin_file(&module).unwrap();
+        assert_eq!(file_stamp(&pin.handle).unwrap(),pin.stamp);
+        assert_eq!(pin_file(&module).unwrap().stamp,pin.stamp);
+        assert_ne!(pin_file(&other).unwrap().stamp,pin.stamp,
+            "Different files cannot share an accepted Windows volume/file-index identity");
+        let mut second=std::collections::BTreeMap::new();
+        second.insert("system.dll".into(),pin_file(&module).unwrap());
+        let mut first=std::collections::BTreeMap::new();
+        first.insert("system.dll".into(),pin);
+        let audit=|pinned|ModuleAudit{
+            basenames:vec!["system.dll".into()],
+            system32_modules:1,
+            executable_verified:true,
+            backing_mapping_verified:true,
+            pinned,
+        };
+        let pre=audit(first);
+        let post=audit(second);
+        ensure_pinned_images_stable(&pre,&post).unwrap();
+
+        // A writer retaining the same file index still changes the pinned
+        // metadata and must invalidate the pre-execution approval.
+        let mut writer=fs::OpenOptions::new().append(true).open(&module).unwrap();
+        writer.write_all(b"modified after approval").unwrap();
+        writer.sync_all().unwrap();
+        assert!(ensure_pinned_images_stable(&pre,&post).is_err(),
+            "Modified loaded file must invalidate a previously approved snapshot");
+    }
+    #[test]
+    fn pinned_module_identity_disallows_swapped_handles(){
+        let dir=tempfile::tempdir().unwrap();
+        let a=dir.path().join("one.dll");
+        let b=dir.path().join("two.dll");
+        fs::write(&a,b"one").unwrap();
+        fs::write(&b,b"two").unwrap();
+        let make=|path:&Path|{
+            let mut ids=std::collections::BTreeMap::new();
+            ids.insert("same.dll".into(),pin_file(path).unwrap());
+            ModuleAudit{
+                basenames:vec!["same.dll".into()],
+                system32_modules:1,
+                executable_verified:true,
+                backing_mapping_verified:true,
+                pinned:ids,
+            }
+        };
+        let before=make(&a);
+        let after=make(&b);
+        assert!(ensure_pinned_images_stable(&before,&after).is_err(),
+            "A replaced same-name module must not be accepted by file identity");
     }
     #[test]
     fn untrusted_image_paths_and_duplicate_mappings_fail_closed(){

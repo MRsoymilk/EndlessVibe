@@ -50,6 +50,9 @@ fn windows_sandbox_status(config:&Config)->Value{
                     "actual_loader_module_path_attestation":true,
                     "parent_toolhelp_pre_and_post_operation":true,
                     "mapped_section_backing_path_crosschecked":true,
+                    "pinned_file_volume_index_and_timestamps":true,
+                    "pinned_image_handle_identity_checked_twice":true,
+                    "actual_section_file_id_verified":false,
                     "mapped_section_byte_identity_proven":false,
                     "only_worker_exe_and_system32_direct_dlls":true,
                     "transient_or_future_loads_attested":false,
@@ -225,6 +228,9 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["actual_loader_module_path_attestation"],true);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["parent_toolhelp_pre_and_post_operation"],true);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["mapped_section_backing_path_crosschecked"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["pinned_file_volume_index_and_timestamps"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["pinned_image_handle_identity_checked_twice"],true);
+        assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["actual_section_file_id_verified"],false);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["mapped_section_byte_identity_proven"],false);
         assert_eq!(reported["appcontainer"]["trusted_worker_executable"]["pe_dependency_audit"]["transient_or_future_loads_attested"],false);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["tamper_detection"],true);

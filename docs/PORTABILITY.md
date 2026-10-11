@@ -156,13 +156,28 @@ inspection barriers. Unexpected, truncated, non-local and mismatching device
 names are rejected. Native tests verify valid mappings and reject forged
 Toolhelp paths and invalid mapped base addresses.
 
-**Scope:** These checks compare an in-memory section's kernel-reported backing
-path with a separately resolved filesystem path at two instants. They do not
-prove stable underlying file IDs, the bytes in the loaded section or
-Authenticode signatures, nor detect a module loaded and unloaded between
-snapshots. This is stronger than static import-name or Toolhelp path checks,
-but does not make arbitrary Windows EXEs trustworthy or enable an AppContainer
-backend for run_command.
+### Pinned loaded-file identity checks
+
+The parent now holds a real Windows file handle for every observed image
+across both loader checkpoints. GetFileInformationByHandle records a nonzero
+volume serial/file index, file length and last-write FILETIME; the opened
+handle's resolved path must agree with a separately canonicalized Toolhelp
+path. Each previously pinned handle is checked again after the fixed
+operation, and matching module names must have identical identity/metadata
+in both snapshots. Same-name file replacement, in-place size changes,
+unresolvable handles and reparse-point images fail closed. These opened
+handles remain valid until the broker finishes verification and are released
+before deleting the temporary AppContainer profile.
+
+**Scope:** This pins the *reopened filesystem files* identified by their
+paths and protects against path replacement across the two checkpoints.
+GetMappedFileNameW still separately confirms that the kernel-reported
+mapped-section path matches the Toolhelp path; documented Win32 APIs used
+here do not expose the original image section's underlying file ID.
+Consequently these checks do not cryptographically prove the exact bytes
+mapped in process memory, validate Authenticode signatures, or detect a DLL
+loaded and unloaded between snapshots. General run_command execution remains
+outside AppContainer and is not authorized by this fixed-operation check.
 
 ### Native-only lowbox startup environment
 
