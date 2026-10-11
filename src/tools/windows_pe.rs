@@ -100,7 +100,7 @@ fn system_module(name:&str)->bool{
         "setupapi.dll"|"shell32.dll"|"shlwapi.dll"|"sspicli.dll"|
         "ucrtbase.dll"|"user32.dll"|"userenv.dll"|"version.dll"|
         "winhttp.dll"|"wininet.dll"|"winmm.dll"|"winspool.drv"|
-        "ws2_32.dll"|"wtsapi32.dll"|"windows.storage.dll")
+        "ws2_32.dll"|"wtsapi32.dll"|"windows.storage.dll"|"wintrust.dll")
 }
 pub(crate) fn inspect_pe_imports(data:&[u8])->Result<PeImports>{
     if data.len()<512||data.len()>MAX_PE_BYTES{

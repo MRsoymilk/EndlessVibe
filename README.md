@@ -218,6 +218,8 @@ Worker 启动时的 SystemRoot、SystemDrive 和 PATH 现在由 Windows 原生�
 
 现进一步固定各映像对应的 Windows 文件句柄，并在两次检查期间核对卷序列号、文件索引、大小和修改时间，拒绝同名文件替换；仍不声称验证了内存映像字节或 Authenticode 签名。
 
+新增 Windows 离线 Authenticode 嵌入式签名诊断（WinVerifyTrust），仅检查已批准的 System32 MSVC 运行库，并在自检结果中区分验证通过与需进一步检查 Catalog 的情况。当前不校验 Catalog 或发布者身份，签名诊断不作为执行授权依据。
+
 - 本机 MCP（OAuth）：`http://127.0.0.1:20000/mcp`，**只监听 loopback**，不是供局域网设备直接调用的 HTTP 地址。
 - 本机 Dashboard：`http://127.0.0.1:20001/nodes`，**只允许本机访问**。
 - 局域网通信：TCP **20002 / TLS 1.3**；自动发现：UDP **20003 / multicast**。仅在可信 LAN 内放行所需端口。

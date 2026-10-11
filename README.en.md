@@ -218,6 +218,8 @@ The broker now compares each mapped section's kernel-reported NT-device filename
 
 It also pins each reopened image file by Windows handle and compares volume serial, file index, size and last-write time across both checks, rejecting same-name replacements. This does not prove mapped-memory bytes or Authenticode signatures.
 
+Offline embedded Authenticode diagnostics now use WinVerifyTrust for approved System32 MSVC runtime imports. Results distinguish trusted embedded signatures from cases requiring further Catalog verification; this is not a publisher-identity check or execution authorization.
+
 - Local MCP (OAuth): `http://127.0.0.1:20000/mcp`, **loopback only**, not an HTTP endpoint for other LAN computers.
 - Local Dashboard: `http://127.0.0.1:20001/nodes`, **loopback only**.
 - Node Transfer: **TCP 20002 / TLS 1.3**; discovery: **UDP 20003 / multicast**. Open these only on a trusted LAN.

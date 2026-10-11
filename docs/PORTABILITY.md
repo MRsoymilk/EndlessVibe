@@ -179,6 +179,36 @@ mapped in process memory, validate Authenticode signatures, or detect a DLL
 loaded and unloaded between snapshots. General run_command execution remains
 outside AppContainer and is not authorized by this fixed-operation check.
 
+### Offline embedded Authenticode diagnostics
+
+The fixed hash_input self-check also collects **diagnostics only** for its
+preapproved System32 MSVC runtime DLL imports. The privileged broker opens
+each runtime without following Windows reparse points and invokes the
+WINTRUST_ACTION_GENERIC_VERIFY_V2 trust provider via WinVerifyTrust, passing
+the opened file handle. The call uses WTD_UI_NONE and
+WTD_CACHE_ONLY_URL_RETRIEVAL: trust-chain checks do not perform online
+certificate or revocation downloads.
+
+A successful embedded trust-provider verdict is reported separately from
+a missing/untrusted embedded signature. Many genuine Windows DLLs are
+**catalog-signed rather than embedded-signed**, so a failed embedded-only
+check is not treated as proof of a malicious or unsigned DLL. The response
+returns only approved DLL basenames and diagnostic verdict labels, never
+absolute machine paths or certificate material.
+
+**Not an execution gate:** this stage does not validate system Catalog
+membership/signatures, pin a Microsoft publisher identity, implement an
+offline revocation policy, or authorize arbitrary executables. Existing
+AppContainer token, PE import whitelist, pinned file identity, and two
+module-gate checks remain the enforced boundary. Catalog and signer-policy
+verification must be reviewed before any signature result can authorize a
+new execution backend.
+
+Microsoft reference: WinVerifyTrust (wintrust.h),
+https://learn.microsoft.com/windows/win32/api/wintrust/nf-wintrust-winverifytrust ;
+WINTRUST_DATA offline flags,
+https://learn.microsoft.com/windows/win32/api/wintrust/ns-wintrust-wintrust_data .
+
 ### Native-only lowbox startup environment
 
 The fixed Worker no longer inherits `SystemRoot`, `SystemDrive`, `WINDIR`

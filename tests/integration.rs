@@ -1069,6 +1069,14 @@ fn native_appcontainer_cli_probes_fixed_worker_without_service_start(){
     assert_eq!(result["arbitrary_commands_supported"],false);
     assert_eq!(result["general_execution_backend"],false);
     assert_eq!(result["profile_crash_recovery_journaled"],true);
+    let signing=&result["signature_diagnostics"];
+    assert_eq!(signing["offline"],true);
+    assert_eq!(signing["catalog_signatures_checked"],false);
+    assert_eq!(signing["trusted_publisher_pinned"],false);
+    assert_eq!(signing["execution_gate"],false);
+    assert!(signing["checks"].as_array().is_some());
+    assert!(!signing.to_string().contains("\\Windows\\"),
+        "Signature diagnostics must not expose host system paths");
     assert_eq!(result["logs"]["bounded"],true);
     assert_eq!(result["logs"]["capture"],"private_files_without_parent_handle_inheritance");
     assert_eq!(result["logs"]["limit_bytes"],65536);

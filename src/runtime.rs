@@ -21,6 +21,12 @@ fn windows_sandbox_status(config:&Config)->Value{
             "status":"fixed_operation_probe_only",
             "local_self_check":"--probe-windows-sandbox",
             "production_worker_entrypoint":true,
+            "signature_diagnostics":{
+                "embedded_winverifytrust_offline":true,
+                "catalog_signatures_checked":false,
+                "publisher_identity_pinned":false,
+                "execution_gate":false,
+            },
             "worker_environment":{
                 "system_paths_from_native_windows_api":true,
                 "host_loader_path_inherited":false,
@@ -214,6 +220,10 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["backend_selectable"],false);
         assert_eq!(reported["appcontainer"]["status"],"fixed_operation_probe_only");
         assert_eq!(reported["appcontainer"]["production_worker_entrypoint"],true);
+        assert_eq!(reported["appcontainer"]["signature_diagnostics"]["embedded_winverifytrust_offline"],true);
+        assert_eq!(reported["appcontainer"]["signature_diagnostics"]["catalog_signatures_checked"],false);
+        assert_eq!(reported["appcontainer"]["signature_diagnostics"]["publisher_identity_pinned"],false);
+        assert_eq!(reported["appcontainer"]["signature_diagnostics"]["execution_gate"],false);
         assert_eq!(reported["appcontainer"]["worker_environment"]["system_paths_from_native_windows_api"],true);
         assert_eq!(reported["appcontainer"]["worker_environment"]["host_loader_path_inherited"],false);
         assert_eq!(reported["appcontainer"]["worker_environment"]["comspec_exposed"],false);

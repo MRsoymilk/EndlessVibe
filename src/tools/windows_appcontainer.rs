@@ -600,6 +600,9 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
     let loaded_modules=gate.summary()
         .context("Require pre- and post-operation live Windows module identity checks")?;
     trusted.verify().context("Verify lowbox Worker EXE after execution")?;
+    let signature_diagnostics=crate::tools::windows_signature::runtime_diagnostics(
+        &trusted.msvc_runtimes()
+    )?;
     let log_report=logs.finish()?;
     let artifact=profile.collect_result(RECEIPT_NAME,
         crate::tools::sandbox_protocol::MAX_RECEIPT_BYTES)?;
@@ -617,6 +620,7 @@ pub fn probe_fixed_operation(state_dir:&Path)->Result<serde_json::Value>{
         "receipt_sha256":artifact.sha256,
         "logs":log_report,
         "loaded_modules":loaded_modules,
+        "signature_diagnostics":signature_diagnostics,
         "trusted_worker":{"origin":"current_endlessvibe_executable","sha256":trusted.sha256(),
                           "bytes":trusted.bytes(),"verified_before_and_after":true,
                           "arbitrary_project_executables":false,
