@@ -63,7 +63,7 @@ pub(super) async fn forward_write<T:Serialize>(rt:&Arc<Runtime>,tool:&'static st
         Ok(None)=>return None,
         Err(error)=>return Some(answer(Err(error))),
     };
-    if !matches!(tool,"write_file"|"apply_patch"|"create_directory"|"run_command"|"git_commit"){
+    if !matches!(tool,"write_file"|"apply_patch"|"create_directory"|"run_command"|"git_commit"|"windows_service_update"){
         return Some(answer(Err(anyhow::anyhow!("Remote mutation is not approved for legacy routing"))));
     }
     let args=match canonical_args(a,&target){Ok(args)=>args,Err(error)=>return Some(answer(Err(error)))};

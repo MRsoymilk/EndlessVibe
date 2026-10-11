@@ -208,7 +208,7 @@ Authentication: OAuth 2.0
 
 LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限与 Owner Key。原公网地址签发的 OAuth Token 不再对新的本机资源有效。
 
-Windows 服务的远程自更新预检目前已作为只读 MCP 工具 `windows_service_update_plan` 实现，默认关闭；需要管理员在配置中明确启用并绑定一个精确 Project。该工具**不会更新服务**。详情参见 [Windows 部署安全规划](docs/WINDOWS_DEPLOY.md)。
+Windows 服务自更新现在提供 `windows_service_update_plan`、`windows_service_update` 与 `windows_service_update_status` 三个 MCP 工具，**默认关闭**；管理员必须显式绑定一个精确 Project。实际更新须 `confirm=true`、当前及候选版本 SHA-256 和唯一 request_id，由原生辅助进程完成优雅停服、更新与失败回滚，不启用 PowerShell。第一次仍需手动安装新版 Windows 子节点，并更新 Linux 父节点的 MCP 工具版本；完整安全边界见 [Windows 原生部署](docs/WINDOWS_DEPLOY.md)。
 
 **Windows AppContainer 沙箱自检：** 在 Windows 服务停止后执行 `cargo build --locked --target-dir target/windows-stage`，然后运行 `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`。该功能验证真实低权限令牌、Job Object 和固定 `hash_input` 回执，并以 64 KiB 合计预算校验私有 stdout/stderr、检测篡改并在超限时终止 Job；它不会启用任意命令沙箱，也不读取用户项目。详情见 [Windows 沙箱状态与限制](docs/PORTABILITY.md)。
 

@@ -9,9 +9,9 @@ use std::sync::Arc;
 #[derive(Clone,Debug,Serialize,Deserialize,JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeCallArgs{pub node_id:String,pub tool:String,#[serde(default)]pub arguments:Value,#[serde(default)]pub request_id:Option<String>}
-pub fn readonly(tool:&str)->bool{matches!(tool,"list_workspaces"|"list_projects"|"inspect_project"|"windows_service_update_plan"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"|"get_task_checkpoint"|"continue_task"|"list_task_checkpoints"|"request_status"|"request_history")}
-pub fn writable(tool:&str)->bool{matches!(tool,"write_file"|"apply_patch"|"create_directory"|"run_command"|"get_job"|"get_job_output"|"cancel_job"|"git_commit")}
-fn permission(tool:&str)->Option<&'static str>{match tool{"windows_service_update_plan"=>Some("execute"),"write_file"|"apply_patch"|"create_directory"=>Some("write"),"run_command"|"get_job"|"get_job_output"|"cancel_job"=>Some("execute"),"git_commit"=>Some("git"),t if readonly(t)=>Some("read"),_=>None}}
+pub fn readonly(tool:&str)->bool{matches!(tool,"list_workspaces"|"list_projects"|"inspect_project"|"windows_service_update_plan"|"windows_service_update_status"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"|"get_task_checkpoint"|"continue_task"|"list_task_checkpoints"|"request_status"|"request_history")}
+pub fn writable(tool:&str)->bool{matches!(tool,"write_file"|"apply_patch"|"create_directory"|"run_command"|"get_job"|"get_job_output"|"cancel_job"|"git_commit"|"windows_service_update")}
+fn permission(tool:&str)->Option<&'static str>{match tool{"windows_service_update_plan"|"windows_service_update"|"windows_service_update_status"=>Some("execute"),"write_file"|"apply_patch"|"create_directory"=>Some("write"),"run_command"|"get_job"|"get_job_output"|"cancel_job"=>Some("execute"),"git_commit"=>Some("git"),t if readonly(t)=>Some("read"),_=>None}}
 fn args<T:DeserializeOwned>(v:&Value)->Result<T>{serde_json::from_value(v.clone()).context("Invalid remote tool parameters")}
 fn target(v:&Value)->Result<(String,String)>{let w=v.get("workspace").and_then(Value::as_str).context("Remote request requires an exact workspace")?;let p=v.get("project").and_then(Value::as_str).context("Remote request requires an exact project")?;if w.is_empty()||p.is_empty(){bail!("Remote Project names cannot be empty");}Ok((w.into(),p.into()))}
 fn read_grant<'a>(peer:&'a Peer,w:&str,p:&str)->Result<&'a super::secure::Grant>{peer.grants.iter().find(|g|g.workspace==w&&g.project==p&&g.read).context("Remote read access was not granted for this Project")}
@@ -56,6 +56,13 @@ async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&st
  match tool{
  "list_workspaces"=>{let mut ids=peer.grants.iter().filter(|g|g.read).map(|g|g.workspace.clone()).collect::<Vec<_>>();ids.sort();ids.dedup();Ok(json!({"workspaces":ids.iter().map(|id|json!({"id":id})).collect::<Vec<_>>(),"node_id":rt.transfer.node_id}))}
  "list_projects"=>{let workspace=v.get("workspace").and_then(Value::as_str).context("workspace is required")?;let projects=peer.grants.iter().filter(|g|g.workspace==workspace&&g.read).filter_map(|g|rt.project_exact(workspace,&g.project).ok().map(|_|json!({"workspace":workspace,"id":g.project,"permissions":{"read":g.read,"write":g.write,"execute":g.execute,"git":g.git}}))).collect::<Vec<_>>();Ok(json!({"workspace":workspace,"projects":projects}))}
+ "windows_service_update_status"=>{
+  let a:WindowsServiceUpdateStatusArgs=args(&v)?;
+  rt.sync_project("transfer_windows_service_update_status",w,p,move|rt,project|{
+    #[cfg(windows)]{crate::tools::windows_service_deploy::status(&rt,&project,&a.request_id)}
+    #[cfg(not(windows))]{let _=(rt,project,a);bail!("Windows update status is Windows-only")}
+  }).await
+ }
  "windows_service_update_plan"=>{
   rt.project_exact(w,p)?;
   rt.sync_project("transfer_windows_service_update_plan",w,p,move|rt,project|{
@@ -78,6 +85,13 @@ async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&st
  "write_file"=>{let a:WriteArgs=args(&v)?;rt.sync_project("transfer_write_file",w,p,move|rt,project|filesystem::write(&rt,&project,a)).await}
  "apply_patch"=>{let a:PatchArgs=args(&v)?;rt.sync_project("transfer_apply_patch",w,p,move|rt,project|filesystem::patch(&rt,&project,a)).await}
  "create_directory"=>{let a:MakeDirectoryArgs=args(&v)?;rt.sync_project("transfer_create_directory",w,p,move|_,project|filesystem::mkdir(&project,a)).await}
+ "windows_service_update"=>{
+  let a:WindowsServiceUpdateArgs=args(&v)?;
+  rt.sync_project("transfer_windows_service_update",w,p,move|rt,project|{
+    #[cfg(windows)]{crate::tools::windows_service_deploy::request(&rt,&project,&a)}
+    #[cfg(not(windows))]{let _=(rt,project,a);bail!("Native Windows update requires a Windows child")}
+  }).await
+ }
  "run_command"=>{let a:CommandArgs=args(&v)?;rt.jobs.submit(rt.clone(),a,false).await}
  "get_job"=>{let a:JobArgs=args(&json!({"job_id":v["job_id"]}))?;let job=rt.jobs.get(&a.job_id)?;if job["workspace"]!=w||job["project"]!=p{bail!("Job does not belong to authorized Project");}Ok(job)}
  "get_job_output"=>{let a:OutputArgs=args(&json!({"job_id":v["job_id"],"offset":v.get("offset").cloned().unwrap_or(json!(0)),"limit":v.get("limit").cloned().unwrap_or(json!(8192))}))?;let job=rt.jobs.get(&a.job_id)?;if job["workspace"]!=w||job["project"]!=p{bail!("Job does not belong to authorized Project");}rt.jobs.output(a)}
@@ -88,6 +102,6 @@ async fn dispatch_inner(rt:Arc<Runtime>,peer:Peer,tool:&str,v:Value,w:&str,p:&st
 }
 #[cfg(test)]mod tests{
  use super::*;#[test]fn mutation_tool_allowlist_excludes_shell_and_push(){for tool in ["write_file","apply_patch","create_directory","run_command","git_commit","get_job","get_job_output","cancel_job"]{assert!(writable(tool));}for tool in ["run_shell","git_push","docker_restart","list_workspaces","read_file"]{assert!(!writable(tool));}assert_eq!(permission("git_commit"),Some("git"));}
- #[test]fn self_update_plan_requires_execute_grant_even_as_read_only_rpc(){assert!(readonly("windows_service_update_plan"));assert!(!writable("windows_service_update_plan"));assert_eq!(permission("windows_service_update_plan"),Some("execute"));}
+ #[test]fn self_update_plan_requires_execute_grant_even_as_read_only_rpc(){assert!(readonly("windows_service_update_plan"));assert!(!writable("windows_service_update_plan"));assert_eq!(permission("windows_service_update_plan"),Some("execute"));assert!(writable("windows_service_update"));assert!(!readonly("windows_service_update"));assert!(readonly("windows_service_update_status"));assert_eq!(permission("windows_service_update_status"),Some("execute"));assert_eq!(permission("windows_service_update"),Some("execute"));}
  #[test]fn remote_routes_require_exact_names(){assert!(target(&json!({"workspace":"w","project":"p"})).is_ok());assert!(target(&json!({"workspace":"w"})).is_err());assert!(target(&json!({"workspace":"w","project":""})).is_err());}
 }

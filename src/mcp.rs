@@ -7,8 +7,8 @@ use std::sync::Arc;
 mod legacy_remote;
 pub const SDK_VERSION:&str="3.5.0";
 /// Bump whenever any exposed MCP tool name, argument schema, security metadata or semantics change.
-pub const TOOL_SCHEMA_REVISION:&str="2026-10-11.3";
-pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","windows_service_update_plan","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push","docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart","node_list","node_read","node_write"];
+pub const TOOL_SCHEMA_REVISION:&str="2026-10-11.5";
+pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","windows_service_update_plan","windows_service_update","windows_service_update_status","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push","docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart","node_list","node_read","node_write"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
 const MCP_TEXT_MIRROR_MAX_BYTES:usize=2048;
 fn text_mirror(value:&Value)->String{let full=value.to_string();if full.len()<=MCP_TEXT_MIRROR_MAX_BYTES{return full;}let mut summary=serde_json::Map::new();for key in ["message","status","job_id","id","request_id","workspace","project","path","head","diff_sha256","has_changes","has_more","next_offset","commit","branch","reused"]{if let Some(v)=value.get(key){summary.insert(key.into(),v.clone());}}summary.insert("structured_content_bytes".into(),json!(full.len()));let message=summary.remove("message").unwrap_or_else(||json!("Large structured result attached; text mirror intentionally compact."));summary.insert("message".into(),message);Value::Object(summary).to_string()}
@@ -43,6 +43,30 @@ impl EndlessVibeMcp{
             {crate::tools::windows_service_update::plan_for_project(&rt,&project)}
             #[cfg(not(windows))]
             {let _=(rt,project);Err(anyhow::anyhow!("Windows self-update plan is only available on Windows"))}
+        }).await;
+        answer_logged(&self.rt,op,result)
+    }
+
+    #[tool(meta=tool_meta("windows_service_update"),description="Explicitly request a native Windows self-update of this same EndlessVibe service. Requires admin opt-in with one exact Project, execute+write grants, confirm=true, a stable request_id, and both full SHA-256 values from windows_service_update_plan. Does not execute shell or arbitrary programs; a detached native helper performs bounded graceful restart and attempts rollback.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]
+    async fn windows_service_update(&self,Parameters(a):Parameters<WindowsServiceUpdateArgs>)->CallToolResult{
+        let w=a.workspace.clone();let p=a.project.clone();
+        if let Some(out)=legacy_remote::forward_write(&self.rt,"windows_service_update",&w,&p,&a).await{return out;}
+        let op=begin(&self.rt,"windows_service_update",&w,&p,&a);
+        let result=self.rt.sync_project("windows_service_update",&w,&p,move|rt,project|{
+            #[cfg(windows)]{crate::tools::windows_service_deploy::request(&rt,&project,&a)}
+            #[cfg(not(windows))]{let _=(rt,project,a);Err(anyhow::anyhow!("Native Windows self-update is unavailable on this host"))}
+        }).await;
+        answer_logged(&self.rt,op,result)
+    }
+
+    #[tool(meta=tool_meta("windows_service_update_status"),description="Read one native Windows self-update result by exact request_id without replaying the update. Requires the same exact authorized Project and opt-in.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn windows_service_update_status(&self,Parameters(a):Parameters<WindowsServiceUpdateStatusArgs>)->CallToolResult{
+        let w=a.workspace.clone();let p=a.project.clone();
+        if let Some(out)=legacy_remote::forward_read(&self.rt,"windows_service_update_status",&w,&p,&a).await{return out;}
+        let op=begin(&self.rt,"windows_service_update_status",&w,&p,&a);
+        let result=self.rt.sync_project("windows_service_update_status",&w,&p,move|rt,project|{
+            #[cfg(windows)]{crate::tools::windows_service_deploy::status(&rt,&project,&a.request_id)}
+            #[cfg(not(windows))]{let _=(rt,project,a);Err(anyhow::anyhow!("Native Windows self-update status is unavailable on this host"))}
         }).await;
         answer_logged(&self.rt,op,result)
     }

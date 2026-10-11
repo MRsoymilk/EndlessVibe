@@ -21,6 +21,8 @@ pub mod windows_signature;
 #[cfg(windows)]
 pub mod windows_service_update;
 #[cfg(windows)]
+pub mod windows_service_deploy;
+#[cfg(windows)]
 pub mod windows_loaded_modules;
 pub mod tasks;
 pub mod types;

@@ -208,7 +208,7 @@ For custom configuration, pass an absolute `-ConfigPath 'C:\path\to\config.toml'
 
 The setting persists in `config.toml`, preserving all Workspace/Project grants and the owner key. Tokens issued for the previous public OAuth resource become invalid.
 
-A read-only `windows_service_update_plan` MCP preflight is available but disabled by default. Administrators must explicitly bind one exact trusted Project; this tool **does not deploy or restart services**. See [Windows deployment security](docs/WINDOWS_DEPLOY.md).
+Native Windows deployment now exposes three MCP tools: `windows_service_update_plan`, `windows_service_update`, and `windows_service_update_status`, **disabled by default** and bound to one explicit administrator-approved Project. A confirmed update requires both reviewed SHA-256 hashes and a unique request_id; a native detached helper performs graceful shutdown, version switching, and best-effort rollback without PowerShell. Bootstrap the new Windows child and Linux parent MCP builds once before using the tools. See [Windows deployment security](docs/WINDOWS_DEPLOY.md).
 
 **Windows AppContainer self-check:** After stopping the Windows service, run `cargo build --locked --target-dir target/windows-stage` and `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`. This verifies the native lowbox token, Job Object and fixed `hash_input` receipt, with a combined 64 KiB private stdout/stderr limit, tamper detection and Job termination on overflow; it does not enable a general command sandbox or read user Projects. See [Windows sandbox limitations](docs/PORTABILITY.md).
 

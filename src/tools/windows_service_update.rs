@@ -16,26 +16,30 @@ use std::{
     path::{Path,PathBuf},
 };
 
-const MAX_EXE_BYTES:u64=128*1024*1024;
+pub(crate) const MAX_EXE_BYTES:u64=128*1024*1024;
 const OPEN_REPARSE_POINT:u32=0x0020_0000;
 const REPARSE_POINT:u32=0x400;
 const STAGED_EXE:&str="target/windows-stage/debug/endlessvibe.exe";
 
 #[derive(Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
-struct InstalledManifest{
-    sha256:String,
+pub(crate) struct InstalledManifest{
+    pub(crate) sha256:String,
     #[serde(default)]
-    config_path:Option<String>,
+    pub(crate) config_path:Option<String>,
 }
 #[derive(Debug)]
-struct Installation{
-    sha256:String,
+pub(crate) struct Installation{
+    pub(crate) root:PathBuf,
+    pub(crate) manifest:PathBuf,
+    pub(crate) running:PathBuf,
+    pub(crate) sha256:String,
+    pub(crate) config_path:Option<String>,
 }
 pub(crate) fn digest_ok(value:&str)->bool{
     value.len()==64 && value.bytes().all(|v|v.is_ascii_hexdigit())
 }
-fn regular_file(path:&Path)->Result<File>{
+pub(crate) fn regular_file(path:&Path)->Result<File>{
     let metadata=fs::symlink_metadata(path)
         .with_context(||format!("Inspect Windows executable {}",path.display()))?;
     if !metadata.is_file()||metadata.file_attributes()&REPARSE_POINT!=0{
@@ -49,7 +53,7 @@ fn regular_file(path:&Path)->Result<File>{
     }
     Ok(file)
 }
-fn fingerprint(path:&Path)->Result<(String,Vec<u8>)>{
+pub(crate) fn fingerprint(path:&Path)->Result<(String,Vec<u8>)>{
     let file=regular_file(path)?;
     let length=file.metadata()?.len();
     if length==0||length>MAX_EXE_BYTES{bail!("Windows update EXE must be 1..128 MiB");}
@@ -58,14 +62,14 @@ fn fingerprint(path:&Path)->Result<(String,Vec<u8>)>{
     if data.len() as u64!=length{bail!("Windows update EXE changed during hashing");}
     Ok((format!("{:x}",Sha256::digest(&data)),data))
 }
-fn real_directory(path:&Path)->Result<()>{
+pub(crate) fn real_directory(path:&Path)->Result<()>{
     let m=fs::symlink_metadata(path)?;
     if !m.is_dir()||m.file_attributes()&REPARSE_POINT!=0{
         bail!("Windows update directory must not be a junction or symlink");
     }
     Ok(())
 }
-fn allowed_candidate(project:&Path)->Result<PathBuf>{
+pub(crate) fn allowed_candidate(project:&Path)->Result<PathBuf>{
     let mut current=project.to_owned();
     real_directory(&current)?;
     for name in ["target","windows-stage","debug"]{
@@ -81,7 +85,7 @@ fn allowed_candidate(project:&Path)->Result<PathBuf>{
     regular_file(&source)?;
     Ok(source)
 }
-fn installation_from_executable(running:&Path)->Result<Installation>{
+pub(crate) fn installation_from_executable(running:&Path)->Result<Installation>{
     let running=fs::canonicalize(running)?;
     if running.file_name().and_then(|n|n.to_str())!=Some("endlessvibe.exe"){
         bail!("Windows updater requires the installed EndlessVibe binary");
@@ -111,7 +115,8 @@ fn installation_from_executable(running:&Path)->Result<Installation>{
     if running_digest!=manifest.sha256.to_ascii_lowercase(){
         bail!("Windows installation manifest and running EXE bytes disagree");
     }
-    Ok(Installation{sha256:running_digest})
+    Ok(Installation{root:root.to_owned(),manifest:manifest_path,
+        running,sha256:running_digest,config_path:manifest.config_path})
 }
 pub fn plan_for_project(
     rt:&crate::runtime::Runtime,

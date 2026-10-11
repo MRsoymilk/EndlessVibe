@@ -26,6 +26,23 @@ pub struct CommandArgs{pub workspace:String,#[serde(default)] pub project: Strin
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct ShellArgs{pub workspace:String,#[serde(default)] pub project: String,pub script:String,#[serde(default="root_path")]pub cwd:String,pub request_id:String,pub timeout_seconds:Option<u64>,#[serde(default)]pub preflight_programs:Vec<String>,#[serde(default)]pub environment:BTreeMap<String,String>,#[serde(default)]pub network:Option<bool>,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String>}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
+pub struct WindowsServiceUpdateArgs {
+    pub workspace:String,
+    #[serde(default)]pub project:String,
+    pub expected_current_sha256:String,
+    pub expected_candidate_sha256:String,
+    pub request_id:String,
+    #[serde(default)]pub confirm:bool,
+}
+#[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsServiceUpdateStatusArgs {
+    pub workspace:String,
+    #[serde(default)]pub project:String,
+    pub request_id:String,
+}
+#[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobArgs{pub job_id:String}
 #[derive(Clone,Debug,Deserialize,Serialize,JsonSchema)]#[serde(deny_unknown_fields)]
 pub struct OutputArgs{pub job_id:String,#[serde(default)]pub offset:u64,#[serde(default="output_limit")]pub limit:usize}

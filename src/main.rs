@@ -197,6 +197,15 @@ async fn main()->Result<()>{
         // Internal lowbox worker never loads config or owner credentials.
         // Non-AppContainer invocations fail inside the verified worker.
         let args=std::env::args_os().skip(1).collect::<Vec<_>>();
+        // Detached native Windows updater accepts only one-time requests
+        // created by the authenticated service and persisted in its state.
+        if args.first().is_some_and(|arg|arg.to_string_lossy()=="--internal-windows-update"){
+            if args.len()!=3{bail!("Internal Windows updater needs exact config and one-time request token");}
+            let nonce=args[2].to_str().context("Invalid Windows update authorization token")?;
+            return endlessvibe::tools::windows_service_deploy::run_helper(
+                Path::new(args[1].as_os_str()),nonce
+            );
+        }
         if args.first().is_some_and(|arg|arg.to_string_lossy()=="--internal-sandbox-worker"){
             if args.len()!=1{bail!("Internal AppContainer worker accepts no other arguments");}
             return endlessvibe::tools::windows_appcontainer::run_fixed_worker_from_env();
@@ -244,7 +253,11 @@ async fn main()->Result<()>{
         return Ok(());
     }
     let listener=tokio::net::TcpListener::bind(settings.server.bind).await.with_context(||format!("Cannot listen on {}; stop the previous EndlessVibe process",settings.server.bind))?;settings.server.bind=listener.local_addr()?;
-    let rt=Runtime::new(settings,&path)?;let _service_pid=util::install_service_identity(&rt.config.security.data_dir)?;let app=server::create_router(rt.clone());
+    let rt=Runtime::new(settings,&path)?;
+    let _service_pid=util::install_service_identity(&rt.config.security.data_dir)?;
+    #[cfg(windows)]
+    endlessvibe::tools::windows_service_deploy::guard_startup(rt.clone())?;
+    let app=server::create_router(rt.clone());
     let telemetry_rt=rt.clone();let telemetry_task=tokio::spawn(async move{let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);loop{tokio::select!{_=telemetry_rt.shutdown.cancelled()=>break,_=interval.tick()=>{let(requests,rx_bytes,tx_bytes)=telemetry_rt.take_http_traffic();if requests>0||rx_bytes>0||tx_bytes>0{if let Err(error)=telemetry_rt.db.record_traffic(requests,rx_bytes,tx_bytes){tracing::warn!(error=%error,"Could not persist HTTP traffic metrics");}telemetry_rt.publish_dashboard("metrics_changed",serde_json::json!({"http_requests":requests,"rx_bytes":rx_bytes,"tx_bytes":tx_bytes,"active_jobs":telemetry_rt.jobs.active_count()}));}}}}let(requests,rx_bytes,tx_bytes)=telemetry_rt.take_http_traffic();if requests>0||rx_bytes>0||tx_bytes>0{let _=telemetry_rt.db.record_traffic(requests,rx_bytes,tx_bytes);}});
     let transfer_manager=rt.transfer.clone();let transfer_shutdown=rt.shutdown.clone();let transfer_rt=rt.clone();let transfer_task=tokio::spawn(async move{if let Err(error)=transfer_manager.run(transfer_shutdown,transfer_rt).await{tracing::warn!(error=%error,"Transfer discovery stopped");}});
     let dashboard_listener=tokio::net::TcpListener::bind("127.0.0.1:20001")
@@ -271,10 +284,11 @@ async fn main()->Result<()>{
         shutdown_signal(shutdown_handle).await;
         #[cfg(not(windows))]
         shutdown_signal().await;
+        shutdown_rt.jobs.stop_accepting();
         shutdown_rt.jobs.cancel_all();
         shutdown_rt.shutdown.cancel();
     }).await;
-    rt.shutdown.cancel();let _=transfer_task.await;dashboard_task.abort();let _=dashboard_task.await;let _=telemetry_task.await;
+    rt.jobs.stop_accepting();rt.shutdown.cancel();let _=transfer_task.await;dashboard_task.abort();let _=dashboard_task.await;let _=telemetry_task.await;
     rt.jobs.shutdown().await;rt.wait_for_operations().await;result.context("HTTP server failed")
 }
 async fn shutdown_signal(
