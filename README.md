@@ -208,6 +208,8 @@ Authentication: OAuth 2.0
 
 LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限与 Owner Key。原公网地址签发的 OAuth Token 不再对新的本机资源有效。
 
+Windows 服务的远程自更新预检目前已作为只读 MCP 工具 `windows_service_update_plan` 实现，默认关闭；需要管理员在配置中明确启用并绑定一个精确 Project。该工具**不会更新服务**。详情参见 [Windows 部署安全规划](docs/WINDOWS_DEPLOY.md)。
+
 **Windows AppContainer 沙箱自检：** 在 Windows 服务停止后执行 `cargo build --locked --target-dir target/windows-stage`，然后运行 `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`。该功能验证真实低权限令牌、Job Object 和固定 `hash_input` 回执，并以 64 KiB 合计预算校验私有 stdout/stderr、检测篡改并在超限时终止 Job；它不会启用任意命令沙箱，也不读取用户项目。详情见 [Windows 沙箱状态与限制](docs/PORTABILITY.md)。
 
 沙箱自检现在只暂存正在运行的 EndlessVibe 自身 EXE（最多 128 MiB），通过已打开文件句柄拷贝，并在低权限进程执行前后进行 SHA-256 校验；确认 Profile 清理及恢复记录移除后才报告成功。它不接受用户项目或第三方 EXE。 新增 PE64 静态导入表审计：拒绝未知 DLL 和延迟加载项；MSVC 运行库仅检查从 Windows System32 获取的文件并在执行前后重验摘要。此检查不等于完整的 Windows Loader 路径证明。 固定 Worker 运行前后还会通过父进程 Toolhelp 双快照核对已加载模块，拒绝 System32 之外的映像；该检查不能证明期间不存在短暂加载和卸载的模块，也不验证 Authenticode 签名。

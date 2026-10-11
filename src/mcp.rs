@@ -7,8 +7,8 @@ use std::sync::Arc;
 mod legacy_remote;
 pub const SDK_VERSION:&str="3.5.0";
 /// Bump whenever any exposed MCP tool name, argument schema, security metadata or semantics change.
-pub const TOOL_SCHEMA_REVISION:&str="2026-10-11.2";
-pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push","docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart","node_list","node_read","node_write"];
+pub const TOOL_SCHEMA_REVISION:&str="2026-10-11.3";
+pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","windows_service_update_plan","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push","docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart","node_list","node_read","node_write"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
 const MCP_TEXT_MIRROR_MAX_BYTES:usize=2048;
 fn text_mirror(value:&Value)->String{let full=value.to_string();if full.len()<=MCP_TEXT_MIRROR_MAX_BYTES{return full;}let mut summary=serde_json::Map::new();for key in ["message","status","job_id","id","request_id","workspace","project","path","head","diff_sha256","has_changes","has_more","next_offset","commit","branch","reused"]{if let Some(v)=value.get(key){summary.insert(key.into(),v.clone());}}summary.insert("structured_content_bytes".into(),json!(full.len()));let message=summary.remove("message").unwrap_or_else(||json!("Large structured result attached; text mirror intentionally compact."));summary.insert("message".into(),message);Value::Object(summary).to_string()}
@@ -32,6 +32,20 @@ impl EndlessVibeMcp{
 
     #[tool(meta=tool_meta("get_sandbox_diagnostics"),description="Inspect execution-tool visibility for the active sandbox, including host-only/missing programs and safe readonly-mount/PATH suggestions. Read-only; does not modify configuration.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
     async fn get_sandbox_diagnostics(&self)->CallToolResult{let op=empty(&self.rt,"get_sandbox_diagnostics");let result=self.rt.dashboard_sandbox_diagnostics().await;answer_logged(&self.rt,op,result)}
+
+    #[tool(meta=tool_meta("windows_service_update_plan"),description="Read-only Windows self-update preflight for one exact administrator-selected EndlessVibe Project. Reports the installed/candidate SHA-256 and PE import audit. Never executes PowerShell, changes a service or installs a binary.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn windows_service_update_plan(&self,Parameters(a):Parameters<ProjectArgs>)->CallToolResult{
+        let w=a.workspace.clone();let p=a.project.clone();
+        if let Some(out)=legacy_remote::forward_read(&self.rt,"windows_service_update_plan",&w,&p,&a).await{return out;}
+        let op=begin(&self.rt,"windows_service_update_plan",&w,&p,&a);
+        let result=self.rt.sync_project("windows_service_update_plan",&w,&p,move|rt,project|{
+            #[cfg(windows)]
+            {crate::tools::windows_service_update::plan_for_project(&rt,&project)}
+            #[cfg(not(windows))]
+            {let _=(rt,project);Err(anyhow::anyhow!("Windows self-update plan is only available on Windows"))}
+        }).await;
+        answer_logged(&self.rt,op,result)
+    }
 
     #[tool(meta=tool_meta("list_workspaces"),description="List configured workspace roots. A workspace is a management root that contains independently locked projects.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
     fn list_workspaces(&self)->CallToolResult{let op=empty(&self.rt,"list_workspaces");answer_logged(&self.rt,op,Ok(self.rt.workspaces_summary()))}

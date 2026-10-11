@@ -8,7 +8,7 @@ pub fn required_scopes(tool:&str)->&'static [&'static str]{
         "node_write"=>&["files:write","commands:execute","git:write"],
         "node_read"|"list_directory"|"read_file"|"search_code"|"git_status"|"git_diff"|"git_log"=>&["files:read"],
         "write_file"|"apply_patch"|"create_directory"=>&["files:write"],
-        "run_command"|"run_shell"=>&["commands:execute","files:write"],
+        "run_command"|"run_shell"|"windows_service_update_plan"=>&["commands:execute","files:write"],
         "start_task"=>&["commands:execute"],
         "get_sandbox_diagnostics"|"get_job"|"get_job_output"|"cancel_job"|"list_jobs"=>&["commands:execute"],
         "git_commit"=>&["git:write","files:write"],

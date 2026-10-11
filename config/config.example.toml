@@ -14,6 +14,10 @@ allow_http_loopback = false
 extra_redirect_uris = []
 access_token_seconds = 3600
 refresh_token_seconds = 2592000
+# Windows-only deployment capability (disabled by default). Do not enable
+# unless the one explicitly trusted Project is audited. This is not shell access.
+allow_windows_service_update = false
+# windows_update_project = 'F:\project\EndlessVibe'
 
 [limits]
 max_file_bytes = 2097152

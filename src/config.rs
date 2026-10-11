@@ -13,8 +13,8 @@ pub struct Server { pub bind: SocketAddr, pub public_url: String, pub allowed_ho
 impl Default for Server { fn default() -> Self { Self { bind: "0.0.0.0:20000".parse().unwrap(), public_url: "https://mcp.example.com".into(), lan_only: false, allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "host.docker.internal".into(), "endlessvibe".into()] } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Security { pub data_dir: PathBuf, pub allow_http_loopback: bool, pub extra_redirect_uris: Vec<String>, pub access_token_seconds: u64, pub refresh_token_seconds: u64 }
-impl Default for Security { fn default() -> Self { Self { data_dir: default_state_dir(), allow_http_loopback: false, extra_redirect_uris: vec![], access_token_seconds: 3600, refresh_token_seconds: 30 * 86400 } } }
+pub struct Security { pub data_dir: PathBuf, pub allow_http_loopback: bool, pub extra_redirect_uris: Vec<String>, pub access_token_seconds: u64, pub refresh_token_seconds: u64, pub allow_windows_service_update: bool, pub windows_update_project: Option<PathBuf> }
+impl Default for Security { fn default() -> Self { Self { data_dir: default_state_dir(), allow_http_loopback: false, extra_redirect_uris: vec![], access_token_seconds: 3600, refresh_token_seconds: 30 * 86400, allow_windows_service_update:false, windows_update_project:None } } }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits { pub max_file_bytes: usize, pub max_read_bytes: usize, pub max_output_bytes: usize, pub command_timeout_seconds: u64, pub max_jobs: usize, pub retained_jobs: usize, pub search_max_files: usize, pub search_max_bytes: usize }
@@ -111,6 +111,16 @@ impl Config {
         if url.scheme() != "https" && !(self.security.allow_http_loopback && url.scheme() == "http" && loopback) { bail!("server.public_url must use HTTPS (HTTP loopback is opt-in for local tests)"); }
         if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() || !matches!(url.path(), "" | "/") { bail!("server.public_url must be an origin without credentials, path, query or fragment"); }
         if !self.security.data_dir.is_absolute() { bail!("security.data_dir must be absolute"); }
+        if self.security.allow_windows_service_update {
+            if !cfg!(windows){bail!("Windows service updates cannot be enabled on other platforms");}
+            let project=self.security.windows_update_project.as_ref()
+                .context("Windows service update opt-in needs security.windows_update_project")?;
+            if !project.is_absolute()||project.components().any(|c|matches!(c,std::path::Component::ParentDir)){
+                bail!("Windows self-update Project must be one exact absolute directory without ..");
+            }
+        }else if self.security.windows_update_project.is_some(){
+            bail!("security.windows_update_project requires allow_windows_service_update=true");
+        }
         if !(60..=86400).contains(&self.security.access_token_seconds) || !(3600..=90 * 86400).contains(&self.security.refresh_token_seconds) { bail!("Invalid OAuth token lifetime"); }
         if !(1..=16).contains(&self.limits.max_jobs) || !(1..=1000).contains(&self.limits.retained_jobs) || !(1..=3600).contains(&self.limits.command_timeout_seconds) { bail!("Invalid job/timeout limits"); }
         if !(4096..=16 * 1024 * 1024).contains(&self.limits.max_file_bytes) || self.limits.max_read_bytes == 0 || self.limits.max_read_bytes > self.limits.max_file_bytes || !(4096..=8 * 1024 * 1024).contains(&self.limits.max_output_bytes) { bail!("Invalid file/output limits"); }
@@ -162,6 +172,24 @@ impl Config {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn windows_service_update_requires_explicit_exact_project_opt_in(){
+        let mut config=Config::default();
+        assert!(!config.security.allow_windows_service_update);
+        assert!(config.security.windows_update_project.is_none());
+        assert!(config.validate().is_ok());
+        config.security.allow_windows_service_update=true;
+        assert!(config.validate().is_err(),"Updating without a configured Project must fail");
+        config.security.windows_update_project=Some(PathBuf::from("relative/project"));
+        assert!(config.validate().is_err(),"Relative self-update project paths must fail");
+        config.security.windows_update_project=Some(if cfg!(windows){
+            PathBuf::from(r"F:\project\EndlessVibe")
+        }else{PathBuf::from("/tmp/EndlessVibe")});
+        if cfg!(windows){assert!(config.validate().is_ok());}
+        else{assert!(config.validate().is_err(),"Non-Windows platforms cannot opt in");}
+        config.security.allow_windows_service_update=false;
+        assert!(config.validate().is_err(),"An opt-in path alone must not enable updates");
+    }
     #[test]fn search_resource_limits_are_bounded(){let mut c=Config::default();assert!(c.validate().is_ok());c.limits.search_max_files=0;assert!(c.validate().is_err());c.limits.search_max_files=100001;assert!(c.validate().is_err());c.limits.search_max_files=5000;c.limits.search_max_bytes=1024*1024*1024+1;assert!(c.validate().is_err());}
     #[test]
     fn lan_only_uses_loopback_mcp_and_encrypted_transfer_nodes() {
