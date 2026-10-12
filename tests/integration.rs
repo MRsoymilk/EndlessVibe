@@ -63,6 +63,96 @@ fn dashboard_starts_with_generic_paths_and_config_defaults(){
 
 
 #[tokio::test]
+async fn dashboard_setup_is_local_and_distinguishes_saved_from_active_connection(){
+    let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;});
+    let app=server::create_dashboard_router(f.rt.clone());let public=server::create_router(f.rt.clone());
+    let initial=json_body(http(&app,"GET","/api/setup",Body::empty(),None,None,None).await).await;
+    assert_eq!(initial["needs_setup"],true);assert_eq!(initial["requires_restart"],false);
+    assert_eq!(initial["workspace_count"],0);assert_eq!(initial["active"]["bind"],"127.0.0.1:20000");
+    assert_eq!(initial["public_reachability"],"not_checked");assert_eq!(initial["chatgpt_connection"],"not_verified");
+    assert!(!initial.to_string().contains(&f.owner));assert!(!f.rt.config.transfer.enabled);
+    for path in ["/setup","/api/setup","/assets/js/setup.js"]{
+        let response=http(&app,"GET",path,Body::empty(),None,None,None).await;
+        assert_eq!(response.status(),StatusCode::OK,"{path}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL],"no-store");
+        assert_eq!(http(&public,"GET",path,Body::empty(),None,None,None).await.status(),StatusCode::NOT_FOUND,"{path} must remain local");
+    }
+    let page=http(&app,"GET","/setup",Body::empty(),None,None,None).await;
+    let html=String::from_utf8(to_bytes(page.into_body(),2*1024*1024).await.unwrap().to_vec()).unwrap();
+    assert!(html.contains("data-page=\"setup\""));
+    let put=|origin:Option<&str>,body:Value|{
+        let mut request=Request::builder().method("PUT").uri("/api/setup").header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json");
+        if let Some(origin)=origin{request=request.header(header::ORIGIN,origin);}
+        request.body(Body::from(body.to_string())).unwrap()
+    };
+    let body=json!({"expected_revision":initial["revision"],"public_url":"Demo.ngrok-free.app","connection_mode":"loopback"});
+    for origin in [None,Some("https://outside.ngrok.app")]{assert_eq!(app.clone().oneshot(put(origin,body.clone())).await.unwrap().status(),StatusCode::FORBIDDEN);}
+    let owner_before=std::fs::read(f.rt.config.owner_key_path()).unwrap();
+    let saved=app.clone().oneshot(put(Some("http://localhost:20001"),body.clone())).await.unwrap();assert_eq!(saved.status(),StatusCode::OK);
+    let saved=json_body(saved).await;assert_eq!(saved["saved"]["mcp_endpoint"],"https://demo.ngrok-free.app/mcp");
+    assert_eq!(saved["active"]["mcp_endpoint"],"http://127.0.0.1:20000/mcp");assert_eq!(saved["requires_restart"],true);
+    assert_eq!(saved["needs_setup"],false);assert_eq!(saved["startup_override_detected"],false);
+    assert_eq!(app.clone().oneshot(put(Some("http://localhost:20001"),body)).await.unwrap().status(),StatusCode::CONFLICT);
+    assert_eq!(std::fs::read(f.rt.config.owner_key_path()).unwrap(),owner_before);assert_eq!(f.rt.workspace_project_counts(),(0,0));
+    let metadata=json_body(http(&public,"GET","/.well-known/oauth-protected-resource",Body::empty(),None,None,None).await).await;
+    assert_eq!(metadata["resource"],"http://127.0.0.1:20000/mcp","save must not change OAuth in the running process");
+    let hidden=Request::builder().method("PUT").uri("/api/setup").header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from("{}")).unwrap();
+    assert_eq!(public.clone().oneshot(hidden).await.unwrap().status(),StatusCode::NOT_FOUND);
+    let old_token=f.rt.auth.issue_local_token().unwrap();let config_path=f.rt.config_path.clone();drop(app);drop(public);
+    let Fixture{_dir,rt,owner}=f;drop(rt);
+    let restarted=Runtime::new(Config::load_file(&config_path).unwrap(),&config_path).unwrap();
+    let applied=restarted.dashboard_setup().unwrap();assert_eq!(applied["requires_restart"],false);assert_eq!(applied["connection_matches_saved"],true);
+    assert_eq!(applied["active"]["mcp_endpoint"],"https://demo.ngrok-free.app/mcp");
+    assert_eq!(std::fs::read(restarted.config.owner_key_path()).unwrap(),owner_before);
+    let router=server::create_router(restarted.clone());
+    let request=Request::builder().uri("/.well-known/oauth-authorization-server").header(header::HOST,"demo.ngrok-free.app").body(Body::empty()).unwrap();
+    let metadata=json_body(router.clone().oneshot(request).await.unwrap()).await;assert_eq!(metadata["issuer"],"https://demo.ngrok-free.app");
+    let response=http(&router,"POST","/mcp",Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_workspaces","arguments":{}}}"#),Some("application/json"),Some(&old_token),None).await;
+    assert_eq!(response.status(),StatusCode::OK);
+    let challenge=response.headers()[header::WWW_AUTHENTICATE].to_str().unwrap().to_owned();
+    assert!(challenge.contains("resource_metadata=\"https://demo.ngrok-free.app/.well-known/oauth-protected-resource\""));
+    assert!(challenge.contains("error=\"invalid_token\""));
+    let rejected=json_body(response).await;
+    assert_eq!(rejected["result"]["isError"],true,"old origin tokens must not authorize the new domain");
+    assert_eq!(rejected["result"]["_meta"]["mcp/www_authenticate"][0],challenge);
+    assert!(rejected["result"]["structuredContent"].is_null());
+    let f=Fixture{_dir,rt:restarted,owner};let (_,token)=oauth_login(&f,&router,"files:read").await;
+    assert!(token["access_token"].is_string(),"new OAuth authorization must work after switching domains");
+}
+#[tokio::test]
+async fn dashboard_setup_adds_first_workspace_without_implicit_project_access(){
+    let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;});
+    let root=f._dir.path().join("workspace");let app=server::create_dashboard_router(f.rt.clone());
+    let post=|path:&str,body:Value|Request::builder().method("POST").uri(path).header(header::HOST,"localhost")
+        .header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(body.to_string())).unwrap();
+    let initial=f.rt.dashboard_setup().unwrap();
+    let body=json!({"expected_revision":initial["revision"],"id":"work","path":root});
+    let saved=app.clone().oneshot(post("/api/workspaces",body.clone())).await.unwrap();assert_eq!(saved.status(),StatusCode::OK);
+    let saved=json_body(saved).await;assert_eq!(saved["requires_restart"],false);assert_eq!(saved["workspace"]["project_count"],0);
+    assert_eq!(f.rt.workspace_project_counts(),(1,0));
+    assert_eq!(app.clone().oneshot(post("/api/workspaces",body)).await.unwrap().status(),StatusCode::CONFLICT);
+    let revision=saved["revision"].clone();
+    for (id,path) in [("state",f.rt.config.security.data_dir.clone()),("config",f._dir.path().to_owned()),("overlap",root.join("project"))]{
+        let response=app.clone().oneshot(post("/api/workspaces",json!({"expected_revision":revision,"id":id,"path":path}))).await.unwrap();
+        assert_eq!(response.status(),StatusCode::BAD_REQUEST,"{id}");
+    }
+    let add=json!({"expected_revision":revision,"workspace":"work","project":"app","path":root.join("project"),"allow_write":true,"allow_exec":false,"allow_git_commit":false});
+    let added=app.clone().oneshot(post("/api/projects",add)).await.unwrap();assert_eq!(added.status(),StatusCode::OK);
+    assert_eq!(json_body(added).await["requires_restart"],false);assert_eq!(f.rt.workspace_project_counts(),(1,1));
+    let project=f.rt.project("work","app").unwrap();assert!(project.config.allow_write);assert!(!project.config.allow_exec&&!project.config.allow_git_commit);
+    let public=server::create_router(f.rt.clone());assert_eq!(public.oneshot(post("/api/workspaces",json!({}))).await.unwrap().status(),StatusCode::NOT_FOUND);
+}
+#[tokio::test]
+async fn dashboard_setup_identifies_startup_overrides_even_when_file_revision_is_current(){
+    let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;c.server.public_url="https://saved.ngrok.app".into();c.security.allow_http_loopback=false;});
+    let path=f.rt.config_path.clone();let mut effective=(*f.rt.config).clone();effective.server.public_url="https://override.ngrok.app".into();
+    let Fixture{_dir,rt,owner:_}=f;drop(rt);let rt=Runtime::new(effective,&path).unwrap();
+    let status=rt.dashboard_setup().unwrap();assert_eq!(status["startup_override_detected"],true);
+    assert_eq!(status["requires_restart"],true);assert_eq!(status["connection_matches_saved"],false);
+    assert_eq!(status["saved"]["public_url"],"https://saved.ngrok.app");assert_eq!(status["active"]["public_url"],"https://override.ngrok.app");
+    assert_eq!(status["revision"],endlessvibe::config_edit::revision(&path).unwrap());drop(rt);drop(_dir);
+}
+#[tokio::test]
 async fn dashboard_execution_backend_requires_local_explicit_confirmation_and_restart(){
     let f=fixture(|c|{
         c.execution.backend="disabled".into();

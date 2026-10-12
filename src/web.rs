@@ -1,4 +1,4 @@
-use crate::{config_edit::{AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateExecutionBackendRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest,UpdateTransferRequest},runtime::Runtime};
+use crate::{config_edit::{AddWorkspaceRequest,UpdateConnectionRequest,AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateExecutionBackendRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest,UpdateTransferRequest},runtime::Runtime};
 use axum::{extract::{Path as AxumPath,Query,State},http::{header,StatusCode},response::{sse::{Event,KeepAlive,Sse},Html,IntoResponse,Response},Json};
 use serde::Deserialize;
 use serde_json::{json,Value};
@@ -57,6 +57,10 @@ pub async fn node_update_grants(
     mutation_response(rt.finish_operation(trace,result))
 }
 pub async fn node_pair_revoke(State(rt):State<Arc<Runtime>>,AxumPath(node_id):AxumPath<String>)->Response{mutation_response(rt.transfer.revoke_pair(&node_id))}
+pub async fn setup(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_setup())}
+pub async fn update_connection(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateConnectionRequest>)->Response{mutation_response(rt.dashboard_update_connection(request))}
+pub async fn add_workspace(State(rt):State<Arc<Runtime>>,Json(request):Json<AddWorkspaceRequest>)->Response{mutation_response(rt.dashboard_add_workspace(request))}
+pub async fn javascript_setup()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/setup.js"))}
 pub async fn config(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_config(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn project_states(State(rt):State<Arc<Runtime>>)->Response{let mut projects=Vec::new();for(workspace_id,project)in rt.projects_snapshot(){let base=json!({"workspace":workspace_id.clone(),"project":project.config.id});let value=match project.lock.clone().try_lock_owned(){Ok(_guard)=>match crate::tools::git::status(&rt,&project).await{Ok(status)=>{let changes=status["entries"].as_array().map(|v|v.len()).unwrap_or(0);json!({"workspace":workspace_id,"project":project.config.id,"state":"ready","branch":status["branch"],"head":status["head"],"changes":changes,"dirty":changes>0})},Err(error)=>{let message=format!("{error:#}");let state=if message.contains("not a standalone Git repository")||message.contains(".git must be a real directory"){"not_repository"}else{"unavailable"};let mut value=base;value["state"]=json!(state);value}},Err(_)=>{let mut value=base;value["state"]=json!("busy");value}};projects.push(value);}Json(json!({"generated_at":crate::util::now(),"projects":projects})).into_response()}
 pub async fn reload_config(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_reload_config())}
