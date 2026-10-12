@@ -71,7 +71,7 @@
 | **Commands & Jobs** | 异步命令、持久 Job ID、输出分页、超时、取消、请求去重 |
 | **Git Workflow** | Status、Diff 审查、Log、Commit；按需启用本地 Git 修改或受限 Push |
 | **Tasks & Recovery** | `task_id + stage` Checkpoint、Job 关联、提交恢复点、重启诊断 |
-| **Dashboard** | 状态图表、Projects、Tasks、Operations、Nodes、配置与存储管理 |
+| **Dashboard** | 首次运行 Setup、ChatGPT 连接帮助、状态图表、Projects、Tasks、Operations、Nodes、配置与存储管理 |
 | **Authentication** | OAuth 2.0 Authorization Code、PKCE、动态客户端注册及工具 Scope |
 | **Node Transfer** | 局域网发现、TLS 配对、Project 授权、远程请求状态与历史 |
 | **Execution Profiles** | Linux Bubblewrap、Windows AppContainer 离线沙箱；显式项目授权 |
@@ -110,15 +110,91 @@ cargo build --release
 cargo test --locked
 ```
 
-Linux 可选：检查 Bubblewrap 环境是否具备所需工具链（macOS / Windows 不运行此命令）。
+### 2. Start and open Setup
+
+全新平台无需预先填写域名或 Workspace，直接启动程序：
 
 ```bash
-./target/release/endlessvibe --check-sandbox
+./target/release/endlessvibe
 ```
 
-### 2. Initialize
+Windows 对应命令为 `.\target\release\endlessvibe.exe`。将程序安装到 PATH 后，也可直接运行 `endlessvibe`。
 
-准备一个已存在的 Workspace 根目录，再初始化配置：
+配置不存在时，程序自动创建私有配置和 Owner Key，然后提供本机 [初始化与连接帮助](http://127.0.0.1:20001/setup)。初始配置没有任何 Workspace 或 Project，Node Transfer 默认关闭，命令执行沿用所在平台的安全默认值。
+
+| 入口 | 网页首次初始化的默认值 |
+| --- | --- |
+| **Setup / 连接帮助** | [http://127.0.0.1:20001/setup](http://127.0.0.1:20001/setup)，仅本机 |
+| **Dashboard** | [http://127.0.0.1:20001](http://127.0.0.1:20001)，仅本机 |
+| **MCP** | `127.0.0.1:20000`，本机资源地址 `http://127.0.0.1:20000/mcp` |
+| **Workspace / Project** | 均为空，添加前没有项目可供客户端操作 |
+| **Nodes / Transfer** | 关闭，后续可按需要配置与配对 |
+
+已有安装正常启动时沿用原配置，不会切换监听地址、删除项目或重置密钥。
+
+### 3. Configure from the browser
+
+在 `/setup` 中完成以下配置：
+
+1. **添加 Workspace 管理根。** 填写简单 ID 和已经存在的绝对目录，例如 `projects` 与 `/home/user/projects`，或 Windows 的 `D:\project`。登记管理根不会自动授权其中的项目；随后前往 **Projects** 页面选择具体项目及其读写、执行、Git 权限。
+2. **设置对外 HTTPS 域名。** 填写实际分配给你或由你管理的域名；例如将 `your-domain.ngrok.app` 或 `https://your-domain.ngrok.app` 替换为自己的 ngrok 域名。裸域名会补全为 HTTPS；此处填写域名或 origin，不附加 `/mcp`、密钥或查询参数。页面根据配置给出 MCP 地址和连接步骤。
+3. **配置 Tunnel 或反向代理。** 将该 HTTPS 域名转发到服务实际的 MCP 监听端口，并保留 MCP 与 OAuth 端点的路由。域名设置写入 EndlessVibe 配置；DNS、证书或 Tunnel 仍由所使用的平台管理。
+
+例如，在本机安装并配置 ngrok 后，可使用账户中可用的域名：
+
+```bash
+ngrok http 20000 --url https://your-domain.ngrok.app
+```
+
+把示例域名替换为实际分配或配置的域名，并在 Setup 中保存相同的 HTTPS origin；把 `20000` 替换为当前 MCP 监听端口。`20001` 是本机管理 Dashboard，保持仅本机访问。ngrok 参数详见 [官方 CLI 文档](https://ngrok.com/docs/gateway/agent/cli)；Cloudflare 部署见 [Tunnel 配置](docs/DOCKER_TUNNEL.md)。
+
+### 4. Save and apply configuration
+
+服务地址等配置保存后，页面会区分**已保存配置**与**当前运行状态**，提示是否需要重启。按原有启动方式重启：手动启动的实例使用终端或已有进程控制；systemd、Windows 服务或其他服务管理器管理的实例使用原管理器。网页提供操作提示，保存本身不会重启进程。
+
+`ENDLESSVIBE_BIND`、`ENDLESSVIBE_PUBLIC_URL` 环境变量，以及启动时的 `--bind`、`--public-url` 参数可覆盖配置文件。若重启后仍显示旧地址，应同时检查原服务的环境变量和启动参数。重启后返回 Setup，核对实际生效地址，再继续连接客户端。
+
+Linux / Windows 可通过 `--status`、`--stop`、`--restart` 管理已配置的服务实例。Windows 使用进程启动时间校验和专用退出事件优雅停止；从旧版升级时，须先用 Ctrl+C 或原服务管理器停止旧进程一次。macOS 使用原启动方式停止并启动。这些操作不需要开启 `host` 执行后端。
+
+### 5. Connect ChatGPT
+
+确认 HTTPS 入口和 OAuth 端点已可用后，在 ChatGPT 中操作：
+
+1. 打开 [ChatGPT Plugins](https://chatgpt.com/plugins)，点击 **+ → Add custom MCP server**。
+2. 填写名称与说明，输入完整的 `https://你的域名/mcp`，选择 OAuth。EndlessVibe 使用现有的动态客户端注册（DCR）。
+3. 按页面提示确认权限，选择 **Create as a plugin**，检查发现的工具并安装。
+4. 需要登录时，在你本机浏览器中的 **EndlessVibe OAuth 授权页面**输入 Owner Key 并确认授权。这个流程不需要 OpenAI API Key。
+5. 新建会话，输入 `@` 选择 EndlessVibe，再尝试列出已授权项目。
+
+**保存域名或本机配置成功不代表 ChatGPT 已经连接。** 需要完成插件安装、OAuth 授权和实际工具调用；Setup 不会把本机配置检查显示为公网连通性验证。Owner Key、访问令牌和登录凭据不要填写到 MCP URL 或聊天消息中。
+
+界面入口及账户策略以 [OpenAI 官方接入说明](https://developers.openai.com/plugins/deploy/connect-chatgpt) 和 [OAuth 说明](https://developers.openai.com/plugins/build/auth) 为准。其他 MCP 客户端使用相同的 HTTPS `/mcp` 地址与 OAuth；服务端细节见 [OAuth 接入](docs/OAUTH.md)。
+
+### Reopen Setup
+
+可执行文件已加入 PATH 时，可随时运行：
+
+```bash
+endlessvibe --init
+```
+
+Windows 从项目源码根目录运行时，可直接使用以下命令，无需先添加 PATH：
+
+```powershell
+.\target\release\endlessvibe.exe --init
+```
+
+如使用自定义配置，可加 `--config`。Windows 示例（将路径替换为实际配置文件）：
+
+```powershell
+.\target\release\endlessvibe.exe --init --config "C:\path\to\config.toml"
+```
+
+如果服务正在运行，命令输出已有 `/setup` 地址后退出；如果服务已停止，则使用原配置启动。已有配置、Owner Key、Workspace / Project 授权和注释都会保留。`--init` 重新打开引导，不会清空安装数据。
+
+### Optional: explicit CLI initialization
+
+尚未创建配置时，也可保留原来的命令行初始化流程。以下 `--init --workspace ...` 会创建配置后退出，已有配置不会被覆盖：
 
 ```bash
 mkdir -p "$HOME/projects"
@@ -127,47 +203,15 @@ mkdir -p "$HOME/projects"
   --init \
   --workspace "projects=$HOME/projects" \
   --public-url https://mcp.example.com
-```
 
-`--init` 会创建配置和私有状态（包含 Owner Key）；不会自动向客户端授予项目权限。
-
-### 3. Add a Project
-
-```bash
-# 请先确保目标目录已经存在
+# 目标项目目录须已存在；--add-project 要求服务停止
 ./target/release/endlessvibe \
   --add-project "projects:website=$HOME/projects/website"
-```
 
-Project 必须位于已登记的 Workspace 根目录之内。首次添加时也可选择 `--read-only` 或 `--no-exec` 收紧权限。
-
-### 4. Start
-
-```bash
 ./target/release/endlessvibe
 ```
 
-| 入口 | 默认地址 / 说明 |
-| --- | --- |
-| **Dashboard** | [http://127.0.0.1:20001](http://127.0.0.1:20001)（仅本地） |
-| **MCP** | `/mcp`，默认在 `20000` 端口监听；公网部署须配合 HTTPS |
-| **Nodes / Transfer** | 默认关闭；需要独立配置及双方确认配对 |
-
-可通过 `--status`、`--stop`、`--restart` 管理服务进程。Windows 使用进程启动时间校验和专用退出事件优雅停止实例；从旧 Windows 版本升级后，须先用 Ctrl+C 或服务管理器停止旧进程一次，启动新版后才能通过 `--restart` 管理。该能力不需要开启 `host` 执行后端。
-
-### 5. Connect an MCP Client
-
-在 ChatGPT 或其他支持 MCP 的客户端中配置：
-
-```text
-Name:           EndlessVibe
-Server URL:     https://mcp.example.com/mcp
-Authentication: OAuth 2.0
-```
-
-把示例域名替换为实际的 `server.public_url`。反向代理 / Tunnel 除 `/mcp` 外，还必须放行 OAuth 相关端点。**不要将 `owner.key`、令牌或登录凭据放进 URL。**
-
-详见 [OAuth 接入](docs/OAUTH.md) 与 [Cloudflare Tunnel](docs/DOCKER_TUNNEL.md)。
+Project 必须位于登记的 Workspace 根目录内。添加时可用 `--read-only` 或 `--no-exec` 收紧权限。Linux 已有配置可在需要时运行 `./target/release/endlessvibe --check-sandbox` 检查 Bubblewrap 和工具链；诊断、凭据维护及进程管理命令不会自动创建缺失配置。
 
 ## 局域网模式（无需公网 ChatGPT URL）
 
@@ -179,7 +223,7 @@ Authentication: OAuth 2.0
 .\target\debug\endlessvibe.exe --init --lan-only --workspace "projects=C:\path\to\projects"
 ```
 
-**Windows 已执行过 `--init` 的现有安装**（不删除配置或 owner.key）：
+**Windows 已有配置的安装**（包括首次网页初始化，不删除配置或 owner.key）：
 
 ```powershell
 # 先停止正在运行的 EndlessVibe，然后只执行一次转换
@@ -291,7 +335,15 @@ flowchart TB
 
 ## Configuration
 
-配置文件默认位于 `~/.config/endlessvibe/config.toml`，状态目录默认位于 `~/.local/state/endlessvibe`（遵循对应的 XDG 环境变量）。
+默认配置与状态路径随平台变化：
+
+| 平台 | 配置文件 | 私有状态目录 |
+| --- | --- | --- |
+| Linux | `~/.config/endlessvibe/config.toml` | `~/.local/state/endlessvibe` |
+| Windows | `%APPDATA%\EndlessVibe\config.toml` | `%LOCALAPPDATA%\EndlessVibe` |
+| macOS | `~/Library/Application Support/EndlessVibe/config.toml` | `~/Library/Application Support/EndlessVibe/state` |
+
+Linux/macOS 遵循 `XDG_CONFIG_HOME`、`XDG_STATE_HOME`；Windows 使用 `APPDATA`、`LOCALAPPDATA`。可用 `--config` 指定配置路径。运行环境中的 `ENDLESSVIBE_BIND`、`ENDLESSVIBE_PUBLIC_URL` 会覆盖文件中的地址，命令行地址参数优先于这些环境变量。
 
 配置中的 Workspace / Project 示例：
 

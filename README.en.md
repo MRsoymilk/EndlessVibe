@@ -71,7 +71,7 @@ EndlessVibe is **not** a cloud IDE or a multi-tenant remote shell. It is designe
 | **Commands & Jobs** | Asynchronous commands, durable job IDs, paged output, cancellation, timeout, request deduplication |
 | **Git Workflow** | Reviewable status/diff/log/commit, optional local Git mutation, separately authorized push |
 | **Tasks & Recovery** | `task_id + stage` checkpoints, job association, committed recovery points, restart diagnostics |
-| **Dashboard** | Runtime charts, Projects, Tasks, Operations, Nodes, configuration, and storage management |
+| **Dashboard** | First-run Setup, ChatGPT connection help, runtime charts, Projects, Tasks, Operations, Nodes, configuration, and storage |
 | **Authentication** | OAuth 2.0 Authorization Code, PKCE, dynamic client registration, tool scopes |
 | **Node Transfer** | LAN discovery, TLS pairing, scoped grants, persistent remote request status and history |
 | **Execution Profiles** | Linux Bubblewrap and native offline Windows AppContainer, with explicit Project authorization |
@@ -110,15 +110,91 @@ cargo build --release
 cargo test --locked
 ```
 
-Optional on Linux only: verify that Bubblewrap can access the configured toolchains:
+### 2. Start and open Setup
+
+On a new computer, start without configuring a domain or Workspace first:
 
 ```bash
-./target/release/endlessvibe --check-sandbox
+./target/release/endlessvibe
 ```
 
-### 2. Initialize a Workspace
+On Windows, use `.\target\release\endlessvibe.exe`. Once installed on PATH, the command is simply `endlessvibe`.
 
-Create an existing directory as the Workspace root and initialize the service:
+If the configuration is missing, EndlessVibe creates a private configuration and owner key, then serves the local [Setup and connection help](http://127.0.0.1:20001/setup). The initial configuration has no Workspaces or Projects, Node Transfer is disabled, and command execution retains the platform's safe defaults.
+
+| Entry | Defaults for a new web setup |
+| --- | --- |
+| **Setup / connection help** | [http://127.0.0.1:20001/setup](http://127.0.0.1:20001/setup), local only |
+| **Dashboard** | [http://127.0.0.1:20001](http://127.0.0.1:20001), local only |
+| **MCP** | `127.0.0.1:20000`, with local resource URL `http://127.0.0.1:20000/mcp` |
+| **Workspaces / Projects** | Empty; clients have no authorized projects to operate on |
+| **Nodes / Transfer** | Disabled until configured and paired |
+
+Starting an existing installation preserves its configuration, listening address, projects, and credentials.
+
+### 3. Configure from the browser
+
+Use `/setup` to complete these steps:
+
+1. **Add a Workspace management root.** Enter a simple ID and an existing absolute directory, such as `projects` and `/home/user/projects`, or `D:\project` on Windows. This does not authorize the root's child projects automatically. Open **Projects** afterwards to select individual projects and grant file, execution, and Git permissions.
+2. **Set the public HTTPS domain.** Enter a domain assigned to you or managed by you; replace `your-domain.ngrok.app` or `https://your-domain.ngrok.app` with your actual ngrok domain. A bare domain receives the HTTPS scheme. Use a domain or origin without `/mcp`, credentials, or query parameters. Setup derives the MCP URL and connection instructions from this setting.
+3. **Configure a tunnel or reverse proxy.** Forward that HTTPS origin to the actual MCP listening port, retaining routes for MCP and OAuth. The domain field updates EndlessVibe's configuration; your chosen provider still manages DNS, certificates, and the tunnel.
+
+For example, after installing and configuring ngrok locally, use a domain available to your account:
+
+```bash
+ngrok http 20000 --url https://your-domain.ngrok.app
+```
+
+Replace the example domain with the one assigned or configured for your account, and save the same HTTPS origin in Setup. Replace `20000` with the active MCP port. Port `20001` is the local management Dashboard and stays private. See the [ngrok CLI reference](https://ngrok.com/docs/gateway/agent/cli) or the [Cloudflare Tunnel guide](docs/DOCKER_TUNNEL.md).
+
+### 4. Save and apply configuration
+
+After saving service settings, Setup distinguishes **saved configuration** from the **running state** and reports when a restart is needed. Apply changes through the original startup method: use the terminal or existing process controls for manual launches, and the original manager for systemd, Windows services, or another supervisor. The page provides instructions; saving does not restart the process.
+
+The `ENDLESSVIBE_BIND` and `ENDLESSVIBE_PUBLIC_URL` environment variables, and the `--bind` and `--public-url` startup arguments, can override the file. If the old address remains after a restart, check the service's environment and launch arguments too. Return to Setup to confirm the effective address before connecting the client.
+
+Linux and Windows provide `--status`, `--stop`, and `--restart` for the configured instance. Windows verifies process creation time and signals a dedicated graceful shutdown event. When upgrading an older Windows instance, stop it once with Ctrl+C or its original manager. On macOS, stop and start through the original launch method. None of these controls requires the `host` execution backend.
+
+### 5. Connect ChatGPT
+
+Once the HTTPS and OAuth endpoints are available:
+
+1. Open [ChatGPT Plugins](https://chatgpt.com/plugins), then **+ → Add custom MCP server**.
+2. Enter a name, description, and `https://your-domain/mcp`. Choose OAuth; EndlessVibe uses its existing dynamic client registration (DCR).
+3. Complete the confirmation prompts, choose **Create as a plugin**, review the discovered tools, and install.
+4. When prompted, enter your owner key only in **EndlessVibe's OAuth authorization page in your own browser**. No OpenAI API key is needed.
+5. Start a new conversation, select EndlessVibe with `@`, and try listing authorized projects.
+
+**Saving a domain or local configuration does not establish a ChatGPT connection.** Complete plugin installation, OAuth consent, and a real tool call. Setup's local checks do not claim to verify public reachability. Keep owner keys, tokens, and login credentials out of MCP URLs and chat messages.
+
+For current UI and account policies, see OpenAI's [connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt) and [authentication guide](https://developers.openai.com/plugins/build/auth). Other MCP clients use the same HTTPS `/mcp` endpoint and OAuth; see [EndlessVibe OAuth](docs/OAUTH.md) for server details.
+
+### Reopen Setup
+
+If the executable is on PATH, run this whenever you need the guide again:
+
+```bash
+endlessvibe --init
+```
+
+On Windows, run this from the repository root without first adding the executable to PATH:
+
+```powershell
+.\target\release\endlessvibe.exe --init
+```
+
+For a custom configuration, add `--config`. This Windows example uses a placeholder path; replace it with your actual configuration file:
+
+```powershell
+.\target\release\endlessvibe.exe --init --config "C:\path\to\config.toml"
+```
+
+If the service is running, the command prints the existing `/setup` address and exits. If it is stopped, it starts using the existing configuration. Configuration, owner keys, Workspace / Project grants, and comments are preserved. Reopening setup does not reset installation data.
+
+### Optional: explicit CLI initialization
+
+Before a configuration exists, the original command-line workflow remains available. Explicit `--init --workspace ...` creates the configuration and exits; existing configurations are never overwritten:
 
 ```bash
 mkdir -p "$HOME/projects"
@@ -127,47 +203,15 @@ mkdir -p "$HOME/projects"
   --init \
   --workspace "projects=$HOME/projects" \
   --public-url https://mcp.example.com
-```
 
-`--init` creates the configuration and private state, including a random owner key. A Workspace does **not** automatically grant file, command, or Git access to its children.
-
-### 3. Register a Project
-
-```bash
-# The target directory must already exist.
+# The project directory must exist; --add-project requires a stopped service.
 ./target/release/endlessvibe \
   --add-project "projects:website=$HOME/projects/website"
-```
 
-Projects must be located inside an authorized Workspace root. Use `--read-only` or `--no-exec` to reduce the permissions of a newly registered Project.
-
-### 4. Start the Server
-
-```bash
 ./target/release/endlessvibe
 ```
 
-| Service | Default endpoint |
-| --- | --- |
-| **Dashboard** | [http://127.0.0.1:20001](http://127.0.0.1:20001) (loopback only) |
-| **MCP** | `/mcp` on port `20000` by default; use HTTPS for public access |
-| **Node Transfer** | Disabled by default; requires configuration and approval on both nodes |
-
-Use `--status`, `--stop`, and `--restart` for process management. On Windows, commands verify the process creation time and signal a per-instance graceful shutdown event. When upgrading from an older Windows build, stop it once with Ctrl+C or the service manager, then launch the new binary before using `--restart`. This does not require the `host` execution backend.
-
-### 5. Connect an MCP Client
-
-In ChatGPT or another MCP-compatible client:
-
-```text
-Name:           EndlessVibe
-Server URL:     https://mcp.example.com/mcp
-Authentication: OAuth 2.0
-```
-
-Replace the example origin with your configured `server.public_url`. Your reverse proxy or tunnel must also route the OAuth endpoints, not just `/mcp`. **Never place an `owner.key` or access token in URLs.**
-
-See [OAuth](docs/OAUTH.md) and [Cloudflare Tunnel](docs/DOCKER_TUNNEL.md).
+Projects must be inside the registered Workspace root. Use `--read-only` or `--no-exec` to reduce permissions during registration. With an existing Linux configuration, run `./target/release/endlessvibe --check-sandbox` when needed to inspect Bubblewrap and toolchains. Diagnostics, credential maintenance, and process-management commands do not initialize a missing configuration.
 
 ## LAN-only mode (no public ChatGPT URL)
 
@@ -179,7 +223,7 @@ Use **`--lan-only`** to connect EndlessVibe instances via **TLS 1.3 Transfer pai
 .\target\debug\endlessvibe.exe --init --lan-only --workspace "projects=C:\path\to\projects"
 ```
 
-**Existing Windows installation** (no need to delete the config or owner key):
+**Windows installation with an existing configuration** (including web setup; preserve the config and owner key):
 
 ```powershell
 # Stop the running EndlessVibe instance, then convert the config once
@@ -291,7 +335,15 @@ flowchart TB
 
 ## Configuration
 
-Configuration defaults to `~/.config/endlessvibe/config.toml` and state to `~/.local/state/endlessvibe`, respecting the corresponding XDG environment variables.
+Default paths depend on the platform:
+
+| Platform | Configuration | Private state |
+| --- | --- | --- |
+| Linux | `~/.config/endlessvibe/config.toml` | `~/.local/state/endlessvibe` |
+| Windows | `%APPDATA%\EndlessVibe\config.toml` | `%LOCALAPPDATA%\EndlessVibe` |
+| macOS | `~/Library/Application Support/EndlessVibe/config.toml` | `~/Library/Application Support/EndlessVibe/state` |
+
+Linux/macOS respect `XDG_CONFIG_HOME` and `XDG_STATE_HOME`; Windows uses `APPDATA` and `LOCALAPPDATA`. Use `--config` for a custom configuration path. Runtime `ENDLESSVIBE_BIND` and `ENDLESSVIBE_PUBLIC_URL` values override file settings, and command-line address options take precedence over those environment variables.
 
 Example Workspace / Project configuration:
 
@@ -315,11 +367,11 @@ Execution profiles:
 
 | Profile | Purpose |
 | --- | --- |
-| `isolated` | Default restricted environment using Bubblewrap |
-| `development` | For trusted development projects; host networking may be enabled by configuration |
+| `isolated` | Restricted environment using the configured Bubblewrap or Windows AppContainer backend |
+| `development` | Trusted development projects subject to the selected backend; Windows AppContainer always stays offline |
 | `trusted_host` | **High-risk opt-in:** with an acknowledged Host backend, run locally installed executables on PATH |
 
-`trusted_host` is **not enabled by default**. Switching the **global** execution backend to Host removes Bubblewrap isolation for other command-enabled Projects too. Use it only in environments you control.
+`trusted_host` is **not enabled by default**. Switching the **global** execution backend to Host removes sandbox isolation for other command-enabled Projects too. Use it only in environments you control.
 
 See [Example Configuration](config/config.example.toml) and [Execution](docs/EXECUTION.md).
 
