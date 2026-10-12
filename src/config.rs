@@ -65,9 +65,52 @@ pub fn default_config_path() -> PathBuf { env::var_os("APPDATA").map(PathBuf::fr
 #[cfg(windows)]
 pub fn default_state_dir() -> PathBuf { env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData/Local")).join("EndlessVibe") }
 fn home() -> PathBuf { env::var_os("HOME").or_else(||env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")) }
+// Never copy the process PATH unvalidated into the first-run configuration.
+// Windows PATH can contain empty, relative, drive-relative and unexpanded
+// entries that are legal in a login shell but forbidden in an execution policy.
+#[cfg(any(windows,test))]
+fn inherited_absolute_path_entries(raw:&std::ffi::OsStr)->Vec<PathBuf>{
+    let mut entries=Vec::<PathBuf>::new();
+    for entry in env::split_paths(raw){
+        if !entry.is_absolute()
+            ||entry.components().any(|part|matches!(part,std::path::Component::ParentDir))
+            ||!entry.to_str().is_some_and(|text|!text.contains(['"', '%', '\0']))
+            ||env::join_paths([entry.as_os_str()]).is_err(){
+            continue;
+        }
+        if !entries.iter().any(|prior|if cfg!(windows){
+            prior.to_string_lossy().eq_ignore_ascii_case(&entry.to_string_lossy())
+        }else{prior==&entry}){
+            entries.push(entry);
+        }
+    }
+    entries
+}
+#[cfg(windows)]
+fn windows_default_execution_path(raw:Option<&std::ffi::OsStr>,system_root:Option<&std::ffi::OsStr>)->String{
+    let root=system_root.map(PathBuf::from)
+        .filter(|path|path.is_absolute()
+            &&!path.components().any(|part|matches!(part,std::path::Component::ParentDir))
+            &&path.to_str().is_some_and(|text|!text.contains(['"', '%', '\0'])))
+        .unwrap_or_else(||PathBuf::from(r"C:\Windows"));
+    // Keep known OS locations first. This makes a copied EXE usable even when
+    // the target account has a truncated or malformed PATH.
+    let mut entries=vec![root.join("System32"),root];
+    if let Some(value)=raw{
+        for entry in inherited_absolute_path_entries(value){
+            if !entries.iter().any(|old|old.to_string_lossy().eq_ignore_ascii_case(&entry.to_string_lossy())){
+                entries.push(entry);
+            }
+        }
+    }
+    env::join_paths(&entries).ok().and_then(|value|value.into_string().ok())
+        .unwrap_or_else(||r"C:\Windows\System32;C:\Windows".into())
+}
 fn default_execution_path()->String{
-    if cfg!(windows){env::var("PATH").unwrap_or_else(|_|"C:\\Windows\\System32;C:\\Windows".into())}
-    else{"/usr/local/bin:/usr/bin:/bin".into()}
+    #[cfg(windows)]
+    {return windows_default_execution_path(env::var_os("PATH").as_deref(),env::var_os("SystemRoot").as_deref());}
+    #[cfg(not(windows))]
+    {"/usr/local/bin:/usr/bin:/bin".into()}
 }
 /// Accept a domain or HTTPS origin; configuration is not a public reachability test.
 pub fn normalize_connection_url(input:&str)->Result<String>{
@@ -211,6 +254,52 @@ impl Config {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn inherited_path_filters_relative_empty_and_repeated_entries(){
+        let valid=env::current_dir().unwrap();
+        let extra=valid.join("toolchain-bin");
+        let inherited=env::join_paths([
+            valid.as_path(),Path::new("relative/bin"),Path::new("."),
+            Path::new(".."),Path::new(""),extra.as_path(),valid.as_path()
+        ]).unwrap();
+        let selected=inherited_absolute_path_entries(&inherited);
+        assert_eq!(selected,vec![valid.clone(),extra.clone()]);
+        let value=env::join_paths(&selected).unwrap().into_string().unwrap();
+        let mut config=Config::default();
+        config.execution.path=value;
+        config.validate().unwrap();
+        config.execution.path=env::join_paths([Path::new("relative/bin")])
+            .unwrap().into_string().unwrap();
+        assert!(config.validate().unwrap_err().to_string().contains("absolute PATH"),
+            "Manual/explicit execution.path entries remain strictly validated");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_first_run_path_accepts_malformed_inherited_environment(){
+        use std::ffi::OsStr;
+        let raw=OsStr::new(
+            r"C:\tools\bin;.;C:relative;%SystemRoot%\System32;;D:\Rust\bin;C:\tools\bin;..\bin"
+        );
+        let sanitized=windows_default_execution_path(
+            Some(raw),Some(OsStr::new(r"D:\Windows")));
+        let entries=env::split_paths(&sanitized).collect::<Vec<_>>();
+        assert_eq!(entries[0],PathBuf::from(r"D:\Windows\System32"));
+        assert_eq!(entries[1],PathBuf::from(r"D:\Windows"));
+        assert!(entries.contains(&PathBuf::from(r"C:\tools\bin")));
+        assert!(entries.contains(&PathBuf::from(r"D:\Rust\bin")));
+        assert_eq!(entries.iter().filter(|p|**p==PathBuf::from(r"C:\tools\bin")).count(),1);
+        assert!(entries.iter().all(|p|p.is_absolute()
+            &&!p.components().any(|c|matches!(c,std::path::Component::ParentDir))));
+        assert!(!sanitized.contains("%SystemRoot%"));
+        let mut config=Config::default();
+        config.execution.path=sanitized;
+        config.validate().unwrap();
+        let fallback=windows_default_execution_path(None,None);
+        assert_eq!(fallback,r"C:\Windows\System32;C:\Windows");
+        let no_root=windows_default_execution_path(Some(OsStr::new("relative;.;")),None);
+        assert_eq!(no_root,fallback);
+    }
+
     #[test]
     fn windows_service_update_requires_explicit_exact_project_opt_in(){
         let mut config=Config::default();

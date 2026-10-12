@@ -20,6 +20,34 @@ tested independently before support can be considered verified.
 operating system builds successfully. Native builds and unit tests must be
 run on Windows and macOS before a release is described as supporting them.
 
+### Windows portable EXE: first-run PATH
+
+The initial `execution.path` is derived from the target Windows account, not
+the developer's computer. A normal Windows `PATH` may include empty entries,
+relative directories or unexpanded `%VARIABLE%` references. An older EXE
+copied to another machine can therefore fail during `--init` with
+`execution.path must contain only absolute PATH entries`.
+
+New builds filter these inherited entries **before** creating the private
+first-run configuration, keep valid absolute tool directories, and prepend
+System32 and Windows from the target machine's `SystemRoot`. If the inherited
+PATH is unusable, they use safe absolute system directories. This does not
+relax validation of an explicitly configured `[execution].path` or enable
+command execution.
+
+For an older, already-built EXE, a PowerShell session-only workaround is:
+
+```powershell
+$env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+.\endlessvibe.exe --init
+```
+
+This is only for initialization: open a fresh PowerShell session afterwards
+to restore your normal command/toolchain PATH. If an existing `config.toml`
+already has a relative `[execution].path`, correct that field manually using
+absolute directories. Never delete or distribute `owner.key` as part of
+the workaround.
+
 ### Windows service restart
 
 After upgrading from a Windows build that lacked process control, **stop the
