@@ -1,4 +1,4 @@
-use crate::{config::Config,config_edit::{self,AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateExecutionBackendRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest,UpdateTransferRequest},security::auth::Auth,store::Store,tools::{jobs::Jobs,process,tasks},transfer::TransferManager,util,workspace::{self,Project,Workspace}};
+use crate::{config::Config,config_edit::{self,AddWorkspaceRequest,UpdateConnectionRequest,AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateExecutionBackendRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest,UpdateTransferRequest},security::auth::Auth,store::Store,tools::{jobs::Jobs,process,tasks},transfer::TransferManager,util,workspace::{self,Project,Workspace}};
 use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
 use std::{collections::BTreeMap,fs::File,future::Future,path::{Path,PathBuf},sync::{Arc,Mutex,RwLock,atomic::{AtomicU64,Ordering}},time::Instant};
@@ -108,6 +108,14 @@ fn windows_sandbox_status(config:&Config)->Value{
 pub struct OperationTrace{pub id:Option<i64>,pub started:Instant,pub tool:String,pub workspace:String,pub project:String,pub task_id:Option<String>,pub stage:Option<String>}
 fn service_config_revision(config:&Config)->Result<String>{Ok(util::digest(serde_json::to_vec(&(&config.server,&config.security,&config.limits,&config.execution,&config.git,&config.docker,&config.transfer))?))}
 fn reuse_project_locks(next:&mut BTreeMap<String,Arc<Workspace>>,old:&BTreeMap<String,Arc<Workspace>>){for(workspace_id,next_workspace)in next.iter_mut(){let Some(old_workspace)=old.get(workspace_id)else{continue};let Some(next_workspace)=Arc::get_mut(next_workspace)else{continue};for(project_id,next_project)in next_workspace.projects.iter_mut(){let Some(old_project)=old_workspace.projects.get(project_id)else{continue};if old_project.root.path!=next_project.root.path{continue;}if let Some(next_project)=Arc::get_mut(next_project){next_project.lock=old_project.lock.clone();}}}}
+fn setup_connection(config:&Config)->Value{
+    json!({"public_url":config.server.public_url,"bind":config.server.bind.to_string(),
+        "port":config.server.bind.port(),"connection_mode":if config.server.bind.ip().is_loopback(){"loopback"}else{"container"},
+        "mcp_endpoint":config.resource(),"public_configured":config.public_connection_configured(),"lan_only":config.server.lan_only})
+}
+fn setup_command_argument(value:&str)->String{
+    if cfg!(windows){format!("'{}'",value.replace('\'',"''"))}else{format!("'{}'",value.replace('\'',"'\"'\"'"))}
+}
 pub struct Runtime{pub config:Arc<Config>,pub db:Arc<Store>,pub auth:Arc<Auth>,pub jobs:Arc<Jobs>,pub transfer:Arc<TransferManager>,pub workspaces:RwLock<BTreeMap<String,Arc<Workspace>>>,pub shutdown:CancellationToken,pub config_path:PathBuf,active_config_revision:RwLock<String>,active_service_revision:String,retired_projects:Mutex<Vec<Arc<Project>>>,dashboard_events:broadcast::Sender<String>,config_edit_lock:Mutex<()>,traffic_requests:AtomicU64,traffic_rx:AtomicU64,traffic_tx:AtomicU64,started:Instant,started_unix:u64,_instance:File}
 impl Runtime{
     pub fn new(mut config:Config,config_path:&Path)->Result<Arc<Self>>{
@@ -211,6 +219,56 @@ impl Runtime{
         }))
     }
     pub fn snapshot(&self)->Value{let admission=self.jobs.admission_status();let workspaces=self.workspaces_snapshot();let projects=workspaces.values().map(|w|w.projects.len()).sum::<usize>();let development_projects=workspaces.values().flat_map(|w|w.projects.values()).filter(|p|p.config.development()).count();let network_enabled=self.config.execution.backend!="appcontainer"&&(self.config.execution.backend=="host"||self.config.execution.allow_network||development_projects>0);json!({"status":"running","name":"EndlessVibe","version":env!("CARGO_PKG_VERSION"),"listen_address":self.config.server.bind.to_string(),"port":self.config.server.bind.port(),"uptime_seconds":self.started.elapsed().as_secs(),"started_at_unix_seconds":self.started_unix,"checked_at_unix_seconds":util::now(),"security":{"authentication":"oauth2_pkce","anonymous_private_tools":false,"execution_backend":self.config.execution.backend,"shell_enabled":self.config.execution.allow_shell,"network_enabled":network_enabled,"development_project_count":development_projects,"network_mode":if self.config.execution.backend=="host"{"host_always"}else if self.config.execution.backend=="appcontainer"{"appcontainer_offline"}else if development_projects>0{"project_profiles"}else if self.config.execution.allow_network{"per_job_opt_in"}else{"isolated"},"network_isolation":if self.config.execution.backend=="host"{"none_host_permissions"}else if self.config.execution.backend=="appcontainer"{"LPAC with zero network capabilities, including development projects"}else if development_projects>0{"isolated projects stay isolated; development projects share host network by default"}else if self.config.execution.allow_network{"isolated_by_default; network=true shares host network"}else{"isolated_or_disabled"}},"dashboard":{"enabled":true,"listen_address":"127.0.0.1:20001","url":"http://127.0.0.1:20001/"},"workspace_count":workspaces.len(),"project_count":projects,"active_jobs":self.jobs.active_count(),"accepting_jobs":admission["accepting_jobs"],"job_pause_reason":admission["pause_reason"],"transfer":{"enabled":self.transfer.config.enabled,"node_id":self.transfer.node_id,"listen":self.transfer.config.listen},"docker":{"enabled":self.config.docker.enabled,"container_count":self.config.docker.allowed_containers.len(),"project_socket_enabled":self.config.docker.allow_project_socket},"mcp":{"endpoint":"/mcp","method":"POST","transport":"streamable_http","session_mode":"stateless","protocol_version":"negotiated","implementation":"rmcp","sdk_version":crate::mcp::SDK_VERSION,"tool_schema_revision":crate::mcp::TOOL_SCHEMA_REVISION,"tool_count":crate::mcp::TOOL_NAMES.len(),"chatgpt_registration":"client_specific_not_asserted","tools":crate::mcp::TOOL_NAMES}})}
+    pub fn dashboard_setup(&self)->Result<Value>{
+        // Content and revision must describe one file snapshot even during another Dashboard save.
+        let bytes=std::fs::read(&self.config_path).context("Read setup configuration")?;
+        let mut persisted:Config=toml::from_str(std::str::from_utf8(&bytes).context("Config must be UTF-8")?).context("Invalid config.toml")?;
+        persisted.server.public_url=persisted.server.public_url.trim_end_matches('/').to_owned();persisted.validate()?;
+        let revision=util::digest(&bytes);
+        let active_revision=self.active_config_revision.read().unwrap_or_else(|e|e.into_inner()).clone();
+        let matches_active=persisted.server.public_url==self.config.server.public_url
+            &&persisted.server.bind==self.config.server.bind&&persisted.server.lan_only==self.config.server.lan_only
+            &&persisted.security.allow_http_loopback==self.config.security.allow_http_loopback;
+        let file_pending=revision!=active_revision;
+        let startup_override_detected=!matches_active&&service_config_revision(&persisted)?==self.active_service_revision;
+        let config_path=if self.config_path.is_absolute(){self.config_path.clone()}else{std::env::current_dir()?.join(&self.config_path)};
+        let executable=std::env::current_exe().unwrap_or_else(|_|PathBuf::from(if cfg!(windows){"endlessvibe.exe"}else{"endlessvibe"}));
+        let start_command=format!("{}{} --config {}",if cfg!(windows){"& "}else{""},
+            setup_command_argument(&executable.to_string_lossy()),setup_command_argument(&config_path.to_string_lossy()));
+        let restart_supported=cfg!(any(windows,target_os="linux"));
+        let command=if restart_supported{format!("{start_command} --restart")}else{String::new()};
+        let workspaces=self.workspaces_snapshot();let projects=workspaces.values().map(|w|w.projects.len()).sum::<usize>();
+        Ok(json!({"revision":revision,"requires_restart":file_pending||!matches_active,
+            "needs_setup":!persisted.server.lan_only&&!persisted.public_connection_configured(),
+            "host_os":std::env::consts::OS,"config_path":config_path,"owner_key_path":self.config.owner_key_path(),
+            "workspace_count":workspaces.len(),"project_count":projects,
+            "saved":setup_connection(&persisted),"active":setup_connection(&self.config),
+            "startup_override_detected":startup_override_detected,"connection_matches_saved":matches_active,
+            "environment_overrides":{"bind":std::env::var_os("ENDLESSVIBE_BIND").is_some(),"public_url":std::env::var_os("ENDLESSVIBE_PUBLIC_URL").is_some()},
+            "restart":{"supported":restart_supported,"command":command,"start_command":start_command,"dashboard_url":"http://127.0.0.1:20001/setup"},
+            "public_reachability":"not_checked","chatgpt_connection":"not_verified"}))
+    }
+    pub fn dashboard_update_connection(&self,mut request:UpdateConnectionRequest)->Result<Value>{
+        request.public_url=crate::config::normalize_connection_url(&request.public_url)?;
+        let operation=self.begin_operation("dashboard_update_connection","","",json!({
+            "expected_revision":request.expected_revision,"public_url":request.public_url,"connection_mode":request.connection_mode}));
+        let result=(||{
+            let _guard=self.config_edit_lock.lock().map_err(|_|anyhow::anyhow!("Config edit lock poisoned"))?;
+            let saved=config_edit::update_connection(&self.config_path,request)?;
+            let mut value=self.dashboard_setup()?;value["_operation_diff"]=saved["_operation_diff"].clone();
+            self.publish_dashboard("config_changed",json!({"revision":value["revision"],"requires_restart":value["requires_restart"]}));Ok(value)
+        })();self.finish_operation(operation,result)
+    }
+    pub fn dashboard_add_workspace(&self,request:AddWorkspaceRequest)->Result<Value>{
+        let operation=self.begin_operation("dashboard_add_workspace",&request.id,"",serde_json::to_value(&request)?);
+        let result=(||{
+            let _guard=self.config_edit_lock.lock().map_err(|_|anyhow::anyhow!("Config edit lock poisoned"))?;
+            let mut value=config_edit::add_workspace(&self.config_path,request)?;
+            match self.reload_authorization_inner(){Ok(_)=>value["requires_restart"]=json!(false),Err(error)=>{
+                value["requires_restart"]=json!(true);value["reload_warning"]=json!(format!("{error:#}"));}}
+            self.publish_dashboard("config_changed",json!({"revision":value["revision"],"requires_restart":value["requires_restart"]}));Ok(value)
+        })();self.finish_operation(operation,result)
+    }
     pub fn dashboard_config(&self)->Result<Value>{let persisted=Config::load_file(&self.config_path)?;let revision=config_edit::revision(&self.config_path)?;let active_revision=self.active_config_revision.read().unwrap_or_else(|e|e.into_inner()).clone();let effective=workspace::load(&persisted,&self.config_path)?;let workspaces=effective.values().map(|w|json!({"id":w.config.id,"path":w.root.path,"project_count":w.projects.len(),"projects":w.projects.values().map(|p|p.summary()).collect::<Vec<_>>() })).collect::<Vec<_>>();let requires_restart=revision!=active_revision;Ok(json!({"revision":revision,"active_revision":active_revision,"requires_restart":requires_restart,"server":{"bind":persisted.server.bind.to_string(),"public_url":persisted.server.public_url,"allowed_hosts":persisted.server.allowed_hosts},"dashboard":{"listen_address":"127.0.0.1:20001","local_only":true},"security":{"authentication":"oauth2_pkce","allow_http_loopback":persisted.security.allow_http_loopback,"access_token_seconds":persisted.security.access_token_seconds,"refresh_token_seconds":persisted.security.refresh_token_seconds,"extra_redirect_uri_count":persisted.security.extra_redirect_uris.len()},"execution":{"backend":persisted.execution.backend,"active_backend":self.config.execution.backend,"host_os":std::env::consts::OS,"allow_shell":persisted.execution.allow_shell,"allow_network":persisted.execution.allow_network,"auto_discover_toolchains":persisted.execution.auto_discover_toolchains,"bubblewrap":persisted.execution.bubblewrap,"path":persisted.execution.path,"allowed_programs":persisted.execution.allowed_programs,"required_programs":persisted.execution.required_programs,"readonly_mounts":persisted.execution.readonly_mounts.iter().map(|m|json!({"source":m.source,"target":m.target})).collect::<Vec<_>>(),"memory_limit_mb":persisted.execution.memory_limit_mb,"max_processes":persisted.execution.max_processes},"limits":{"max_file_bytes":persisted.limits.max_file_bytes,"max_read_bytes":persisted.limits.max_read_bytes,"max_output_bytes":persisted.limits.max_output_bytes,"command_timeout_seconds":persisted.limits.command_timeout_seconds,"max_jobs":persisted.limits.max_jobs,"retained_jobs":persisted.limits.retained_jobs,"search_max_files":persisted.limits.search_max_files,"search_max_bytes":persisted.limits.search_max_bytes},"git":{"executable":persisted.git.executable,"author_name":persisted.git.author_name,"author_email":persisted.git.author_email},"transfer":{"enabled":persisted.transfer.enabled,"listen":persisted.transfer.listen,"advertise":persisted.transfer.advertise,"discover":persisted.transfer.discover,"display_name":persisted.transfer.display_name},"docker":{"enabled":persisted.docker.enabled,"socket":persisted.docker.socket,"allowed_containers":persisted.docker.allowed_containers,"allow_start":persisted.docker.allow_start,"allow_stop":persisted.docker.allow_stop,"allow_restart":persisted.docker.allow_restart,"allow_project_socket":persisted.docker.allow_project_socket},"mcp":{"tool_schema_revision":crate::mcp::TOOL_SCHEMA_REVISION,"tool_count":crate::mcp::TOOL_NAMES.len(),"tools":crate::mcp::TOOL_NAMES},"workspaces":workspaces,"note":"Sensitive credentials and token material are intentionally omitted. Project authorization changes can be hot-reloaded; service-level changes still require restart."}))}
     pub fn dashboard_update_execution_backend(&self,request:UpdateExecutionBackendRequest)->Result<Value>{
         let operation=self.begin_operation("dashboard_update_execution_backend","","",

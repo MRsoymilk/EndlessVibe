@@ -6,6 +6,12 @@ use std::path::{Path,PathBuf};
 
 #[derive(Clone,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct UpdateConnectionRequest{pub expected_revision:String,pub public_url:String,pub connection_mode:String}
+#[derive(Clone,Debug,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddWorkspaceRequest{pub expected_revision:String,pub id:String,pub path:String}
+#[derive(Clone,Debug,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddProjectRequest{
     pub expected_revision:String,
     pub workspace:String,
@@ -121,6 +127,52 @@ fn project_value(workspace:&str,project:&ProjectConfig,root:&Path)->Value{
     let environment_keys=project.environment_map().map(|v|v.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();json!({"workspace":workspace,"id":project.id,"path":root.join(&project.path),"allow_write":project.allow_write,"allow_exec":project.allow_exec,"allow_git_commit":project.allow_git_commit,"allow_git_mutation":project.allow_git_mutation,"allow_git_push":project.allow_git_push,"execution_profile":project.execution_profile,"environment_keys":environment_keys})
 }
 fn edit_service_section(text:&mut String,section:&str,items:&[(&str,toml_edit::Value)])->Result<()>{use toml_edit::DocumentMut;let mut doc=text.parse::<DocumentMut>().context("Invalid config.toml for structured edit")?;if !doc.as_table().contains_key(section){doc.as_table_mut().insert(section,toml_edit::Item::Table(toml_edit::Table::new()));}if !doc[section].is_table(){bail!("[{section}] must be a table in config");}for(key,value)in items{doc[section][key]=toml_edit::Item::Value(value.clone());}*text=doc.to_string();Ok(())}
+pub fn update_connection(path:&Path,request:UpdateConnectionRequest)->Result<Value>{
+    let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
+    let public_url=config::normalize_connection_url(&request.public_url)?;
+    let ip:std::net::IpAddr=match request.connection_mode.as_str(){
+        "loopback"=>"127.0.0.1".parse().unwrap(),
+        "container"=>"0.0.0.0".parse().unwrap(),
+        _=>bail!("Connection mode must be loopback (local tunnel) or container (network proxy)"),
+    };
+    let port=cfg.server.bind.port();
+    if port==0{bail!("Choose a fixed MCP listener port in config.toml before configuring a public connection");}
+    cfg.server.bind=std::net::SocketAddr::new(ip,port);cfg.server.public_url=public_url;
+    cfg.server.lan_only=false;cfg.security.allow_http_loopback=false;cfg.validate()?;
+    edit_service_section(&mut text,"server",&[
+        ("bind",toml_edit::Value::from(cfg.server.bind.to_string())),
+        ("public_url",toml_edit::Value::from(cfg.server.public_url.as_str())),
+        ("lan_only",toml_edit::Value::from(false))])?;
+    edit_service_section(&mut text,"security",&[("allow_http_loopback",toml_edit::Value::from(false))])?;
+    let verified:Config=toml::from_str(&text).context("Generated connection config is invalid")?;verified.validate()?;
+    replace_config(path,text.as_bytes())?;
+    Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"_operation_diff":config_diff(&original,&text)}))
+}
+pub fn add_workspace(path:&Path,request:AddWorkspaceRequest)->Result<Value>{
+    let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
+    if !config::valid_id(&request.id){bail!("Workspace ID must contain only ASCII letters, digits, '_' or '-' and be at most 64 characters");}
+    if cfg.workspaces.iter().any(|w|w.id==request.id){bail!("Workspace ID {} already exists",request.id);}
+    let raw=PathBuf::from(&request.path);if !raw.is_absolute(){bail!("Workspace path must be an existing absolute directory");}
+    let root=raw.canonicalize().with_context(||format!("Cannot resolve workspace path {}",raw.display()))?;
+    let item=config::WorkspaceConfig{id:request.id.clone(),path:root.clone(),projects:vec![],
+        allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,
+        execution_profile:None,environment:vec![]};
+    cfg.workspaces.push(item);cfg.validate()?;drop(workspace::load(&cfg,path)?);
+    let mut doc=text.parse::<toml_edit::DocumentMut>().context("Invalid config.toml for structured edit")?;
+    if !doc.as_table().contains_key("workspaces")||doc.get("workspaces").and_then(toml_edit::Item::as_array).is_some_and(|a|a.is_empty()){
+        doc["workspaces"]=toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let tables=doc["workspaces"].as_array_of_tables_mut().context("Workspaces must be an array of tables")?;
+    let mut table=toml_edit::Table::new();table["id"]=toml_edit::value(request.id.as_str());
+    table["path"]=toml_edit::value(root.to_str().context("Workspace path must be UTF-8")?);
+    tables.push(table);text=doc.to_string();
+    let verified:Config=toml::from_str(&text).context("Generated workspace config is invalid")?;
+    verified.validate()?;let loaded=workspace::load(&verified,path)?;
+    if !loaded[&request.id].projects.is_empty(){bail!("A new workspace must not grant project access automatically");}
+    drop(loaded);replace_config(path,text.as_bytes())?;
+    Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,
+        "workspace":{"id":request.id,"path":root,"project_count":0},"_operation_diff":config_diff(&original,&text)}))
+}
 pub fn update_transfer(path:&Path,request:UpdateTransferRequest)->Result<Value>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();cfg.transfer=config::Transfer{enabled:request.enabled,listen:request.listen.parse().context("Invalid Transfer IP:port listener")?,advertise:request.advertise,discover:request.discover,display_name:request.display_name.clone()};cfg.validate()?;edit_service_section(&mut text,"transfer",&[("enabled",toml_edit::Value::from(cfg.transfer.enabled)),("listen",toml_edit::Value::from(request.listen)),("advertise",toml_edit::Value::from(request.advertise)),("discover",toml_edit::Value::from(request.discover)),("display_name",toml_edit::Value::from(request.display_name))])?;let verify:Config=toml::from_str(&text).context("Generated Transfer config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"transfer":verify.transfer,"_operation_diff":config_diff(&original,&text)}))}
 pub fn update_docker(path:&Path,request:UpdateDockerRequest)->Result<Value>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();if (request.enabled||request.allow_project_socket)&&!request.acknowledge_daemon_control{bail!("Enabling Docker access requires acknowledge_daemon_control=true; Docker socket access can control the host");}cfg.docker=config::Docker{enabled:request.enabled,socket:PathBuf::from(&request.socket),allowed_containers:request.allowed_containers.clone(),allow_start:request.allow_start,allow_stop:request.allow_stop,allow_restart:request.allow_restart,allow_project_socket:request.allow_project_socket};cfg.validate()?;let mut containers=toml_edit::Array::new();for name in &cfg.docker.allowed_containers{containers.push(name.as_str());}edit_service_section(&mut text,"docker",&[("enabled",toml_edit::Value::from(cfg.docker.enabled)),("socket",toml_edit::Value::from(cfg.docker.socket.to_string_lossy().as_ref())),("allowed_containers",toml_edit::Value::Array(containers)),("allow_start",toml_edit::Value::from(cfg.docker.allow_start)),("allow_stop",toml_edit::Value::from(cfg.docker.allow_stop)),("allow_restart",toml_edit::Value::from(cfg.docker.allow_restart)),("allow_project_socket",toml_edit::Value::from(cfg.docker.allow_project_socket))])?;let verified:Config=toml::from_str(&text).context("Generated Docker config is invalid")?;verified.validate()?;replace_config(path,text.as_bytes())?;Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"docker":verified.docker,"_operation_diff":config_diff(&original,&text)}))}
 pub fn update_git(path:&Path,request:UpdateGitRequest)->Result<Value>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();cfg.git.executable=PathBuf::from(&request.executable);cfg.git.author_name=request.author_name.clone();cfg.git.author_email=request.author_email.clone();cfg.validate()?;edit_service_section(&mut text,"git",&[("executable",toml_edit::Value::from(request.executable)),("author_name",toml_edit::Value::from(request.author_name)),("author_email",toml_edit::Value::from(request.author_email))])?;let verify:Config=toml::from_str(&text).context("Generated Git config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"git":verify.git,"_operation_diff":config_diff(&original,&text)}))}
@@ -216,6 +268,48 @@ mod tests{
     use super::*;
     fn config(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![crate::config::WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];c}
 
+    #[test]
+    fn setup_connection_save_preserves_identity_permissions_and_checks_revision(){
+        let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");
+        let mut c=Config::local_setup();c.security.data_dir=t.path().join("state");
+        c.server.bind="127.0.0.1:21345".parse().unwrap();
+        c.server.allowed_hosts.push("my-proxy".into());
+        let initial=toml::to_string_pretty(&c).unwrap().replace("[security]","# preserve-owner-settings\n[security]");
+        std::fs::write(&path,&initial).unwrap();
+        let key_path=c.owner_key_path();util::private_dir(&c.security.data_dir).unwrap();util::private_create(&key_path,b"fixture-owner-key").unwrap();
+        let request=UpdateConnectionRequest{expected_revision:revision(&path).unwrap(),public_url:"Demo.ngrok-free.app/".into(),connection_mode:"loopback".into()};
+        let saved=update_connection(&path,request.clone()).unwrap();let after=Config::load_file(&path).unwrap();
+        assert_eq!(saved["requires_restart"],true);assert_eq!(after.server.public_url,"https://demo.ngrok-free.app");
+        assert_eq!(after.server.bind.to_string(),"127.0.0.1:21345");assert!(!after.security.allow_http_loopback);
+        assert!(after.server.allowed_hosts.contains(&"my-proxy".into()));assert!(after.workspaces.is_empty());
+        assert_eq!(serde_json::to_value(&after.execution).unwrap(),serde_json::to_value(&c.execution).unwrap());
+        assert_eq!(serde_json::to_value(&after.transfer).unwrap(),serde_json::to_value(&c.transfer).unwrap());
+        assert_eq!(after.security.data_dir,c.security.data_dir);assert_eq!(std::fs::read(&key_path).unwrap(),b"fixture-owner-key");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# preserve-owner-settings"));
+        assert_eq!(crate::error::code(&update_connection(&path,request.clone()).unwrap_err()),"CONFIG_CONFLICT");
+        let previous=std::fs::read(&path).unwrap();let mut bad=request;bad.expected_revision=revision(&path).unwrap();
+        bad.public_url="https://user:secret@demo.ngrok-free.app/mcp".into();assert!(update_connection(&path,bad.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(),previous);
+        bad.public_url="next.ngrok.app".into();bad.connection_mode="host".into();assert!(update_connection(&path,bad.clone()).is_err());
+        bad.connection_mode="container".into();update_connection(&path,bad).unwrap();
+        assert_eq!(Config::load_file(&path).unwrap().server.bind.to_string(),"0.0.0.0:21345");
+    }
+    #[test]
+    fn setup_workspace_starts_without_project_grants_and_rejects_overlap(){
+        let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");let root=t.path().join("projects");
+        std::fs::create_dir_all(root.join("app")).unwrap();let mut c=Config::local_setup();c.security.data_dir=t.path().join("state");
+        util::private_dir(&c.security.data_dir).unwrap();std::fs::write(&path,toml::to_string_pretty(&c).unwrap()).unwrap();
+        let request=AddWorkspaceRequest{expected_revision:revision(&path).unwrap(),id:"work".into(),path:root.to_string_lossy().into_owned()};
+        let saved=add_workspace(&path,request.clone()).unwrap();assert_eq!(saved["workspace"]["project_count"],0);
+        let after=Config::load_file(&path).unwrap();let loaded=workspace::load(&after,&path).unwrap();assert_eq!(loaded.len(),1);assert!(loaded["work"].projects.is_empty());drop(loaded);
+        assert_eq!(crate::error::code(&add_workspace(&path,request.clone()).unwrap_err()),"CONFIG_CONFLICT");
+        for (id,p) in [("other",root.clone()),("child",root.join("app")),("relative",PathBuf::from("relative")),("missing",root.join("absent")),("work",root.clone())]{
+            let before=std::fs::read(&path).unwrap();let rejected=AddWorkspaceRequest{expected_revision:revision(&path).unwrap(),id:id.into(),path:p.to_string_lossy().into_owned()};
+            assert!(add_workspace(&path,rejected).is_err(),"Accepted {id}");assert_eq!(std::fs::read(&path).unwrap(),before);
+        }
+        let add=AddProjectRequest{expected_revision:revision(&path).unwrap(),workspace:"work".into(),project:Some("app".into()),path:root.join("app").to_string_lossy().into_owned(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:false,allow_git_push:false,execution_profile:None,environment:vec![]};
+        add_project(&path,add).unwrap();let after=Config::load_file(&path).unwrap();assert_eq!(workspace::load(&after,&path).unwrap()["work"].projects.len(),1);
+    }
     #[test]
     fn add_project_still_rejects_relative_and_outside_workspace_paths(){
         let temp=tempfile::tempdir().unwrap();

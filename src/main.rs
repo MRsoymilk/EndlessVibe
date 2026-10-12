@@ -6,7 +6,7 @@ use std::{path::{Path,PathBuf},sync::Arc};
 fn arguments()->Result<Option<Cli>>{
     let mut c=Cli::default();let mut args=std::env::args().skip(1);
     while let Some(arg)=args.next(){match arg.as_str(){
-        "--help"|"-h"=>{println!("EndlessVibe {}\n\nInitialize a workspace root once:\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Create a new configuration and an owner key; never overwrite config\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override bind address (default 0.0.0.0:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --probe-windows-sandbox       Run the fixed AppContainer hash-input self-check (service must be stopped)\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWindows process control verifies PID creation time and uses a local graceful shutdown event.\nWhen upgrading an older Windows process, stop it once manually and relaunch before --restart.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
+        "--help"|"-h"=>{println!("EndlessVibe {}\n\nStart here on a new computer:\n  endlessvibe\n  Open http://127.0.0.1:20001/setup for connection help and configuration.\n\nReopen setup (existing configuration and owner key are preserved):\n  endlessvibe --init\n\nExplicit CLI initialization (creates config and exits):\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Open local web setup, or create config with explicit --workspace\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override MCP bind address (web setup starts on 127.0.0.1:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --probe-windows-sandbox       Run the fixed AppContainer hash-input self-check (service must be stopped)\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWindows process control verifies PID creation time and uses a local graceful shutdown event.\nWhen upgrading an older Windows process, stop it once manually and relaunch before --restart.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--version"|"-V"=>{println!("EndlessVibe {}",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--config"=>c.config=Some(PathBuf::from(args.next().context("--config needs a path")?)),
         "--workspace"=>c.workspaces.push(args.next().context("--workspace needs ID=/absolute/path")?),
@@ -18,6 +18,72 @@ fn arguments()->Result<Option<Cli>>{
         _=>bail!("Unknown argument {arg}; use --help"),
     }}Ok(Some(c))
 }
+const SETUP_URL:&str="http://127.0.0.1:20001/setup";
+/// A bare --init is a non-destructive way to reopen the local setup page.
+/// Explicit --workspace initialization retains its create-and-exit behavior.
+fn web_setup_requested(c:&Cli)->Result<bool>{
+    if !c.init{return Ok(false);}
+    if !c.add_projects.is_empty()||c.check_sandbox||c.probe_windows_sandbox
+        ||c.issue_token||c.revoke_all||c.rotate_key||c.audit||c.status||c.stop||c.restart{
+        bail!("--init cannot be combined with project, credential, diagnostic or process management flags");
+    }
+    if !c.workspaces.is_empty(){return Ok(false);}
+    if c.public_url.is_some()||c.bind.is_some()||c.lan_only||c.read_only||c.no_exec||c.allow_shell||c.unsafe_host{
+        bail!("Use --init with optional --config to reopen web setup; explicit CLI initialization options also require --workspace ID=/absolute/root/path");
+    }
+    Ok(true)
+}
+fn automatic_setup_allowed(c:&Cli)->bool{
+    !c.init&&!c.lan_only&&c.workspaces.is_empty()&&c.add_projects.is_empty()
+        &&!c.read_only&&!c.no_exec&&!c.allow_shell&&!c.unsafe_host
+        &&!c.check_sandbox&&!c.probe_windows_sandbox&&!c.issue_token
+        &&!c.revoke_all&&!c.rotate_key&&!c.audit&&!c.status&&!c.stop&&!c.restart
+        &&c.public_url.is_none()&&c.bind.is_none()
+}
+fn setup_config_exists(path:&Path)->Result<bool>{
+    match std::fs::symlink_metadata(path){
+        Ok(md)=>{
+            if !md.is_file()||md.file_type().is_symlink(){
+                bail!("Setup configuration must be a regular file, not a directory or symbolic link: {}",path.display());
+            }
+            Ok(true)
+        },
+        Err(error)if error.kind()==std::io::ErrorKind::NotFound=>Ok(false),
+        Err(error)=>Err(error).with_context(||format!("Inspect setup configuration {}",path.display())),
+    }
+}
+/// Publish a local-only, zero-grant configuration under the state lock.
+/// create_new keeps concurrent initializers from replacing config or owner.key.
+fn initialize_web_setup(path:&Path,cfg:Config)->Result<bool>{
+    if setup_config_exists(path)?{return Ok(false);}
+    cfg.validate()?;
+    util::private_dir(path.parent().context("Config needs a parent directory")?)?;
+    util::private_dir(&cfg.security.data_dir)?;
+    let _instance=util::single_instance(&cfg.security.data_dir.join("service.lock"))
+        .context("Cannot initialize while an EndlessVibe instance uses this state directory; reopen setup with its existing --config path")?;
+    if setup_config_exists(path)?{return Ok(false);}
+    let key_path=cfg.security.data_dir.join("owner.key");
+    match std::fs::symlink_metadata(&key_path){
+        Ok(_)=>{let _=util::private_read(&key_path,4096).context("Existing owner.key is invalid; setup will not replace credentials")?;},
+        Err(error)if error.kind()==std::io::ErrorKind::NotFound=>{
+            util::private_create(&key_path,format!("{}\n",util::random_secret()?).as_bytes())?;
+        },
+        Err(error)=>return Err(error).context("Inspect existing owner.key without replacing it"),
+    }
+    util::private_create(path,toml::to_string_pretty(&cfg)?.as_bytes())?;
+    eprintln!("Created {}\nLocal setup: {SETUP_URL}\nNo Workspace or Project has been authorized.\nOwner key: {} (keep private; existing keys are preserved)\n",path.display(),key_path.display());
+    Ok(true)
+}
+fn report_existing_setup(settings:&Config)->Result<bool>{
+    match service_state(settings)?{
+        ServiceState::Stopped=>Ok(false),
+        ServiceState::Running(_)|ServiceState::LegacyRunning=>{
+            println!("EndlessVibe is already running.\nLocal setup and connection help: {SETUP_URL}\nConfiguration, owner key and Project permissions are unchanged.\nIf this page is unavailable in an older running version, update and restart that service first.");
+            Ok(true)
+        },
+    }
+}
+
 enum ServiceState{Stopped,Running(util::ProcessIdentity),LegacyRunning}
 fn service_state(settings:&Config)->Result<ServiceState>{
     util::private_dir(&settings.security.data_dir)?;
@@ -213,7 +279,7 @@ async fn main()->Result<()>{
     }
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"endlessvibe=info,rmcp=warn".into())).init();
     let Some(cli)=arguments()? else{return Ok(());};
-    #[cfg(unix)]if unsafe{libc::geteuid()}==0{bail!("Run EndlessVibe as a non-root user; root service execution is refused");}validate_process_control(&cli)?;validate_lan_only_flags(&cli)?;let path=cli.config.clone().unwrap_or_else(config::default_config_path);let path=if path.is_absolute(){path}else{std::env::current_dir()?.join(path)};
+    #[cfg(unix)]if unsafe{libc::geteuid()}==0{bail!("Run EndlessVibe as a non-root user; root service execution is refused");}validate_process_control(&cli)?;validate_lan_only_flags(&cli)?;let web_setup=web_setup_requested(&cli)?;let path=cli.config.clone().unwrap_or_else(config::default_config_path);let path=if path.is_absolute(){path}else{std::env::current_dir()?.join(path)};
     if cli.probe_windows_sandbox {
         if cli.init||cli.lan_only||cli.check_sandbox||cli.status||cli.stop||cli.restart
            ||cli.issue_token||cli.revoke_all||cli.rotate_key||cli.audit
@@ -238,11 +304,13 @@ async fn main()->Result<()>{
         bail!("--probe-windows-sandbox is supported only on Windows");
     }
     if cli.status||cli.stop||cli.restart{let settings=Config::load(&path)?;if cli.status{match service_state(&settings)?{ServiceState::Stopped=>println!("stopped"),ServiceState::Running(identity)=>println!("running pid={} start_ticks={}",identity.pid,identity.start_ticks),ServiceState::LegacyRunning=>println!("running legacy_instance=true pid_file=false")};return Ok(());}if cli.stop{return stop_service(&settings).await.map(|_|());}if cli.restart{let _=stop_service(&settings).await?;println!("Starting EndlessVibe with {}",path.display());}}
-    if cli.init{if !cli.add_projects.is_empty(){bail!("Use --workspace with --init; --add-project modifies an existing config");}if cli.check_sandbox{bail!("--check-sandbox probes an existing config; do not combine it with --init");}return initialize(&cli,&path);}
+    if cli.init&&!web_setup{return initialize(&cli,&path);}
     if cli.lan_only {return convert_to_lan_only(&path);}
     if !cli.add_projects.is_empty(){return add_projects(&cli,&path);}
     if !cli.workspaces.is_empty()||cli.read_only||cli.no_exec||cli.allow_shell||cli.unsafe_host{bail!("Workspace/permission flags require --init or --add-project");}
-    let mut settings=Config::load(&path)?;if let Some(url)=cli.public_url{settings.server.public_url=url.trim_end_matches('/').into();}if let Some(bind)=cli.bind{settings.server.bind=bind.parse()?;}settings.validate()?;
+    if web_setup||automatic_setup_allowed(&cli){initialize_web_setup(&path,Config::local_setup())?;}
+    let mut settings=Config::load(&path)?;if web_setup&&report_existing_setup(&settings)?{return Ok(());}
+    if let Some(url)=cli.public_url{settings.server.public_url=url.trim_end_matches('/').into();}if let Some(bind)=cli.bind{settings.server.bind=bind.parse()?;}settings.validate()?;
     if cli.check_sandbox{if cli.issue_token||cli.revoke_all||cli.rotate_key||cli.audit{bail!("--check-sandbox cannot be combined with credential/audit maintenance operations");}let diagnostics=process::sandbox_diagnostics(&settings).await?;println!("{}",serde_json::to_string_pretty(&diagnostics)?);let programs=process::probe_bubblewrap(&settings).await?;for(program,path)in &programs{println!("sandbox program: {program} -> {path}");}println!("bubblewrap sandbox probe: ok ({} allowed/required programs visible)",programs.len());return Ok(());}
     if cli.issue_token||cli.revoke_all||cli.rotate_key||cli.audit{
         util::private_dir(&settings.security.data_dir)?;let settings=Arc::new(settings);let db=Arc::new(Store::open(&settings.security.data_dir.join("state.sqlite3"))?);let auth=Auth::new(settings.clone(),db.clone())?;
@@ -276,6 +344,7 @@ async fn main()->Result<()>{
     if rt.config.server.lan_only {
         eprintln!("Mode: LAN-only (no public ChatGPT URL)\nNodes Dashboard: http://127.0.0.1:20001/nodes\nLAN Transfer (paired TLS): {}\nLocal MCP (OAuth): {}/mcp\n",rt.config.transfer.listen,rt.config.server.public_url);
     }else{eprintln!("Dashboard: http://127.0.0.1:20001/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.public_url);}
+    eprintln!("Setup and connection help (this computer only): {SETUP_URL}\nReopen at any time with: endlessvibe --init --config \"{}\"\n",path.display());
     #[cfg(windows)]
     let shutdown_handle=_service_pid.shutdown_handle();
     let shutdown_rt=rt.clone();
@@ -331,6 +400,126 @@ async fn shutdown_signal(
 #[cfg(test)]mod tests{
     use super::*;
     fn cfg(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];c}
+    fn setup_cfg(state:&Path)->Config{let mut c=Config::local_setup();c.security.data_dir=state.into();c}
+    #[test]
+    fn setup_mode_distinguishes_reopen_explicit_init_and_maintenance(){
+        let mut c=Cli::default();
+        assert!(automatic_setup_allowed(&c));
+        assert!(!web_setup_requested(&c).unwrap());
+        c.init=true;
+        assert!(web_setup_requested(&c).unwrap());
+        assert!(!automatic_setup_allowed(&c));
+        c.config=Some("alternate.toml".into());
+        assert!(web_setup_requested(&c).unwrap());
+        c.workspaces.push("root=/explicit/root".into());
+        assert!(!web_setup_requested(&c).unwrap(),"Explicit CLI initialization still creates config and exits");
+        c.issue_token=true;
+        assert!(web_setup_requested(&c).is_err(),"Initialization must not ignore credential flags");
+        c.issue_token=false;
+        c.workspaces.clear();c.public_url=Some("https://example.org".into());
+        assert!(web_setup_requested(&c).is_err(),"Reopening setup cannot silently override saved settings");
+        for c in [Cli{issue_token:true,..Cli::default()},Cli{revoke_all:true,..Cli::default()},
+            Cli{rotate_key:true,..Cli::default()},Cli{audit:true,..Cli::default()},
+            Cli{check_sandbox:true,..Cli::default()},Cli{probe_windows_sandbox:true,..Cli::default()},
+            Cli{status:true,..Cli::default()},Cli{stop:true,..Cli::default()},
+            Cli{restart:true,..Cli::default()},Cli{lan_only:true,..Cli::default()},
+            Cli{add_projects:vec!["root=/explicit/app".into()],..Cli::default()}]{
+            assert!(!automatic_setup_allowed(&c),"Maintenance must not initialize a missing configuration");
+        }
+    }
+    #[test]
+    fn first_start_creates_private_local_setup_without_project_grants(){
+        let t=tempfile::tempdir().unwrap();let state=t.path().join("state");
+        let path=t.path().join("config/config.toml");
+        assert!(initialize_web_setup(&path,setup_cfg(&state)).unwrap());
+        let saved=Config::load_file(&path).unwrap();
+        assert_eq!(saved.server.bind.to_string(),"127.0.0.1:20000");
+        assert_eq!(saved.server.public_url,"http://127.0.0.1:20000");
+        assert!(saved.security.allow_http_loopback);
+        assert!(!saved.server.lan_only&&!saved.transfer.enabled);
+        assert!(!saved.execution.allow_shell&&!saved.execution.allow_network);
+        assert!(saved.workspaces.is_empty());
+        assert!(workspace::load(&saved,&path).unwrap().is_empty());
+        let owner=util::private_read(&state.join("owner.key"),4096).unwrap();
+        assert_eq!(std::str::from_utf8(&owner).unwrap().trim().len(),43);
+        endlessvibe::platform::validate_private_file(&path).unwrap();
+        assert!(!report_existing_setup(&saved).unwrap());
+    }
+    #[test]
+    fn reopening_setup_preserves_config_owner_key_and_authorization_bytes(){
+        let t=tempfile::tempdir().unwrap();let state=t.path().join("state");
+        let root=t.path().join("projects");std::fs::create_dir_all(root.join("app")).unwrap();
+        util::private_dir(&state).unwrap();
+        let owner=util::random_secret().unwrap();
+        util::private_create(&state.join("owner.key"),owner.as_bytes()).unwrap();
+        let mut before=cfg(&root,&state);
+        before.server.public_url="https://existing.example.org".into();
+        before.workspaces[0].projects.push(ProjectConfig{id:"app".into(),path:"app".into(),
+            allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,
+            allow_git_push:false,execution_profile:config::default_project_profile(),environment:vec![]});
+        let path=t.path().join("config.toml");
+        let original=format!("{}\n# preserve-comment-and-project-grants\n",toml::to_string_pretty(&before).unwrap());
+        util::private_create(&path,original.as_bytes()).unwrap();
+        let authorization:&[u8]=b"existing-private-authorization-state";
+        util::private_create(&state.join("state.sqlite3"),authorization).unwrap();
+        assert!(!initialize_web_setup(&path,setup_cfg(&state)).unwrap());
+        let saved=Config::load_file(&path).unwrap();
+        assert!(!report_existing_setup(&saved).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(),original.as_bytes());
+        assert_eq!(util::private_read(&state.join("owner.key"),4096).unwrap(),owner.as_bytes());
+        assert_eq!(std::fs::read(state.join("state.sqlite3")).unwrap(),authorization);
+        assert_eq!(saved.workspaces[0].projects[0].id,"app");
+        assert!(saved.workspaces[0].projects[0].allow_exec);
+    }
+    #[test]
+    fn setup_reuses_a_running_instance_without_replacing_config_or_credentials(){
+        let t=tempfile::tempdir().unwrap();let state=t.path().join("state");
+        let path=t.path().join("config.toml");
+        initialize_web_setup(&path,setup_cfg(&state)).unwrap();
+        let saved=Config::load_file(&path).unwrap();
+        let original=std::fs::read(&path).unwrap();let owner=std::fs::read(state.join("owner.key")).unwrap();
+        let _instance=util::single_instance(&state.join("service.lock")).unwrap();
+        assert!(report_existing_setup(&saved).unwrap(),"Legacy instances still reuse the existing setup page");
+        #[cfg(any(target_os="linux",windows))]
+        {
+            let _identity=util::install_service_identity(&state).unwrap();
+            assert!(report_existing_setup(&saved).unwrap(),"Verified running instances must not start a duplicate service");
+        }
+        assert!(!initialize_web_setup(&path,setup_cfg(&state)).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(),original);
+        assert_eq!(std::fs::read(state.join("owner.key")).unwrap(),owner);
+    }
+    #[test]
+    fn initial_setup_refuses_a_state_directory_already_in_use(){
+        let t=tempfile::tempdir().unwrap();let state=t.path().join("state");
+        util::private_dir(&state).unwrap();let path=t.path().join("config.toml");
+        let _instance=util::single_instance(&state.join("service.lock")).unwrap();
+        assert!(initialize_web_setup(&path,setup_cfg(&state)).is_err());
+        assert!(!path.exists());assert!(!state.join("owner.key").exists());
+    }
+    #[test]
+    fn retrying_initial_setup_reuses_an_existing_private_owner_key(){
+        let t=tempfile::tempdir().unwrap();let state=t.path().join("state");
+        util::private_dir(&state).unwrap();let path=t.path().join("config.toml");
+        let owner=util::random_secret().unwrap();
+        util::private_create(&state.join("owner.key"),owner.as_bytes()).unwrap();
+        assert!(initialize_web_setup(&path,setup_cfg(&state)).unwrap());
+        assert_eq!(std::fs::read(state.join("owner.key")).unwrap(),owner.as_bytes());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn initial_setup_never_replaces_a_dangling_config_or_owner_key_symlink(){
+        use std::os::unix::fs::symlink;
+        let t=tempfile::tempdir().unwrap();let state=t.path().join("state");
+        let path=t.path().join("config.toml");let outside=t.path().join("outside.toml");
+        symlink(&outside,&path).unwrap();
+        assert!(initialize_web_setup(&path,setup_cfg(&state)).is_err());
+        assert!(!outside.exists());
+        std::fs::remove_file(&path).unwrap();util::private_dir(&state).unwrap();
+        let outside_key=t.path().join("outside.key");symlink(&outside_key,state.join("owner.key")).unwrap();
+        assert!(initialize_web_setup(&path,setup_cfg(&state)).is_err());
+        assert!(!path.exists()&&!outside_key.exists());
+    }
     #[test]
     fn lan_only_flags_cannot_expose_mcp_over_http_lan() {
         let mut cli = Cli::default();

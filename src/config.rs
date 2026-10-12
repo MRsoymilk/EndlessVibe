@@ -69,11 +69,49 @@ fn default_execution_path()->String{
     if cfg!(windows){env::var("PATH").unwrap_or_else(|_|"C:\\Windows\\System32;C:\\Windows".into())}
     else{"/usr/local/bin:/usr/bin:/bin".into()}
 }
+/// Accept a domain or HTTPS origin; configuration is not a public reachability test.
+pub fn normalize_connection_url(input:&str)->Result<String>{
+    let input=input.trim();
+    if input.is_empty()||input.len()>2048||input.chars().any(|c|c.is_whitespace()||c.is_control())||input.contains('\\'){
+        bail!("Enter a public HTTPS domain without spaces");
+    }
+    let candidate=if input.contains("://"){input.to_owned()}else{format!("https://{input}")};
+    let (_,authority)=candidate.split_once("://").context("Enter a public HTTPS domain")?;
+    if authority.contains('@')||authority.split_once('/').is_some_and(|(_,path)|!path.is_empty()){
+        bail!("Enter the domain only, without credentials or a path such as /mcp");
+    }
+    let url=Url::parse(&candidate).context("Invalid public domain")?;
+    if url.scheme()!="https"||!url.username().is_empty()||url.password().is_some()
+        ||url.query().is_some()||url.fragment().is_some()||url.path()!="/"||url.port()==Some(0){
+        bail!("ChatGPT connection requires an HTTPS origin without credentials, path, query or fragment");
+    }
+    let host=url.host_str().context("Public domain is missing")?;
+    let reserved=["localhost","local","invalid","test","example","example.com","example.net","example.org"];
+    if !matches!(url.host(),Some(url::Host::Domain(_)))||!host.contains('.')
+        ||host.split('.').any(|label|label.is_empty()||label.len()>63||label.starts_with('-')||label.ends_with('-')||!label.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'))
+        ||reserved.iter().any(|name|host==*name||host.ends_with(&format!(".{name}"))){
+        bail!("Use your public DNS or ngrok domain, not a local address or example domain");
+    }
+    Ok(url.origin().ascii_serialization())
+}
 pub fn valid_id(s: &str) -> bool { !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') }
 
 impl Config {
+    /// Fresh installations expose only the local setup page until a public origin is saved.
+    pub fn local_setup()->Self {
+        let mut config=Self::default();
+        config.server.bind="127.0.0.1:20000".parse().unwrap();
+        config.server.public_url="http://127.0.0.1:20000".into();
+        config.security.allow_http_loopback=true;
+        config
+    }
+    pub fn owner_key_path(&self)->PathBuf{self.security.data_dir.join("owner.key")}
+    pub fn public_connection_configured(&self)->bool {
+        self.public_url().is_ok_and(|url|url.scheme()=="https")
+            && normalize_connection_url(&self.server.public_url).is_ok()
+    }
     pub fn load_file(path: &Path) -> Result<Self> {
-        let mut c: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("Read {}; initialize first with --init --workspace NAME=/absolute/root/path", path.display()))?).context("Invalid config.toml")?;
+        let mut c: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("Read {}; run endlessvibe --init to open local setup, or use --init --workspace NAME=/absolute/root/path", path.display()))?).context("Invalid config.toml")?;
         c.server.public_url = c.server.public_url.trim_end_matches('/').to_owned();c.validate()?;Ok(c)
     }
     pub fn load(path: &Path) -> Result<Self> {
@@ -297,6 +335,30 @@ impl Config {
         c.docker.enabled=true;
         c.docker.allowed_containers.push("allowed".into());
         assert!(c.validate().unwrap_err().to_string().contains("Windows"));
+    }
+    #[test]
+    fn local_setup_preserves_platform_safety_without_authorizing_projects(){
+        let c=Config::local_setup();c.validate().unwrap();
+        assert!(c.server.bind.ip().is_loopback());assert_eq!(c.server.bind.port(),20000);
+        assert_eq!(c.server.public_url,"http://127.0.0.1:20000");
+        assert!(c.security.allow_http_loopback);assert!(!c.server.lan_only);
+        assert!(!c.transfer.enabled);assert!(c.workspaces.is_empty());
+        assert_eq!(c.execution.backend,Config::default().execution.backend);
+        assert!(!c.execution.allow_shell&&!c.execution.allow_network&&!c.execution.acknowledge_unsafe_host_execution);
+        assert!(!c.public_connection_configured());assert!(!Config::default().public_connection_configured());
+    }
+    #[test]
+    fn connection_url_normalizes_domains_and_rejects_misleading_origins(){
+        assert_eq!(normalize_connection_url("  Demo.ngrok-free.app  ").unwrap(),"https://demo.ngrok-free.app");
+        assert_eq!(normalize_connection_url("https://demo.ngrok.app:443/").unwrap(),"https://demo.ngrok.app");
+        assert_eq!(normalize_connection_url("demo.ngrok.app:8443").unwrap(),"https://demo.ngrok.app:8443");
+        for bad in ["","http://demo.ngrok.app","https://localhost","https://127.0.0.1","https://[::1]",
+            "mcp.example.com","demo.local","demo.invalid","demo.test","https://user:pass@demo.ngrok.app",
+            "https://@demo.ngrok.app","demo.ngrok.app/mcp","demo.ngrok.app/mcp/..","demo.ngrok.app/%2e",
+            "demo.ngrok.app?token=secret","demo.ngrok.app#fragment","demo.ngrok.app:0","//demo.ngrok.app",
+            "demo.ngrok.app\\mcp","demo.ngrok.app\n.evil","demo..ngrok.app","-demo.ngrok.app"]{
+            assert!(normalize_connection_url(bad).is_err(),"Accepted {bad:?}");
+        }
     }
     #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, if cfg!(target_os="linux"){"bubblewrap"}else{"disabled"}); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
     #[test]
