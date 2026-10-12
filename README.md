@@ -110,51 +110,44 @@ cargo build --release
 cargo test --locked
 ```
 
-### 2. Start and open Setup
+### 2. 使用 --init 进入独立初始化向导
 
-全新平台无需预先填写域名或 Workspace，直接启动程序：
+全新安装在终端执行 `endlessvibe --init`（源码构建时可以使用 `./target/release/endlessvibe --init`）。Windows 在项目目录中执行：
 
-```bash
-./target/release/endlessvibe
+```powershell
+.\target\release\endlessvibe.exe --init
 ```
 
-Windows 对应命令为 `.\target\release\endlessvibe.exe`。将程序安装到 PATH 后，也可直接运行 `endlessvibe`。
+此时**只启动本机网页初始化向导**：[http://127.0.0.1:20001/](http://127.0.0.1:20001/)。初始化期间不提供公网 MCP/OAuth、节点 Transfer 或完整 Dashboard。没有配置时会安全创建私有配置与 Owner Key，不会自动授权项目。
 
-配置不存在时，程序自动创建私有配置和 Owner Key，然后提供本机 [初始化与连接帮助](http://127.0.0.1:20001/setup)。初始配置没有任何 Workspace 或 Project，Node Transfer 默认关闭，命令执行沿用所在平台的安全默认值。
+页面顶部展示四个流程节点，**下方只显示当前节点的配置**：**连接域名 → Workspace → Project 授权 → 完成配置**。当前节点保存完成后才可进入下一步。管理网页始终仅允许本机访问，不要代理或暴露端口 `20001`.
 
-| 入口 | 网页首次初始化的默认值 |
-| --- | --- |
-| **Setup / 连接帮助** | [http://127.0.0.1:20001/setup](http://127.0.0.1:20001/setup)，仅本机 |
-| **Dashboard** | [http://127.0.0.1:20001](http://127.0.0.1:20001)，仅本机 |
-| **MCP** | `127.0.0.1:20000`，本机资源地址 `http://127.0.0.1:20000/mcp` |
-| **Workspace / Project** | 均为空，添加前没有项目可供客户端操作 |
-| **Nodes / Transfer** | 关闭，后续可按需要配置与配对 |
+### 3. 按照向导完成配置
 
-已有安装正常启动时沿用原配置，不会切换监听地址、删除项目或重置密钥。
+1. **连接域名**：填写实际的 HTTPS 域名或 ngrok / Cloudflare Tunnel 分配的域名，选择本机隧道或 Docker 代理。网页显示 MCP 地址与代理上游并校验域名。
+2. **Workspace**：输入 ID 和已存在的绝对目录，添加管理根。仅添加 Workspace 不授予任何 Project 权限。
+3. **Project 授权**：选择 Workspace，登记具体项目目录。默认只读；写入、命令执行和 Git Commit 需要主动勾选。
+4. **完成配置**：查看正常启动命令，复制 `https://你的域名/mcp`，按页面指引完成 ChatGPT OAuth 授权。
 
-### 3. Configure from the browser
-
-在 `/setup` 中完成以下配置：
-
-1. **添加 Workspace 管理根。** 填写简单 ID 和已经存在的绝对目录，例如 `projects` 与 `/home/user/projects`，或 Windows 的 `D:\project`。登记管理根不会自动授权其中的项目；随后前往 **Projects** 页面选择具体项目及其读写、执行、Git 权限。
-2. **设置对外 HTTPS 域名。** 填写实际分配给你或由你管理的域名；例如将 `your-domain.ngrok.app` 或 `https://your-domain.ngrok.app` 替换为自己的 ngrok 域名。裸域名会补全为 HTTPS；此处填写域名或 origin，不附加 `/mcp`、密钥或查询参数。页面根据配置给出 MCP 地址和连接步骤。
-3. **配置 Tunnel 或反向代理。** 将该 HTTPS 域名转发到服务实际的 MCP 监听端口，并保留 MCP 与 OAuth 端点的路由。域名设置写入 EndlessVibe 配置；DNS、证书或 Tunnel 仍由所使用的平台管理。
-
-例如，在本机安装并配置 ngrok 后，可使用账户中可用的域名：
+例如主机上运行的 ngrok 隧道：
 
 ```bash
 ngrok http 20000 --url https://your-domain.ngrok.app
 ```
 
-把示例域名替换为实际分配或配置的域名，并在 Setup 中保存相同的 HTTPS origin；把 `20000` 替换为当前 MCP 监听端口。`20001` 是本机管理 Dashboard，保持仅本机访问。ngrok 参数详见 [官方 CLI 文档](https://ngrok.com/docs/gateway/agent/cli)；Cloudflare 部署见 [Tunnel 配置](docs/DOCKER_TUNNEL.md)。
+请使用账户实际分配的域名和 MCP 监听端口，不要将仅本机使用的 Dashboard 端口 `20001` 暴露到公网。
 
-### 4. Save and apply configuration
+### 4. 退出初始化，正常启动服务
 
-服务地址等配置保存后，页面会区分**已保存配置**与**当前运行状态**，提示是否需要重启。按原有启动方式重启：手动启动的实例使用终端或已有进程控制；systemd、Windows 服务或其他服务管理器管理的实例使用原管理器。网页提供操作提示，保存本身不会重启进程。
+完成向导后，在初始化终端按 Ctrl+C（或使用原服务管理器停止），再**不带 `--init`** 正常启动：
 
-`ENDLESSVIBE_BIND`、`ENDLESSVIBE_PUBLIC_URL` 环境变量，以及启动时的 `--bind`、`--public-url` 参数可覆盖配置文件。若重启后仍显示旧地址，应同时检查原服务的环境变量和启动参数。重启后返回 Setup，核对实际生效地址，再继续连接客户端。
+```bash
+endlessvibe
+```
 
-Linux / Windows 可通过 `--status`、`--stop`、`--restart` 管理已配置的服务实例。Windows 使用进程启动时间校验和专用退出事件优雅停止；从旧版升级时，须先用 Ctrl+C 或原服务管理器停止旧进程一次。macOS 使用原启动方式停止并启动。这些操作不需要开启 `host` 执行后端。
+Windows 源码构建等价命令是 `.\target\release\endlessvibe.exe`。原配置及 Owner Key 会保留。**正常 Dashboard 不再包含 Setup 导航或 `/setup` 配置接口**。如需修改域名或增加初始项目，请先停止服务，再明确运行 `--init`。
+
+向导会区分“已保存配置”和“当前运行地址”，并提示启动环境中的 `ENDLESSVIBE_BIND`、`ENDLESSVIBE_PUBLIC_URL`、`--bind`、`--public-url` 是否覆盖文件配置。公网隧道仍需转发 MCP 与 OAuth 全部路径；本机保存成功不代表公网可达。
 
 ### 5. Connect ChatGPT
 
@@ -190,7 +183,7 @@ Windows 从项目源码根目录运行时，可直接使用以下命令，无需
 .\target\release\endlessvibe.exe --init --config "C:\path\to\config.toml"
 ```
 
-如果服务正在运行，命令输出已有 `/setup` 地址后退出；如果服务已停止，则使用原配置启动。已有配置、Owner Key、Workspace / Project 授权和注释都会保留。`--init` 重新打开引导，不会清空安装数据。
+正常服务正在运行时，必须先通过 `--stop` 或原服务管理器停止；`--init` 会拒绝与服务并发启动。停止后执行 `--init`，只启动本机初始化向导。已有配置、Owner Key、Workspace / Project 授权和注释都会保留。`--init` 重新打开引导，不会清空安装数据。
 
 ### Optional: explicit CLI initialization
 

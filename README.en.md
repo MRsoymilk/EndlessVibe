@@ -110,51 +110,44 @@ cargo build --release
 cargo test --locked
 ```
 
-### 2. Start and open Setup
+### 2. Initialize using the dedicated wizard
 
-On a new computer, start without configuring a domain or Workspace first:
+On a new machine run `endlessvibe --init` (or `./target/release/endlessvibe --init` from a source build). On Windows use:
 
-```bash
-./target/release/endlessvibe
+```powershell
+.\target\release\endlessvibe.exe --init
 ```
 
-On Windows, use `.\target\release\endlessvibe.exe`. Once installed on PATH, the command is simply `endlessvibe`.
+This launches **only** the local initialization wizard at [http://127.0.0.1:20001/](http://127.0.0.1:20001/). It does **not** start public MCP/OAuth, LAN Transfer, or the normal Dashboard while the wizard is open. A missing configuration and owner key are created with private permissions, without granting any Projects.
 
-If the configuration is missing, EndlessVibe creates a private configuration and owner key, then serves the local [Setup and connection help](http://127.0.0.1:20001/setup). The initial configuration has no Workspaces or Projects, Node Transfer is disabled, and command execution retains the platform's safe defaults.
+The wizard has four steps across the top. Only the current step's configuration is displayed: **Public domain → Workspace → Project authorization → Finish**. The Next button unlocks when that step has been saved. The wizard is local-only; never reverse-proxy port `20001`.
 
-| Entry | Defaults for a new web setup |
-| --- | --- |
-| **Setup / connection help** | [http://127.0.0.1:20001/setup](http://127.0.0.1:20001/setup), local only |
-| **Dashboard** | [http://127.0.0.1:20001](http://127.0.0.1:20001), local only |
-| **MCP** | `127.0.0.1:20000`, with local resource URL `http://127.0.0.1:20000/mcp` |
-| **Workspaces / Projects** | Empty; clients have no authorized projects to operate on |
-| **Nodes / Transfer** | Disabled until configured and paired |
+### 3. Complete the four wizard steps
 
-Starting an existing installation preserves its configuration, listening address, projects, and credentials.
+1. **Public domain:** provide your own HTTPS origin or a domain assigned by ngrok / Cloudflare Tunnel. Choose whether the tunnel runs on the host or in Docker. The wizard previews the MCP URL and proxy upstream and saves only validated origins.
+2. **Workspace:** choose an ID and an existing absolute directory. A Workspace itself grants no Project permissions.
+3. **Project authorization:** select a Workspace and add a specific existing project directory. Read-only is the default; write, command and Git Commit access must be explicitly selected.
+4. **Finish:** read the generated normal startup command, copy the `https://your-domain/mcp` URL and follow the ChatGPT OAuth instructions.
 
-### 3. Configure from the browser
-
-Use `/setup` to complete these steps:
-
-1. **Add a Workspace management root.** Enter a simple ID and an existing absolute directory, such as `projects` and `/home/user/projects`, or `D:\project` on Windows. This does not authorize the root's child projects automatically. Open **Projects** afterwards to select individual projects and grant file, execution, and Git permissions.
-2. **Set the public HTTPS domain.** Enter a domain assigned to you or managed by you; replace `your-domain.ngrok.app` or `https://your-domain.ngrok.app` with your actual ngrok domain. A bare domain receives the HTTPS scheme. Use a domain or origin without `/mcp`, credentials, or query parameters. Setup derives the MCP URL and connection instructions from this setting.
-3. **Configure a tunnel or reverse proxy.** Forward that HTTPS origin to the actual MCP listening port, retaining routes for MCP and OAuth. The domain field updates EndlessVibe's configuration; your chosen provider still manages DNS, certificates, and the tunnel.
-
-For example, after installing and configuring ngrok locally, use a domain available to your account:
+For example, after configuring your own ngrok account, a host tunnel can use:
 
 ```bash
 ngrok http 20000 --url https://your-domain.ngrok.app
 ```
 
-Replace the example domain with the one assigned or configured for your account, and save the same HTTPS origin in Setup. Replace `20000` with the active MCP port. Port `20001` is the local management Dashboard and stays private. See the [ngrok CLI reference](https://ngrok.com/docs/gateway/agent/cli) or the [Cloudflare Tunnel guide](docs/DOCKER_TUNNEL.md).
+Use your *actual* assigned domain and the configured MCP port; never expose the local Dashboard port `20001`.
 
-### 4. Save and apply configuration
+### 4. Exit initialization and launch the normal service
 
-After saving service settings, Setup distinguishes **saved configuration** from the **running state** and reports when a restart is needed. Apply changes through the original startup method: use the terminal or existing process controls for manual launches, and the original manager for systemd, Windows services, or another supervisor. The page provides instructions; saving does not restart the process.
+After completing the wizard, stop the `--init` process (Ctrl+C or its original service manager) and launch the binary **without `--init`**:
 
-The `ENDLESSVIBE_BIND` and `ENDLESSVIBE_PUBLIC_URL` environment variables, and the `--bind` and `--public-url` startup arguments, can override the file. If the old address remains after a restart, check the service's environment and launch arguments too. Return to Setup to confirm the effective address before connecting the client.
+```bash
+endlessvibe
+```
 
-Linux and Windows provide `--status`, `--stop`, and `--restart` for the configured instance. Windows verifies process creation time and signals a dedicated graceful shutdown event. When upgrading an older Windows instance, stop it once with Ctrl+C or its original manager. On macOS, stop and start through the original launch method. None of these controls requires the `host` execution backend.
+Windows source-build equivalent: `.\target\release\endlessvibe.exe`. The saved config and owner key are retained. **The normal Dashboard has no Setup tab or `/setup` API routes**. Reconfiguration requires stopping the service and explicitly running `--init` again.
+
+The page distinguishes saved connection settings from active state and explains startup overrides. Check `ENDLESSVIBE_BIND`, `ENDLESSVIBE_PUBLIC_URL`, `--bind`, and `--public-url` if the normal service does not use the saved address. A public proxy still needs the MCP and OAuth routes; the wizard itself never verifies external reachability.
 
 ### 5. Connect ChatGPT
 
@@ -190,7 +183,7 @@ For a custom configuration, add `--config`. This Windows example uses a placehol
 .\target\release\endlessvibe.exe --init --config "C:\path\to\config.toml"
 ```
 
-If the service is running, the command prints the existing `/setup` address and exits. If it is stopped, it starts using the existing configuration. Configuration, owner keys, Workspace / Project grants, and comments are preserved. Reopening setup does not reset installation data.
+If the normal service is running, stop it first (with `--stop` or the original service manager); `--init` refuses a concurrent instance. When stopped, `--init` runs the dedicated wizard only. Configuration, owner keys, Workspace / Project grants, and comments are preserved. Reopening setup does not reset installation data.
 
 ### Optional: explicit CLI initialization
 
