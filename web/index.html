@@ -20,7 +20,7 @@
 <main class="shell">
 <header class="topbar">
 <div class="brand"><img class="brand-icon" src="/assets/EndlessVibe.png" width="76" height="48" alt="" decoding="async"><div><p class="eyebrow">ENDLESSVIBE</p><h1>Dashboard</h1></div></div>
-<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="projects" href="/projects">Projects</a><a data-nav="nodes" href="/nodes">Nodes</a><a data-nav="tasks" href="/tasks">Tasks</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="setup" href="/setup">连接向导</a><a data-nav="mcp" href="/mcp">MCP</a><a data-nav="sandbox" href="/sandbox">沙箱</a><a data-nav="config" href="/config">配置</a></nav>
+<nav class="top-nav" aria-label="主导航"><a data-nav="home" href="/">首页</a><a data-nav="projects" href="/projects">Projects</a><a data-nav="nodes" href="/nodes">Nodes</a><a data-nav="tasks" href="/tasks">Tasks</a><a data-nav="activity" href="/activity">活动</a><a data-nav="operations" href="/operations">日志</a><a data-nav="mcp" href="/mcp">MCP</a><a data-nav="sandbox" href="/sandbox">沙箱</a><a data-nav="config" href="/config">配置</a></nav>
 <div class="display-preferences" role="group" aria-label="主题与语言"><label class="display-preference" for="theme-select"><span class="pref-icon" aria-hidden="true">◐</span><span>主题</span><select id="theme-select" aria-label="主题"><option value="dark">深色</option><option value="light">浅色</option></select></label><label class="display-preference" for="language-select"><span class="pref-icon" aria-hidden="true">文</span><span>语言</span><select id="language-select" aria-label="语言"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
 <div id="header-status" class="header-status pending"><span class="dot"></span><span id="header-status-text">检查中</span></div>
 </header>
@@ -28,9 +28,7 @@
 <nav class="breadcrumb" aria-label="面包屑"><a href="/">EndlessVibe</a><span>/</span><span id="breadcrumb-current">首页</span></nav>
 
 <section class="page" data-page="home">
-<section class="setup-home-banner" id="setup-home-banner" hidden aria-labelledby="setup-home-title">
-<div><p class="eyebrow">GET STARTED</p><h2 id="setup-home-title">将本机项目连接到 ChatGPT</h2><p id="setup-home-description">按照向导设置域名、连接 ChatGPT，再选择允许访问的项目。</p></div><a class="setup-primary-link" href="/setup">打开连接向导</a>
-</section>
+
 
 <section class="overview" aria-labelledby="status-title">
 <div class="overview-top"><div><p class="eyebrow">SERVICE OVERVIEW</p><h2 id="status-title">正在检查服务</h2></div><button type="button" id="refresh">立即刷新</button></div>
@@ -117,65 +115,6 @@
 </div>
 </section>
 
-<section class="page setup-page" data-page="setup">
-<div class="page-title"><div><p class="eyebrow">CONNECT TO CHATGPT</p><h2>连接 ChatGPT</h2><p>从本机开始：设置公网域名、重启服务，再连接并授权项目。以后可随时回到此向导修改设置。</p></div><div class="config-reload-actions"><span id="setup-state" class="setup-state" data-state="new">检查配置状态</span><button type="button" id="setup-refresh">检查当前配置</button></div></div>
-<div id="setup-load-status" class="write-status" role="status" aria-live="polite"></div>
-<div class="config-grid setup-grid">
-<section class="config-card full setup-overview" aria-labelledby="setup-overview-title">
-<div class="config-heading"><h3 id="setup-overview-title">本机连接状态</h3><span id="setup-host-os">—</span></div>
-<div class="setup-state-grid"><article><p class="label">已保存地址</p><strong class="mono-value" id="setup-saved-url">—</strong><p><span>监听地址</span> <code id="setup-saved-bind">—</code></p></article><article><p class="label">当前运行地址</p><strong class="mono-value" id="setup-active-url">—</strong><p><span>监听地址</span> <code id="setup-active-bind">—</code></p></article></div>
-<p class="config-note" id="setup-state-note">正在读取连接设置…</p>
-<details class="setup-help"><summary>本机配置位置</summary><p><code id="setup-config-path">—</code></p><p>连接向导仅在本机 Dashboard 提供。公网隧道应指向 MCP 服务端口，不能指向 Dashboard。</p></details>
-<div id="setup-environment-note" class="setup-notice" hidden><strong>启动参数可能覆盖网页设置</strong><p id="setup-environment-variables"><span>检测到启动环境变量：</span><code id="setup-environment-keys"></code></p><p>请修改原来的启动环境后再重启，同时检查启动命令中的 <code>--bind</code> 和 <code>--public-url</code>。以这里的当前运行地址为准。</p></div>
-</section>
-
-<section class="config-card full setup-step" aria-labelledby="setup-domain-title">
-<div class="setup-step-heading"><span class="setup-step-number" aria-hidden="true">1</span><div><h3 id="setup-domain-title">设置公网域名</h3><p>先让隧道或反向代理提供 HTTPS 地址，再填写到这里。</p></div></div>
-<form id="setup-connection-form" class="settings-editor">
-<fieldset id="setup-connection-fields" class="setup-fields">
-<label class="setup-domain-label" for="setup-public-url"><span>公网域名或 HTTPS 根地址</span><input id="setup-public-url" name="public_url" type="text" inputmode="url" autocomplete="url" autocapitalize="none" spellcheck="false" maxlength="2048" placeholder="填写你的域名，不含 /mcp" required aria-describedby="setup-domain-hint"></label>
-<p class="config-note" id="setup-domain-hint">支持自己的域名、Cloudflare Tunnel 或 ngrok 分配的域名。填写根地址即可，程序会生成 /mcp 连接地址。</p>
-<div class="setup-modes" role="group" aria-label="隧道运行位置"><label class="setup-mode"><input type="radio" name="connection_mode" value="loopback" checked><span><strong>本机隧道</strong><small>隧道与 EndlessVibe 在同一台主机运行</small></span></label><label class="setup-mode"><input type="radio" name="connection_mode" value="container"><span><strong>Docker 中的代理</strong><small>代理在容器中，EndlessVibe 在宿主机运行</small></span></label></div>
-<div class="setup-preview"><div><span>MCP 地址预览</span><code id="setup-endpoint-preview">填写域名后生成</code></div><div><span>代理上游地址</span><code id="setup-upstream">—</code></div><div><span>保存后的 MCP 监听地址</span><code id="setup-bind-preview">—</code></div></div>
-<p class="config-note" id="setup-loopback-help">本机隧道连接 127.0.0.1。将域名转发到上面的代理上游地址，并保留完整请求路径。</p>
-<p class="config-note" id="setup-container-help" hidden>Docker 容器中的 127.0.0.1 指向容器自身。请使用宿主机地址；Linux Docker 可能还需配置 host.docker.internal 的 host-gateway 映射，或使用容器可达的实际宿主机地址。此选项只调整 MCP 监听地址，Dashboard 仍仅供本机访问。</p>
-<details class="setup-help"><summary>使用 ngrok 的示例</summary><p>按 ngrok 官方指引在本机终端配置账号和 authtoken，然后运行以下命令。无需把 authtoken 填入本网页。</p><pre class="setup-command"><code id="setup-ngrok-command">填写公网域名后显示 ngrok 命令。</code></pre><p>此命令用于在宿主机运行的 ngrok；目标是 MCP 端口 <code id="setup-tunnel-port">—</code>，不是 Dashboard 端口。</p><a href="https://ngrok.com/docs/getting-started/" target="_blank" rel="noopener noreferrer">ngrok 官方指南 ↗</a></details>
-<div class="config-reload-actions"><button type="submit" id="setup-save" disabled>保存连接设置</button><span id="setup-save-status" class="write-status" role="status" aria-live="polite"></span></div>
-</fieldset>
-</form>
-<div id="setup-connection-conflict" class="setup-notice" hidden><p>其他操作已更新配置。下面的按钮会用最新已保存配置替换当前连接输入，请核对后重新编辑。</p><button type="button" id="setup-reload-connection">加载最新已保存配置</button></div>
-</section>
-
-<section class="config-card setup-step" aria-labelledby="setup-restart-title">
-<div class="setup-step-heading"><span class="setup-step-number" aria-hidden="true">2</span><div><h3 id="setup-restart-title">重启并核对配置</h3><p>保存后的域名与监听设置，需要重启才能生效。</p></div></div>
-<p class="config-note" id="setup-restart-note">正在读取重启提示…</p><p class="config-note" id="setup-restart-command-label">在本机终端执行：</p><pre class="setup-command"><code id="setup-restart-command">—</code></pre>
-<p class="config-note">请先等待当前任务结束，再通过原来的启动方式重启服务。重新连接此网页后，检查“已保存地址”和“当前运行地址”是否一致。</p>
-<button type="button" id="setup-check-restart">我已重启，检查状态</button>
-<details class="setup-help"><summary>重新进行初始化</summary><p>在本机终端执行以下命令，可再次打开连接配置入口：</p><pre class="setup-command"><code>endlessvibe --init</code></pre><p>已有配置会保留。你也可以直接访问本机的 /setup 页面。</p></details>
-</section>
-
-<section class="config-card setup-step" aria-labelledby="setup-chatgpt-title">
-<div class="setup-step-heading"><span class="setup-step-number" aria-hidden="true">3</span><div><h3 id="setup-chatgpt-title">在 ChatGPT 中创建连接</h3><p>使用 OAuth 授权，无需 OpenAI API Key。</p></div></div>
-<label class="setup-domain-label" for="setup-mcp-url"><span>已保存的 MCP 地址</span><input id="setup-mcp-url" type="text" readonly spellcheck="false" placeholder="先保存公网域名"></label>
-<div class="config-reload-actions"><button type="button" id="setup-copy-mcp" disabled>复制 MCP 地址</button><span id="setup-copy-status" class="write-status" role="status" aria-live="polite"></span></div><p class="config-note" id="setup-mcp-note">保存公网域名后，这里会生成 MCP 地址。</p>
-<ol class="setup-checklist"><li><span>打开 ChatGPT 插件页面，点击“+”，选择“Add custom MCP server”。</span> <a href="https://chatgpt.com/plugins" target="_blank" rel="noopener noreferrer">打开 ChatGPT ↗</a></li><li>填写名称和描述，粘贴上面的 HTTPS MCP 地址，选择 OAuth，使用“Create as a plugin”创建插件。</li><li>按连接页面提示完成 EndlessVibe 授权，检查工具后安装插件。在新会话中使用 @ 选择 EndlessVibe。</li></ol>
-<p class="config-note">入口名称或可用性可能受账号和工作区策略影响。若页面要求填写 Redirect URI，使用该 ChatGPT 连接页面显示的完整地址。</p>
-<details class="setup-help"><summary>授权时需要的 Owner Key 在哪里？</summary><p>在本机读取以下文件，并仅将其中的 Owner Key 输入 EndlessVibe 授权页面：</p><p><code id="setup-owner-key-path">—</code></p><p>Owner Key 用于确认本机所有者身份，不是 OpenAI API Key。本向导只显示文件位置，不读取密钥内容。</p></details>
-<p class="setup-notice">更换域名后，需要在 ChatGPT 更新 MCP 地址并重新授权。保存本页配置不会自动更新已有连接。</p>
-<a href="https://developers.openai.com/plugins/deploy/connect-chatgpt" target="_blank" rel="noopener noreferrer">ChatGPT 连接官方指南 ↗</a>
-</section>
-
-<section class="config-card full setup-step" aria-labelledby="setup-workspaces-title">
-<div class="setup-step-heading"><span class="setup-step-number" aria-hidden="true">4</span><div><h3 id="setup-workspaces-title">选择允许访问的项目</h3><p>先添加管理根，再到 Projects 中选择具体项目和权限。</p></div></div>
-<div class="setup-workspace-counts"><span><strong id="setup-workspace-count">—</strong> <span>管理根节点</span></span><span><strong id="setup-project-count">—</strong> <span>已授权项目</span></span></div>
-<p class="config-note">管理根用于组织项目。添加管理根不会自动开放其中所有目录或文件，也不会自动授予写入和执行权限。</p>
-<form id="setup-workspace-form" class="settings-editor"><fieldset id="setup-workspace-fields" class="setup-fields"><div class="settings-fields"><label>管理根名称<input name="id" type="text" required maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="名称：字母、数字、下划线或短横线" autocomplete="off" spellcheck="false"></label><label>已存在的绝对路径<input name="path" type="text" required maxlength="4096" placeholder="填写本机项目根目录" autocomplete="off" spellcheck="false" aria-describedby="setup-workspace-path-hint"></label></div><p class="config-note" id="setup-workspace-path-hint">填写已存在的绝对路径。</p><div class="config-reload-actions"><button type="submit" id="setup-add-workspace" disabled>添加管理根</button><span id="setup-workspace-status" class="write-status" role="status" aria-live="polite"></span></div></fieldset></form>
-<div id="setup-workspace-conflict" class="setup-notice" hidden><p>刷新将保留上面的名称和路径，并读取最新配置，随后可重新提交。</p><button type="button" id="setup-reload-workspace">刷新配置后重试</button></div>
-<div class="setup-next-links"><a class="setup-primary-link" href="/projects#add-project-form">前往 Projects 添加授权项目</a><a href="/sandbox">配置命令执行与沙箱 ↗</a></div>
-</section>
-</div>
-</section>
-
 <section class="page" data-page="mcp">
 <div class="page-title"><div><p class="eyebrow">MODEL CONTEXT PROTOCOL</p><h2>MCP</h2><p>查看当前 MCP 端点、协议状态、工具 schema revision 和服务端实际暴露的工具分类。</p></div><span id="mcp-tool-count">—</span></div>
 <p id="mcp-schema-note" class="config-note"></p>
@@ -217,7 +156,7 @@
 <div class="page-title"><div><p class="eyebrow">CONFIGURATION</p><h2>配置</h2><p>只展示非敏感运行配置。密钥、Token 和凭据不会通过 Dashboard 返回。</p></div><div class="config-reload-actions"><span id="config-restart-badge" class="badge-note">检查配置状态</span><button type="button" id="config-reload">Reload project config</button></div></div>
 <div id="config-reload-status" class="write-status" role="status" aria-live="polite"></div>
 <div class="config-grid">
-<section class="config-card full"><div class="config-heading"><h3>连接 ChatGPT / 初始化</h3><span>CONNECTION SETUP</span></div><p class="config-note">设置公网域名、查看隧道配置帮助和重启提示，或添加新的管理根。</p><a class="setup-primary-link" href="/setup">打开连接向导</a></section>
+
 <section class="config-card"><div class="config-heading"><h3>Server / Dashboard</h3><span>NETWORK</span></div><dl id="config-server" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Security</h3><span>AUTH</span></div><dl id="config-security" class="config-list"></dl></section>
 <section class="config-card"><div class="config-heading"><h3>Execution</h3><span>SANDBOX</span></div><dl id="config-execution" class="config-list"></dl></section>
