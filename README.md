@@ -44,6 +44,18 @@
 
 ## Screenshots
 
+### Setup · 初始化向导
+
+执行 `endlessvibe --init --web` 后，网页按照以下四个步骤逐步完成配置。顶部显示进度，下面仅展示当前步骤的表单。
+
+| 第 1 步 · 连接域名 | 第 2 步 · 添加 Workspace |
+| :---: | :---: |
+| ![Setup 第一步：配置 HTTPS 域名与隧道](docs/screenshots/setup.jpg) | ![Setup 第二步：登记 Workspace 管理根](docs/screenshots/setup-workspace.jpg) |
+| 第 3 步 · 授权 Project | 第 4 步 · 完成配置 |
+| ![Setup 第三步：添加 Project 并设置权限](docs/screenshots/setup-project.jpg) | ![Setup 第四步：启动服务并连接 ChatGPT](docs/screenshots/setup-finish.jpg) |
+
+<sub>深色主题 · 简体中文。四张截图均通过实际 Setup 网页和隔离的演示数据渲染；不包含真实 Owner Key、令牌或项目路径，也不代表公网连接已验证。</sub>
+
 ### Dashboard
 
 ![EndlessVibe Dashboard](docs/screenshots/dashboard.jpg)
@@ -60,7 +72,7 @@
 | ![Operation history](docs/screenshots/operations.jpg) | ![Node management](docs/screenshots/nodes.jpg) |
 | 操作审计与执行记录 | 节点发现、配对与远程请求诊断 |
 
-<sub>截图使用当前工作区新版前端与本地运行服务的数据生成，已脱敏部分本机标识。英文版 README 展示亮色英文界面；Nodes / Transfer 功能默认关闭，需要主动配置。</sub>
+<sub>Dashboard / Projects / Tasks / Operations / Nodes 截图使用本地运行服务的数据生成，已脱敏本机标识。Setup 截图使用同一套实际网页资源与隔离的演示配置生成；英文版 README 展示对应的浅色界面。Nodes / Transfer 默认关闭，需要主动配置。</sub>
 
 ## Features
 
@@ -71,7 +83,7 @@
 | **Commands & Jobs** | 异步命令、持久 Job ID、输出分页、超时、取消、请求去重 |
 | **Git Workflow** | Status、Diff 审查、Log、Commit；按需启用本地 Git 修改或受限 Push |
 | **Tasks & Recovery** | `task_id + stage` Checkpoint、Job 关联、提交恢复点、重启诊断 |
-| **Dashboard** | 首次运行 Setup、ChatGPT 连接帮助、状态图表、Projects、Tasks、Operations、Nodes、配置与存储管理 |
+| **初始化 / Dashboard** | 独立的本机初始化向导（按构建版本支持 Web 或 CLI/Web 双模式）；正常 Dashboard 提供状态图表、Projects、Tasks、Operations、Nodes 及配置管理 |
 | **Authentication** | OAuth 2.0 Authorization Code、PKCE、动态客户端注册及工具 Scope |
 | **Node Transfer** | 局域网发现、TLS 配对、Project 授权、远程请求状态与历史 |
 | **Execution Profiles** | Linux Bubblewrap、Windows AppContainer 离线沙箱；显式项目授权 |
@@ -110,44 +122,77 @@ cargo build --release
 cargo test --locked
 ```
 
-### 2. 使用 --init 进入独立初始化向导
+### 2. 进入初始化向导
 
-全新安装在终端执行 `endlessvibe --init`（源码构建时可以使用 `./target/release/endlessvibe --init`）。Windows 在项目目录中执行：
+解压发行包后可直接运行程序，不需要在使用者电脑上安装 Rust。首次初始化以及需要重新配置时，在终端执行：
 
 ```powershell
+# 适用于复制到其他 Windows 电脑的独立 EXE
+.\endlessvibe.exe --init
+
+# 如果从 Windows 项目源码构建
 .\target\release\endlessvibe.exe --init
 ```
 
-此时**只启动本机网页初始化向导**：[http://127.0.0.1:20001/](http://127.0.0.1:20001/)。初始化期间不提供公网 MCP/OAuth、节点 Transfer 或完整 Dashboard。没有配置时会安全创建私有配置与 Owner Key，不会自动授权项目。
+Linux/macOS 源码构建的对应命令为 `./target/release/endlessvibe --init`。
 
-页面顶部展示四个流程节点，**下方只显示当前节点的配置**：**连接域名 → Workspace → Project 授权 → 完成配置**。当前节点保存完成后才可进入下一步。管理网页始终仅允许本机访问，不要代理或暴露端口 `20001`.
+**初始化入口与构建版本有关。** 请先用 `.\endlessvibe.exe --help` 查看支持的参数：如果帮助包含 `--cli` 和 `--web`，程序在交互式终端执行 `--init` 时会提示选择模式：
 
-### 3. 按照向导完成配置
+```text
+EndlessVibe · 初始化
+1) 命令行交互（推荐）
+2) Web 网页向导（仅本机）
+? 初始化方式 [1/2] (默认 1):
+```
 
-1. **连接域名**：填写实际的 HTTPS 域名或 ngrok / Cloudflare Tunnel 分配的域名，选择本机隧道或 Docker 代理。网页显示 MCP 地址与代理上游并校验域名。
-2. **Workspace**：输入 ID 和已存在的绝对目录，添加管理根。仅添加 Workspace 不授予任何 Project 权限。
-3. **Project 授权**：选择 Workspace，登记具体项目目录。默认只读；写入、命令执行和 Git Commit 需要主动勾选。
-4. **完成配置**：查看正常启动命令，复制 `https://你的域名/mcp`，按页面指引完成 ChatGPT OAuth 授权。
+支持双模式的版本也可以跳过菜单直接指定：
 
-例如主机上运行的 ngrok 隧道：
+```powershell
+.\endlessvibe.exe --init --cli   # 在当前终端交互完成配置
+.\endlessvibe.exe --init --web   # 仅启动本机网页初始化向导
+```
+
+如果 `--help` **未列出** `--cli` / `--web`，该构建只支持 `--init` 启动 Web 向导，不能直接传入上述两个参数。非交互终端中的双模式版本也可能直接选择 Web 模式。旧式 `--init --workspace ID=绝对路径` 是**参数式创建配置并退出**，不是交互式 CLI 向导。
+
+初始化使用本机配置文件，不会默认公开任何 Project。已存在配置时，重新初始化不会清空 Owner Key、Workspace / Project 授权或其他持久状态。
+
+### 3. 完成 CLI 或 Web 初始化配置
+
+两种初始化方式都围绕相同的四个步骤：
+
+1. **连接域名**：输入自己的公网 HTTPS 域名，或 Cloudflare Tunnel / ngrok 分配的 HTTPS 根地址（不含 `/mcp`）；选择本机隧道或 Docker 代理。程序生成 `https://你的域名/mcp`，但不会替你创建隧道或验证公网连通。
+2. **Workspace**：填写 ID 和本机**已存在的绝对路径**，例如 Windows `D:\project` 或 Linux `/home/user/projects`。Workspace 只是管理根，不自动授权其中的文件。
+3. **Project 授权**：指定 Workspace 内的具体 Project。文件写入、命令执行及 Git Commit 应明确确认；Git mutation / Push 需要单独授权，不要把整个 Workspace 当成可操作的 Project。
+4. **完成配置**：查看保存位置、MCP 地址、正常启动命令，随后在 ChatGPT 中完成 OAuth 授权。
+
+**CLI 向导**（仅适用于 `--help` 列有 `--cli` 的构建）会在当前终端逐项提示、预览并确认修改，无需打开浏览器。高权限默认不勾选；输入 `q` 可退出。已成功保存的步骤仍然保留，可以下次运行 `--init --cli` 继续。
+
+**Web 向导**在本机打开 [http://127.0.0.1:20001/](http://127.0.0.1:20001/)。顶部显示四个节点，下方只显示当前步骤的配置，保存后再进入下一步。初始化期间不启动公网 MCP/OAuth、节点 Transfer 或常规 Dashboard。**不要将本机管理端口 `20001` 暴露到公网。**
+
+本机隧道示例（先在 ngrok 完成账号配置，再换成自己拥有的域名）：
 
 ```bash
 ngrok http 20000 --url https://your-domain.ngrok.app
 ```
 
-请使用账户实际分配的域名和 MCP 监听端口，不要将仅本机使用的 Dashboard 端口 `20001` 暴露到公网。
+反向代理要保留 `/mcp`、OAuth 与 `/.well-known` 的完整路径；它们对应的是 MCP 端口（默认 `20000`），不是 Dashboard 端口。
 
-### 4. 退出初始化，正常启动服务
+### 4. 退出初始化并正常启动
 
-完成向导后，在初始化终端按 Ctrl+C（或使用原服务管理器停止），再**不带 `--init`** 正常启动：
+- **CLI 初始化**：显示配置汇总后结束向导，直接正常启动程序。
+- **Web 初始化**：先在启动 `--init` 的终端按 Ctrl+C（或通过原服务管理器停止），再正常启动程序。
 
-```bash
-endlessvibe
+```powershell
+# 从独立 Windows EXE 所在目录运行，不要带 --init
+.\endlessvibe.exe
+
+# 源码构建
+.\target\release\endlessvibe.exe
 ```
 
-Windows 源码构建等价命令是 `.\target\release\endlessvibe.exe`。原配置及 Owner Key 会保留。**正常 Dashboard 不再包含 Setup 导航或 `/setup` 配置接口**。如需修改域名或增加初始项目，请先停止服务，再明确运行 `--init`。
+Linux/macOS 的对应命令是 `endlessvibe`（已加入 PATH 时）或 `./target/release/endlessvibe`。正常服务的 Dashboard 在 `http://127.0.0.1:20001/`，不再显示初始化向导；公网 MCP 仅在正常启动后提供。
 
-向导会区分“已保存配置”和“当前运行地址”，并提示启动环境中的 `ENDLESSVIBE_BIND`、`ENDLESSVIBE_PUBLIC_URL`、`--bind`、`--public-url` 是否覆盖文件配置。公网隧道仍需转发 MCP 与 OAuth 全部路径；本机保存成功不代表公网可达。
+启动命令中的 `--bind` / `--public-url`，以及 `ENDLESSVIBE_BIND` / `ENDLESSVIBE_PUBLIC_URL` 环境变量，可能覆盖已保存的连接配置。**保存配置 ≠ 域名可达 ≠ ChatGPT 已授权**，需要分别检查隧道、OAuth 和真实 MCP 调用。
 
 ### 5. Connect ChatGPT
 
@@ -163,29 +208,56 @@ Windows 源码构建等价命令是 `.\target\release\endlessvibe.exe`。原配�
 
 界面入口及账户策略以 [OpenAI 官方接入说明](https://developers.openai.com/plugins/deploy/connect-chatgpt) 和 [OAuth 说明](https://developers.openai.com/plugins/build/auth) 为准。其他 MCP 客户端使用相同的 HTTPS `/mcp` 地址与 OAuth；服务端细节见 [OAuth 接入](docs/OAUTH.md)。
 
-### Reopen Setup
+### 重新运行初始化向导
 
-可执行文件已加入 PATH 时，可随时运行：
-
-```bash
-endlessvibe --init
-```
-
-Windows 从项目源码根目录运行时，可直接使用以下命令，无需先添加 PATH：
+**请先停止现有服务**，再执行 `--init`；程序不允许初始化服务与正常服务同时占用相同状态目录。若旧版 Windows 服务不能使用 `--stop`，请使用原终端的 Ctrl+C 或服务管理器停止。
 
 ```powershell
-.\target\release\endlessvibe.exe --init
+# Windows 独立 EXE：使用默认配置重新初始化
+.\endlessvibe.exe --init
+
+# 使用指定配置文件
+.\endlessvibe.exe --init --config "$env:APPDATA\EndlessVibe\config.toml"
+
+# 仅限 --help 明确支持双模式的版本
+.\endlessvibe.exe --init --cli
+.\endlessvibe.exe --init --web
 ```
 
-如使用自定义配置，可加 `--config`。Windows 示例（将路径替换为实际配置文件）：
+重新执行初始化时保留已存在的配置、Owner Key、Workspace / Project 授权及配置文件注释；不会自动重新生成凭据。通过 `--status` 和 `--stop` 可以查看或停止支持进程管理的版本。初始化结束后，正常启动不再显示 Setup。
+
+### Windows 初始化故障排查
+
+**1. 从其他 Windows 电脑复制 EXE 后提示 `execution.path must contain only absolute PATH entries`。**
+
+部分旧版 EXE 会直接把目标电脑包含空项、相对路径或未展开变量的 `PATH` 保存到 `execution.path`，随后验证失败。优先使用包含 PATH 过滤修复的新构建。旧版可仅在**当前 PowerShell 会话**临时使用：
 
 ```powershell
-.\target\release\endlessvibe.exe --init --config "C:\path\to\config.toml"
+$env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+.\endlessvibe.exe --init
 ```
 
-正常服务正在运行时，必须先通过 `--stop` 或原服务管理器停止；`--init` 会拒绝与服务并发启动。停止后执行 `--init`，只启动本机初始化向导。已有配置、Owner Key、Workspace / Project 授权和注释都会保留。`--init` 重新打开引导，不会清空安装数据。
+这个命令不会永久修改系统 PATH，但会暂时隐藏该终端里的其他开发工具；之后重新打开 PowerShell。若已经生成了 `config.toml` 并且其中的 `[execution].path` 无效，应先备份配置，再只把该字段改为实际存在的**绝对路径**，不要删除 Owner Key。
 
-### Optional: explicit CLI initialization
+**2. 配置路径混用 `/` 和 `\`，Owner Key 路径出现 `\\?\`。**
+
+`\\?\` 是 Windows 扩展长度路径前缀（例如 `\\?\C:\Users\user\...`），通常来自路径规范化，不表示密钥损坏。展示层应统一使用常规 Windows 路径；旧版界面可能仍显示此前缀，文件本身无需修改。
+
+```text
+本机配置文件位置
+C:\Users\<用户名>\AppData\Roaming\EndlessVibe\config.toml
+
+Owner Key 存储位置
+C:\Users\<用户名>\AppData\Local\EndlessVibe\owner.key
+```
+
+实际目录也可以用 `$env:APPDATA`、`$env:LOCALAPPDATA` 获取。Owner Key 是本机私有凭据，**不要随 EXE 分发，不要放入 MCP URL 或聊天消息**。
+
+**3. 向导打不开、域名保存后 ChatGPT 仍无法连接。**
+
+先检查本机 `http://127.0.0.1:20001/`、正常服务状态、隧道和端口映射。向导只负责本地配置，不会自动创建公网隧道或在 ChatGPT 中完成 OAuth 授权。如果端口已被旧实例占用，先停止旧服务，再启动初始化。
+
+### 可选：参数式初始化（非交互）
 
 尚未创建配置时，也可保留原来的命令行初始化流程。以下 `--init --workspace ...` 会创建配置后退出，已有配置不会被覆盖：
 
@@ -216,7 +288,7 @@ Project 必须位于登记的 Workspace 根目录内。添加时可用 `--read-o
 .\target\debug\endlessvibe.exe --init --lan-only --workspace "projects=C:\path\to\projects"
 ```
 
-**Windows 已有配置的安装**（包括首次网页初始化，不删除配置或 owner.key）：
+**Windows 已有配置的安装**（包括 CLI/Web 引导初始化，不删除配置或 owner.key）：
 
 ```powershell
 # 先停止正在运行的 EndlessVibe，然后只执行一次转换

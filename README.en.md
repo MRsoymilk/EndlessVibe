@@ -44,6 +44,18 @@ EndlessVibe is **not** a cloud IDE or a multi-tenant remote shell. It is designe
 
 ## Screenshots
 
+### Setup · Local initialization wizard
+
+Run `endlessvibe --init --web` to configure EndlessVibe in four steps. The progress indicator stays at the top while each screen shows only the active step.
+
+| Step 1 · Connection domain | Step 2 · Add Workspace |
+| :---: | :---: |
+| ![Setup step 1: HTTPS domain and tunnel configuration](docs/screenshots/setup-en-light.jpg) | ![Setup step 2: Register a Workspace root](docs/screenshots/setup-workspace-en-light.jpg) |
+| Step 3 · Authorize Project | Step 4 · Finish setup |
+| ![Setup step 3: Add a Project and select permissions](docs/screenshots/setup-project-en-light.jpg) | ![Setup step 4: Start the service and connect ChatGPT](docs/screenshots/setup-finish-en-light.jpg) |
+
+<sub>Light theme · English interface. All four screenshots are rendered from the actual local Setup page with isolated demonstration data, not live credentials or verified public connectivity.</sub>
+
 ### Dashboard
 
 ![EndlessVibe Dashboard](docs/screenshots/dashboard-en-light.jpg)
@@ -60,7 +72,7 @@ EndlessVibe is **not** a cloud IDE or a multi-tenant remote shell. It is designe
 | ![Operation history](docs/screenshots/operations-en-light.jpg) | ![Node management](docs/screenshots/nodes-en-light.jpg) |
 | Auditable operations and execution history | Node discovery, pairing, and request recovery |
 
-<sub>Screenshots show the latest worktree frontend with live local Dashboard data, in Light / English mode. Personal machine identifiers have been redacted. Node Transfer is disabled by default and requires explicit configuration. The Chinese README shows Dark / 简体中文.</sub>
+<sub>Dashboard / Projects / Tasks / Operations / Nodes screenshots use local service data with machine identifiers redacted. The Setup screenshot uses the actual bundled web UI with isolated example data, not live credentials. Node Transfer remains disabled by default. The Chinese README shows the corresponding Dark / 简体中文 interface.</sub>
 
 ## Features
 
@@ -71,7 +83,7 @@ EndlessVibe is **not** a cloud IDE or a multi-tenant remote shell. It is designe
 | **Commands & Jobs** | Asynchronous commands, durable job IDs, paged output, cancellation, timeout, request deduplication |
 | **Git Workflow** | Reviewable status/diff/log/commit, optional local Git mutation, separately authorized push |
 | **Tasks & Recovery** | `task_id + stage` checkpoints, job association, committed recovery points, restart diagnostics |
-| **Dashboard** | First-run Setup, ChatGPT connection help, runtime charts, Projects, Tasks, Operations, Nodes, configuration, and storage |
+| **Initialization / Dashboard** | Local initialization wizard (Web or CLI/Web, depending on build); regular Dashboard provides charts, Projects, Tasks, Operations, Nodes, configuration, and storage |
 | **Authentication** | OAuth 2.0 Authorization Code, PKCE, dynamic client registration, tool scopes |
 | **Node Transfer** | LAN discovery, TLS pairing, scoped grants, persistent remote request status and history |
 | **Execution Profiles** | Linux Bubblewrap and native offline Windows AppContainer, with explicit Project authorization |
@@ -110,44 +122,79 @@ cargo build --release
 cargo test --locked
 ```
 
-### 2. Initialize using the dedicated wizard
+### 2. Start initialization
 
-On a new machine run `endlessvibe --init` (or `./target/release/endlessvibe --init` from a source build). On Windows use:
+A downloaded release executable does not require Rust on the recipient's computer. To initialize a new installation or reconfigure an existing one, open a terminal:
 
 ```powershell
+# Portable Windows EXE copied to another computer
+.\endlessvibe.exe --init
+
+# Windows executable compiled from source
 .\target\release\endlessvibe.exe --init
 ```
 
-This launches **only** the local initialization wizard at [http://127.0.0.1:20001/](http://127.0.0.1:20001/). It does **not** start public MCP/OAuth, LAN Transfer, or the normal Dashboard while the wizard is open. A missing configuration and owner key are created with private permissions, without granting any Projects.
+From a Linux/macOS source build, use `./target/release/endlessvibe --init`.
 
-The wizard has four steps across the top. Only the current step's configuration is displayed: **Public domain → Workspace → Project authorization → Finish**. The Next button unlocks when that step has been saved. The wizard is local-only; never reverse-proxy port `20001`.
+**Initialization entry points depend on the build.** Check `.\endlessvibe.exe --help` first. If `--cli` and `--web` are listed, bare `--init` offers the interactive menu below (shown here as it appears in the Chinese console):
 
-### 3. Complete the four wizard steps
+```text
+EndlessVibe · 初始化
+1) 命令行交互（推荐）        CLI setup (recommended)
+2) Web 网页向导（仅本机）    Local browser setup
+? 初始化方式 [1/2] (默认 1):
+```
 
-1. **Public domain:** provide your own HTTPS origin or a domain assigned by ngrok / Cloudflare Tunnel. Choose whether the tunnel runs on the host or in Docker. The wizard previews the MCP URL and proxy upstream and saves only validated origins.
-2. **Workspace:** choose an ID and an existing absolute directory. A Workspace itself grants no Project permissions.
-3. **Project authorization:** select a Workspace and add a specific existing project directory. Read-only is the default; write, command and Git Commit access must be explicitly selected.
-4. **Finish:** read the generated normal startup command, copy the `https://your-domain/mcp` URL and follow the ChatGPT OAuth instructions.
+Those builds also accept explicit mode selection:
 
-For example, after configuring your own ngrok account, a host tunnel can use:
+```powershell
+.\endlessvibe.exe --init --cli   # Interactive terminal configuration
+.\endlessvibe.exe --init --web   # Local-only browser wizard
+```
+
+If `--help` **does not list** `--cli` / `--web`, that build supports Web initialization using bare `--init` only. Do not pass unsupported flags. The legacy `--init --workspace ID=ABSOLUTE_PATH` command is **non-interactive configuration creation and exit**, not the guided terminal UI.
+
+On first launch, initialization creates a private configuration and Owner Key if necessary, but authorizes no Projects by default. Re-initializing an existing installation preserves its Owner Key, settings, and Workspace / Project grants.
+
+### 3. Configure the connection and authorized Projects
+
+Both wizard interfaces follow the same four stages:
+
+1. **HTTPS domain:** enter your own public HTTPS origin, or an origin assigned by Cloudflare Tunnel / ngrok (without `/mcp`). Select a host tunnel or Docker proxy. The resulting MCP address is `https://your-domain/mcp`. Saving it neither creates the tunnel nor tests public reachability.
+2. **Workspace:** choose an ID and an **existing absolute directory**, such as `D:\project` on Windows or `/home/user/projects` on Linux. A Workspace is a management root, not an automatic access grant.
+3. **Project authorization:** choose explicit Project directories within the Workspace. Confirm write, command-execution and Git Commit permissions individually. Git mutation and Git Push need separate permission grants.
+4. **Finish:** review the saved configuration path, MCP URL and normal startup command, then complete OAuth authorization in ChatGPT.
+
+The **CLI wizard** (only when `--cli` appears in the binary's help) prompts within the terminal, previews changes and requires confirmation. Elevated permissions are disabled by default. Type `q` to exit; previously saved stages are retained and can be continued with another `--init --cli`.
+
+The **Web wizard** is served exclusively at [http://127.0.0.1:20001/](http://127.0.0.1:20001/). A progress bar shows four steps and only the active step's form is visible; proceed after saving. Initialization does not launch public MCP/OAuth, Node Transfer or the normal Dashboard. **Never expose management port `20001` to the Internet.**
+
+Example of a host-side tunnel (configure ngrok first, and replace the domain with one assigned to you):
 
 ```bash
 ngrok http 20000 --url https://your-domain.ngrok.app
 ```
 
-Use your *actual* assigned domain and the configured MCP port; never expose the local Dashboard port `20001`.
+The proxy must preserve `/mcp`, OAuth and `/.well-known` routes. Its target is the MCP port (normally `20000`), not the Dashboard port.
 
-### 4. Exit initialization and launch the normal service
+### 4. Exit setup and start the regular service
 
-After completing the wizard, stop the `--init` process (Ctrl+C or its original service manager) and launch the binary **without `--init`**:
+- **CLI mode:** the terminal wizard exits after displaying the saved configuration summary.
+- **Web mode:** first stop the `--init` process with Ctrl+C or its service manager.
 
-```bash
-endlessvibe
+Then start the regular service **without `--init`**:
+
+```powershell
+# Portable Windows EXE in the current directory
+.\endlessvibe.exe
+
+# Source build
+.\target\release\endlessvibe.exe
 ```
 
-Windows source-build equivalent: `.\target\release\endlessvibe.exe`. The saved config and owner key are retained. **The normal Dashboard has no Setup tab or `/setup` API routes**. Reconfiguration requires stopping the service and explicitly running `--init` again.
+The Linux/macOS equivalent is `endlessvibe` (when on PATH) or `./target/release/endlessvibe`. Normal startup serves the Dashboard at `http://127.0.0.1:20001/` without a Setup tab; public MCP starts only during a normal service launch.
 
-The page distinguishes saved connection settings from active state and explains startup overrides. Check `ENDLESSVIBE_BIND`, `ENDLESSVIBE_PUBLIC_URL`, `--bind`, and `--public-url` if the normal service does not use the saved address. A public proxy still needs the MCP and OAuth routes; the wizard itself never verifies external reachability.
+Startup arguments `--bind` / `--public-url` and environment variables `ENDLESSVIBE_BIND` / `ENDLESSVIBE_PUBLIC_URL` may override persisted connection settings. **Saved configuration ≠ public reachability ≠ ChatGPT authorization**: verify the tunnel, OAuth, and an actual MCP tool call separately.
 
 ### 5. Connect ChatGPT
 
@@ -163,29 +210,56 @@ Once the HTTPS and OAuth endpoints are available:
 
 For current UI and account policies, see OpenAI's [connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt) and [authentication guide](https://developers.openai.com/plugins/build/auth). Other MCP clients use the same HTTPS `/mcp` endpoint and OAuth; see [EndlessVibe OAuth](docs/OAUTH.md) for server details.
 
-### Reopen Setup
+### Reopen initialization
 
-If the executable is on PATH, run this whenever you need the guide again:
-
-```bash
-endlessvibe --init
-```
-
-On Windows, run this from the repository root without first adding the executable to PATH:
+**Stop the existing EndlessVibe service before running `--init` again.** The normal service and the initialization process cannot use the same state directory concurrently. On an older Windows build without `--stop` support, use its original terminal or service manager.
 
 ```powershell
-.\target\release\endlessvibe.exe --init
+# Reconfigure a portable Windows installation
+.\endlessvibe.exe --init
+
+# Use an existing configuration file
+.\endlessvibe.exe --init --config "$env:APPDATA\EndlessVibe\config.toml"
+
+# Only if these flags appear in the binary's --help output
+.\endlessvibe.exe --init --cli
+.\endlessvibe.exe --init --web
 ```
 
-For a custom configuration, add `--config`. This Windows example uses a placeholder path; replace it with your actual configuration file:
+Existing configuration comments, the Owner Key and Workspace/Project authorizations are preserved. Use `--status` and `--stop` when supported by the installed service. Normal startup never displays the setup wizard.
+
+### Windows initialization troubleshooting
+
+**1. A copied EXE fails with `execution.path must contain only absolute PATH entries`.**
+
+Older binaries may copy the destination machine's `PATH` verbatim into `execution.path` and then reject empty, relative or unexpanded entries. Prefer a build with the Windows PATH filtering fix. For older binaries, this PowerShell-only workaround changes `PATH` in **the current terminal session only**:
 
 ```powershell
-.\target\release\endlessvibe.exe --init --config "C:\path\to\config.toml"
+$env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+.\endlessvibe.exe --init
 ```
 
-If the normal service is running, stop it first (with `--stop` or the original service manager); `--init` refuses a concurrent instance. When stopped, `--init` runs the dedicated wizard only. Configuration, owner keys, Workspace / Project grants, and comments are preserved. Reopening setup does not reset installation data.
+Open a fresh PowerShell terminal afterward to restore your normal toolchain PATH. If an existing `config.toml` already contains an invalid `[execution].path`, back up the configuration and correct only that field using actual absolute paths. Never delete your Owner Key to resolve this error.
 
-### Optional: explicit CLI initialization
+**2. Setup displays mixed `/` and `\` separators or an Owner Key path beginning with `\\?\`.**
+
+`\\?\` is a Windows extended-length path prefix, often returned by path canonicalization (for example `\\?\C:\Users\user\...`). It does not indicate a corrupted key. User-facing paths should be presented in ordinary Windows form; older builds may still display the native prefix. Do not edit the key file on account of its displayed prefix.
+
+```text
+Local configuration file
+C:\Users\<user>\AppData\Roaming\EndlessVibe\config.toml
+
+Owner Key file
+C:\Users\<user>\AppData\Local\EndlessVibe\owner.key
+```
+
+The corresponding environment variables are `$env:APPDATA` and `$env:LOCALAPPDATA`. **Never distribute the Owner Key with an EXE or paste it into an MCP URL or chat message.**
+
+**3. The wizard is unavailable, or ChatGPT cannot connect after saving a domain.**
+
+Check `http://127.0.0.1:20001/` locally, the running service status, and the external tunnel configuration. Setup only saves local settings; it does not create a tunnel or finish OAuth in ChatGPT. If an old service already occupies the management port, stop it before starting the wizard.
+
+### Optional: non-interactive CLI initialization (legacy)
 
 Before a configuration exists, the original command-line workflow remains available. Explicit `--init --workspace ...` creates the configuration and exits; existing configurations are never overwritten:
 
@@ -216,7 +290,7 @@ Use **`--lan-only`** to connect EndlessVibe instances via **TLS 1.3 Transfer pai
 .\target\debug\endlessvibe.exe --init --lan-only --workspace "projects=C:\path\to\projects"
 ```
 
-**Windows installation with an existing configuration** (including web setup; preserve the config and owner key):
+**Windows installation with an existing configuration** (including CLI/Web setup; preserve the config and owner key):
 
 ```powershell
 # Stop the running EndlessVibe instance, then convert the config once

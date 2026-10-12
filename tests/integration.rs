@@ -971,7 +971,7 @@ async fn dashboard_theme_language_and_bilingual_readmes_are_available(){
  assert!(zh.contains("README.en.md"));
  assert!(en.contains("README.md"));
  assert!(en.contains("## Quick Start"));
- for filename in ["dashboard","projects","tasks","operations","nodes"]{
+ for filename in ["setup","setup-workspace","setup-project","setup-finish","dashboard","projects","tasks","operations","nodes"]{
   let zh_image=format!("docs/screenshots/{filename}.jpg");
   let en_image=format!("docs/screenshots/{filename}-en-light.jpg");
   assert!(zh.contains(&zh_image),"Chinese README missing {zh_image}");
