@@ -23,7 +23,7 @@ DCR 支持 `none`、`client_secret_post` 和 `client_secret_basic`，默认为 p
 
 ## HTTPS 与回调
 
-`server.public_url` 是规范 issuer 和网页 origin，只填根地址，不填 `/mcp` 或 query。默认使用用户已配置的公网域名；公网改变后必须修改配置、重启、撤销旧 Token 并重新授权。
+`server.public_url` 是规范 issuer 和网页 origin，只填根地址，不填 `/mcp` 或 query。代码与示例配置中的 `https://mcp.example.com` 是中性的示例值；公网部署前必须改为实际配置的 HTTPS 域名（可通过 `--public-url` 指定），不能直接使用示例域名。公网地址改变后必须修改配置、重启、撤销旧 Token 并重新授权。
 
 默认回调包括 `https://chatgpt.com/connector_platform_oauth_redirect` 和具有受限 callback ID 的 `https://chatgpt.com/connector/oauth/{id}`。DCR 注册后授权请求仍须与登记字符串完全相同。成功和用户拒绝的重定向均带原始 state 和精确 issuer `iss`。
 
@@ -70,17 +70,17 @@ Cloudflare 必须转发整个域名，不能仅匹配 `/mcp`；OAuth 路径不�
 
 若重连仍失败，日志中的 `MCP request mcp_method=... authentication=missing/invalid/valid` 可以确认 `/mcp` 请求属于哪一阶段。`OAuth request rejected oauth_error=...` 提供错误码，不包含凭据；仅看到 `/mcp` 请求不能证明客户端已经完成 OAuth 发现或动态注册。
 
-2026-10-01 对公网域名的诊断发现：`curl` 请求发现文档返回 `200`，DCR 返回 `201`，授权页返回 `200`；但 Python 默认 HTTP 客户端访问两个发现文档、`/mcp` 和 DCR 时，Cloudflare 返回 `403`，正文为 `error code: 1010`。所以浏览器或 `curl` 能访问不能证明其他 OAuth 客户端也能访问。这个结果确认了按客户端特征拦截的问题；ChatGPT 是否命中同一规则需结合 Cloudflare 安全事件确认。
+某些部署中可能出现浏览器或 `curl` 正常访问 OAuth 发现接口，而其他 HTTP 客户端收到 Cloudflare `403 / 1010` 的情况。此时应检查 Cloudflare 是否根据客户端特征拦截请求，不能仅根据浏览器访问成功就判断所有 OAuth 客户端均可访问。下面的域名均为示例，实际使用时请替换为自己的域名。
 
 Cloudflare 官方说明：1010 是基于浏览器签名的拒绝，Browser Integrity Check 会拦截或挑战非标准 User-Agent。修复方法：
 
-1. 在 Cloudflare 的 `soymilk.xin` 站点创建配置规则，匹配：
+1. 在 Cloudflare 的 `example.com` 站点创建配置规则，匹配：
    ```text
-   http.host eq "endlessvibe.soymilk.xin"
+   http.host eq "mcp.example.com"
    ```
 2. 将该规则的 **Browser Integrity Check（浏览器完整性检查）设为关闭**。也可使用自定义规则的 Skip 动作，仅跳过 Browser Integrity Check。保留 EndlessVibe 自身 OAuth 验证。
 3. 再用非浏览器客户端请求发现文档，确认返回 JSON `200`，不再返回 `403 / 1010`。匿名 `GET /mcp` 应返回应用自身的 `401` 和 `WWW-Authenticate`；静态工具发现和工具级认证错误按上文处理。
-4. 在 ChatGPT 应用/连接管理页刷新元数据并重新连接。如果仍没有浏览器入口，移除失败的连接后重新创建，URL 使用完整 `https://endlessvibe.soymilk.xin/mcp`，认证选择 OAuth 和自动注册/DCR，Client ID/Secret 留空。
+4. 在 ChatGPT 应用/连接管理页刷新元数据并重新连接。如果仍没有浏览器入口，移除失败的连接后重新创建，URL 使用完整 `https://mcp.example.com/mcp`，认证选择 OAuth 和自动注册/DCR，Client ID/Secret 留空。
 5. 完成自有域名上的管理员密钥授权后，新建对话依次测试 `hello`、`list_workspaces` 和 `list_projects(workspace)`。
 
 若仍失败，记录创建/重连时的服务端 HTTP 路径与状态码，并在 Cloudflare 安全事件中检查对应请求。被 Cloudflare 拦截的请求不会到达 Rust 服务。不要发送 URL 查询参数、Cookie、授权码或令牌。

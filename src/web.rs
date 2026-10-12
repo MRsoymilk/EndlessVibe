@@ -1,4 +1,4 @@
-use crate::{config_edit::{AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest,UpdateTransferRequest},runtime::Runtime};
+use crate::{config_edit::{AddWorkspaceRequest,UpdateConnectionRequest,AddProjectRequest,UpdateProjectRequest,UpdateReadonlyMountsRequest,UpdateExecutionBackendRequest,UpdateGitRequest,UpdateLimitsRequest,UpdateDockerRequest,UpdateTransferRequest},runtime::Runtime};
 use axum::{extract::{Path as AxumPath,Query,State},http::{header,StatusCode},response::{sse::{Event,KeepAlive,Sse},Html,IntoResponse,Response},Json};
 use serde::Deserialize;
 use serde_json::{json,Value};
@@ -6,6 +6,8 @@ use std::{convert::Infallible,sync::Arc,time::Duration};
 use tokio_stream::{wrappers::BroadcastStream,StreamExt};
 
 pub async fn home()->impl IntoResponse{Html(include_str!("../web/index.html"))}
+pub async fn setup_page()->impl IntoResponse{Html(include_str!("../web/setup.html"))}
+pub async fn setup_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/setup.css"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
 pub async fn theme_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/theme.css"))}
 pub async fn preferences_init()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/preferences-init.js"))}
@@ -29,14 +31,42 @@ pub async fn node_metrics(State(rt):State<Arc<Runtime>>)->Response{mutation_resp
 pub async fn node_read(State(rt):State<Arc<Runtime>>,Json(args):Json<crate::transfer::router::NodeCallArgs>)->Response{if !crate::transfer::router::readonly(&args.tool){return (StatusCode::FORBIDDEN,Json(json!({"error":"Only read-only tools are allowed"}))).into_response();}mutation_response(rt.transfer.call_node(&args.node_id,&args.tool,args.arguments).await)}
 #[derive(Deserialize)]#[serde(deny_unknown_fields)]pub struct NodeWriteDashboard{pub node_id:String,pub tool:String,pub arguments:Value,pub confirm:bool,#[serde(default)]pub request_id:Option<String>}
 pub async fn node_write(State(rt):State<Arc<Runtime>>,Json(args):Json<NodeWriteDashboard>)->Response{if !crate::transfer::router::writable(&args.tool)||!args.confirm{return (StatusCode::FORBIDDEN,Json(json!({"error":"Explicit confirmation and an authorized remote operation are required"}))).into_response();}let audit=json!({"node_id":args.node_id,"tool":args.tool,"arguments_sha256":crate::util::digest(args.arguments.to_string())});let operation=rt.begin_operation("node_dashboard_write","","",audit);let result=rt.transfer.call_node_with_request_id(&args.node_id,&args.tool,args.arguments,args.request_id.as_deref()).await;mutation_response(rt.finish_operation(operation,result))}
-pub async fn node_pending(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.transfer.pending())}
+pub async fn node_pending(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.transfer.reconcile_pending().await)}
 pub async fn node_peers(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.transfer.peers())}
 pub async fn node_pair_start(State(rt):State<Arc<Runtime>>,Json(request):Json<crate::transfer::secure::PairStart>)->Response{mutation_response(rt.transfer.start_pair(request.address).await)}
-pub async fn node_pair_approve(State(rt):State<Arc<Runtime>>,Json(request):Json<crate::transfer::secure::PairApprove>)->Response{mutation_response(rt.transfer.approve_pair(request,&rt))}
+pub async fn node_pair_approve(State(rt):State<Arc<Runtime>>,Json(request):Json<crate::transfer::secure::PairApprove>)->Response{
+    let result=rt.transfer.approve_pair(request,&rt);
+    if result.is_ok(){rt.publish_dashboard("transfer_pair_changed",json!({"decision":"approved"}));}
+    mutation_response(result)
+}
+pub async fn node_pair_reject(State(rt):State<Arc<Runtime>>,Json(request):Json<crate::transfer::secure::PairReject>)->Response{
+    let result=rt.transfer.reject_pair(&request.id);
+    if result.is_ok(){rt.publish_dashboard("transfer_pair_changed",json!({"decision":"rejected"}));}
+    mutation_response(result)
+}
+pub async fn node_update_grants(
+    State(rt):State<Arc<Runtime>>,
+    AxumPath(node_id):AxumPath<String>,
+    Json(request):Json<crate::transfer::secure::GrantUpdate>,
+)->Response{
+    let trace=rt.begin_operation("node_grants_update","","",json!({
+        "node_id":node_id,"grant_count":request.grants.len()
+    }));
+    let result=rt.transfer.update_peer_grants(&node_id,request,&rt);
+    if result.is_ok(){
+        rt.publish_dashboard("transfer_grants_changed",json!({"node_id":node_id}));
+    }
+    mutation_response(rt.finish_operation(trace,result))
+}
 pub async fn node_pair_revoke(State(rt):State<Arc<Runtime>>,AxumPath(node_id):AxumPath<String>)->Response{mutation_response(rt.transfer.revoke_pair(&node_id))}
+pub async fn setup(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_setup())}
+pub async fn update_connection(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateConnectionRequest>)->Response{mutation_response(rt.dashboard_update_connection(request))}
+pub async fn add_workspace(State(rt):State<Arc<Runtime>>,Json(request):Json<AddWorkspaceRequest>)->Response{mutation_response(rt.dashboard_add_workspace(request))}
+pub async fn javascript_setup()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/setup.js"))}
 pub async fn config(State(rt):State<Arc<Runtime>>)->Response{match rt.dashboard_config(){Ok(value)=>Json(value).into_response(),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn project_states(State(rt):State<Arc<Runtime>>)->Response{let mut projects=Vec::new();for(workspace_id,project)in rt.projects_snapshot(){let base=json!({"workspace":workspace_id.clone(),"project":project.config.id});let value=match project.lock.clone().try_lock_owned(){Ok(_guard)=>match crate::tools::git::status(&rt,&project).await{Ok(status)=>{let changes=status["entries"].as_array().map(|v|v.len()).unwrap_or(0);json!({"workspace":workspace_id,"project":project.config.id,"state":"ready","branch":status["branch"],"head":status["head"],"changes":changes,"dirty":changes>0})},Err(error)=>{let message=format!("{error:#}");let state=if message.contains("not a standalone Git repository")||message.contains(".git must be a real directory"){"not_repository"}else{"unavailable"};let mut value=base;value["state"]=json!(state);value}},Err(_)=>{let mut value=base;value["state"]=json!("busy");value}};projects.push(value);}Json(json!({"generated_at":crate::util::now(),"projects":projects})).into_response()}
 pub async fn reload_config(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.dashboard_reload_config())}
+pub async fn update_execution_backend(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateExecutionBackendRequest>)->Response{mutation_response(rt.dashboard_update_execution_backend(request))}
 pub async fn update_readonly_mounts(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateReadonlyMountsRequest>)->Response{mutation_response(rt.dashboard_update_readonly_mounts(request))}
 pub async fn update_transfer(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateTransferRequest>)->Response{mutation_response(rt.dashboard_update_transfer(request))}
 pub async fn update_docker(State(rt):State<Arc<Runtime>>,Json(request):Json<UpdateDockerRequest>)->Response{mutation_response(rt.dashboard_update_docker(request))}
@@ -61,10 +91,33 @@ fn mutation_response(result:anyhow::Result<Value>)->Response{
     match result{
         Ok(value)=>Json(value).into_response(),
         Err(error)=>{
-            let status=match crate::error::code(&error){"CONFIG_CONFLICT"|"FILE_CONFLICT"|"PATCH_CONFLICT"|"GIT_CONFLICT"|"STAGED_CONFLICT"|"PROJECT_BUSY"|"GIT_BUSY"|"CACHE_BUSY"|"IDEMPOTENCY_CONFLICT"|"RELOAD_RESTART_REQUIRED"=>StatusCode::CONFLICT,"PROJECT_READ_ONLY"|"PROJECT_EXEC_DISABLED"|"GIT_COMMIT_DISABLED"|"GIT_PUSH_DISABLED"=>StatusCode::FORBIDDEN,"WORKSPACE_NOT_AUTHORIZED"|"PROJECT_NOT_AUTHORIZED"=>StatusCode::NOT_FOUND,_=>StatusCode::BAD_REQUEST};
+            let status=match crate::error::code(&error){"CONFIG_CONFLICT"|"FILE_CONFLICT"|"PATCH_CONFLICT"|"GIT_CONFLICT"|"STAGED_CONFLICT"|"PROJECT_BUSY"|"GIT_BUSY"|"CACHE_BUSY"|"IDEMPOTENCY_CONFLICT"|"GRANTS_CONFLICT"|"RELOAD_RESTART_REQUIRED"=>StatusCode::CONFLICT,"PROJECT_READ_ONLY"|"PROJECT_EXEC_DISABLED"|"GIT_COMMIT_DISABLED"|"GIT_PUSH_DISABLED"=>StatusCode::FORBIDDEN,"WORKSPACE_NOT_AUTHORIZED"|"PROJECT_NOT_AUTHORIZED"=>StatusCode::NOT_FOUND,_=>StatusCode::BAD_REQUEST};
             (status,Json(crate::error::payload(&error))).into_response()
         }
     }
 }
 pub async fn add_project(State(rt):State<Arc<Runtime>>,Json(request):Json<AddProjectRequest>)->Response{mutation_response(rt.dashboard_add_project(request))}
 pub async fn update_project(State(rt):State<Arc<Runtime>>,AxumPath((workspace,project)):AxumPath<(String,String)>,Json(request):Json<UpdateProjectRequest>)->Response{mutation_response(rt.dashboard_update_project(&workspace,&project,request))}
+
+#[cfg(test)]
+mod dashboard_sandbox_page_tests{
+    #[test]
+    fn dashboard_sandbox_navigation_and_backend_safety(){
+        const HTML:&str=include_str!("../web/index.html");
+        const SCRIPT:&str=include_str!("../web/app.js");
+        const ROUTES:&str=include_str!("server.rs");
+        assert!(ROUTES.contains(".route(\"/sandbox\",get(web::home))"));
+        assert!(HTML.contains("data-nav=\"sandbox\" href=\"/sandbox\""));
+        assert!(HTML.contains("data-page=\"sandbox\""));
+        assert_eq!(HTML.matches("id=\"execution-backend-editor\"").count(),1);
+        assert_eq!(HTML.matches("id=\"sandbox-check\"").count(),1);
+        assert!(HTML.contains("<option value=\"appcontainer\" disabled>"));
+        assert!(SCRIPT.contains("option.value===\"appcontainer\")option.disabled=os!==\"windows\""));
+        assert!(SCRIPT.contains("location.pathname===\"/sandbox\"?\"sandbox\""));
+        assert!(SCRIPT.contains("currentPage===\"sandbox\""));
+        assert!(SCRIPT.contains("windows=!!diag.windows_security"));
+        assert!(SCRIPT.contains("check.disabled=false"));
+        // The native backend is selectable only on Windows; the saved
+        // backend must still be distinguished from the running configuration.
+    }
+}

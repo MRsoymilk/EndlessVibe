@@ -18,15 +18,23 @@ Scope、MCP readOnlyHint 等标注辅助客户端做确认，不是 OS 沙箱。
 
 ## 命令与 Git
 
-默认 `isolated` Project 使用 bubblewrap：不挂服务私有状态、整个 HOME 或 Docker socket，网络关闭，`.git` 只读；缺少支持时失败，不降级。`development` 是对本人控制的受信开发 Project 的显式高权限 profile：Job 默认共享宿主网络，并在可发现时获得 Docker Unix socket；Docker socket 通常等价于对该 daemon 及其宿主资源的广泛控制，因此不得用于不可信仓库。Job 可用 `network=false` 临时收紧网络，但一旦把 Docker socket交给可执行代码，就不能把文件 API/Project 路径限制视为完整 OS 安全边界。Project/Job environment 不继承任意宿主环境，日志和配置 diff 只暴露变量名而不记录值。管理员仍可用全局 `execution.allow_network=true` 允许 `isolated` Project 的特定 Job 显式申请网络。Project 可显式设置 `allow_git_mutation=true`，此时仅该 Project 自身 `.git` 在 sandbox 中可写，用于本地 branch/switch/merge/commit 等操作；该权限要求 write+exec。`run_command git` 仍拒绝网络 Git 子命令，且 `allow_git_mutation` 本身不会暴露真实 HOME/SSH 凭据。远端写入需要独立的 `allow_git_push=true` 与专用 `git_push`；该工具在宿主机侧仅为 Git credential helper / SSH 子进程提供必要凭据，不把它们挂载进项目 sandbox。构建脚本、解释器和Shell都是任意代码执行，需要显式授权。能执行代码的客户端可读写所选项目的全部内容；应把项目里的 `.env` 等真实凭据移出执行环境。
+Linux 默认 `isolated` Project 使用 bubblewrap：不挂服务私有状态、整个 HOME 或 Docker socket，网络关闭，`.git` 只读；缺少支持时失败，不降级。`development` 是对本人控制的受信开发 Project 的显式高权限 profile：Job 默认共享宿主网络，并在可发现时获得 Docker Unix socket；Docker socket 通常等价于对该 daemon 及其宿主资源的广泛控制，因此不得用于不可信仓库。Job 可用 `network=false` 临时收紧网络，但一旦把 Docker socket交给可执行代码，就不能把文件 API/Project 路径限制视为完整 OS 安全边界。Project/Job environment 不继承任意宿主环境，日志和配置 diff 只暴露变量名而不记录值。管理员仍可用全局 `execution.allow_network=true` 允许 `isolated` Project 的特定 Job 显式申请网络。Project 可显式设置 `allow_git_mutation=true`，此时仅该 Project 自身 `.git` 在 sandbox 中可写，用于本地 branch/switch/merge/commit 等操作；该权限要求 write+exec。`run_command git` 仍拒绝网络 Git 子命令，且 `allow_git_mutation` 本身不会暴露真实 HOME/SSH 凭据。远端写入需要独立的 `allow_git_push=true` 与专用 `git_push`；该工具在宿主机侧仅为 Git credential helper / SSH 子进程提供必要凭据，不把它们挂载进项目 sandbox。构建脚本、解释器和Shell都是任意代码执行，需要显式授权。能执行代码的客户端可读写所选项目的全部内容；应把项目里的 `.env` 等真实凭据移出执行环境。
 
 host 模式显式确认后拥有服务用户权限，可能读到其他 Project、Workspace 外文件和本机凭据，不受 Workspace/Project 路径语义的实际 OS 限制。不允许 root 服务；不要通过 Docker `--privileged` 等措施来掩盖隔离故障。bwrap共享宿主机内核，不是 VM，也未配置完整 seccomp/cgroup 磁盘配额；需持续维护 OS、SDK、Git、bwrap 与依赖。
 
 专门 Git 工具禁用或拒绝不受控的 helpers/includes/filter 等配置；默认不推送，只有 `allow_git_push=true` 时允许受限、非 force 的同名分支 push。仍不提供 reset/clean，也不丢弃不相关修改；日志和 index.lock 恢复必须人工确认。Git 元数据访问仍属于可信仓库假设，详情见 `GIT_RECOVERY.md`。
 
+## Windows AppContainer 命令
+
+Windows 的 `appcontainer` 后端用每任务独立 LPAC 身份及 Job Object 执行本机程序。进程在创建时原子加入 Job，服务在其仍挂起时核验令牌并确认归属，项目可写、工具链只读、未经 Git mutation 授权的现有 `.git` 只读。禁止借项目权限修改 ACL 或所有者；不继承服务凭据、任意环境变量或标准管道之外的句柄。唯一附加 capability 为本机子进程初始化所需的 `registryRead`，逐项验证真实令牌中的 SID、属性和数量。无网络能力，`development` profile 也不能增加网络权限；失败不回退 host。
+
+ACL 授权前持久化记录，整个进程树确认退出后再回收权限。失败的清理保留日志、暂停新 Jobs 并保留项目锁。授权热加载在提交检查、Jobs 执行或清理未决时不能替换项目对象及其锁。独立执行记录在创建前标为 `running`、在确认整个 Job 已空后才标为 `empty`；启动恢复要求每个待回收 ACL SID 都有可信的执行退出证据。同次 Windows 启动中遗留的 `running` 记录会阻止恢复，单独重启服务不足以放行；完整 Windows 重启后，使用已核验的内核 BootId 变化证明旧进程不再运行。启动恢复在独占实例锁下先验证全批证据，再回收 ACL、删除 Profile，最后删除执行记录。新 journal 目录使用显式受保护 DACL，既有 journal 若可被非受信主体写入则拒绝读取执行恢复。不能通过悄悄修复一个不可信日志目录再相信其已有内容。
+
+目录授权和恢复拒绝 reparse point；只允许库存内同权限硬链接。任务创建新链接导致不能确认边界时，停止清理而不沿链接递归。服务与用户拥有的项目共享磁盘，按任务权限并非磁盘配额；同用户宿主进程与管理员对 ACL 的并发修改不属于这一隔离承诺。公开 Cargo 缓存只按锁文件复制验证过的数据，私有 registry、Git 凭据和宿主配置不复制。无法原位授予临时权限的已识别 MSVC / SDK 子目录采用有界的私有副本，宿主安装目录权限不变。副本通过收紧本任务身份的实际 ALLOW 权限成为只读，并保护私有根的继承边界；不能只依赖给 AppContainer SID 添加 DENY 条目来限制已有宽权限。具体离线及工具链限制见 [执行模型](EXECUTION.md#windows-原生-appcontainer)。
+
 ## 本机状态
 
-服务账户自己持有的配置/状态目录 0700，凭据和数据库 0600，SQLite sidecar 由 umask077保护。Token/授权码使用随机值及哈希存储；任务输出、文件备份则包含原始内容，必须作为敏感文件管理。数据库的 WAL 不是加密。
+Unix 上服务账户自己持有的配置/状态目录 0700，凭据和数据库 0600，SQLite sidecar 由 umask077保护。Windows 上这些私有文件须位于服务用户的受保护配置/状态目录，恢复日志另外校验 native DACL。Token/授权码使用随机值及哈希存储；任务输出、文件备份则包含原始内容，必须作为敏感文件管理。数据库的 WAL 不是加密。
 
 最近100个已完成 Job输出、7天请求去重、10000条左右审计构成默认逻辑保留规则。备份和编译缓存没有自动删除/磁盘配额；不会为了节省空间自动丢失用户恢复资料。长期使用需要管理员检查磁盘并安排私有备份/保留策略；SQLite 文件空间也不保证删除记录后立即缩小。
 

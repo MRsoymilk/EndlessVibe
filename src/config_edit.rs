@@ -2,8 +2,14 @@ use crate::{config::{self,Config,ProjectConfig,ReadOnlyMount},util,workspace};
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
-use std::{os::unix::fs::MetadataExt,path::{Path,PathBuf}};
+use std::path::{Path,PathBuf};
 
+#[derive(Clone,Debug,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateConnectionRequest{pub expected_revision:String,pub public_url:String,pub connection_mode:String}
+#[derive(Clone,Debug,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddWorkspaceRequest{pub expected_revision:String,pub id:String,pub path:String}
 #[derive(Clone,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddProjectRequest{
@@ -34,6 +40,9 @@ pub struct UpdateProjectRequest{
 #[derive(Clone,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateReadonlyMountsRequest{pub expected_revision:String,#[serde(default)]pub readonly_mounts:Vec<ReadOnlyMount>}
+#[derive(Clone,Debug,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateExecutionBackendRequest{pub expected_revision:String,pub backend:String,pub acknowledge_unsafe_host_execution:bool}
 #[derive(Clone,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateGitRequest{pub expected_revision:String,pub executable:String,pub author_name:String,pub author_email:String}
@@ -73,7 +82,7 @@ fn read_checked(path:&Path,expected_revision:&str)->Result<(String,Config)>{
 }
 fn replace_config(path:&Path,bytes:&[u8])->Result<()>{
     let md=std::fs::symlink_metadata(path).with_context(||format!("Read metadata for {}",path.display()))?;
-    if !md.is_file()||md.file_type().is_symlink()||md.nlink()!=1||md.uid()!=unsafe{libc::geteuid()}{bail!("Config must be a regular, single-link file owned by the service user");}
+    if !md.is_file()||md.file_type().is_symlink()||!crate::platform::single_link_path(path)||!crate::platform::owned_by_service(&md){bail!("Config must be a regular, single-link file owned by the service user");}
     let parent=path.parent().context("Config needs a parent directory")?;
     let name=path.file_name().and_then(|v|v.to_str()).unwrap_or("config.toml");
     let temp=parent.join(format!(".{name}.{}.tmp",util::random_secret()?));
@@ -118,11 +127,87 @@ fn project_value(workspace:&str,project:&ProjectConfig,root:&Path)->Value{
     let environment_keys=project.environment_map().map(|v|v.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();json!({"workspace":workspace,"id":project.id,"path":root.join(&project.path),"allow_write":project.allow_write,"allow_exec":project.allow_exec,"allow_git_commit":project.allow_git_commit,"allow_git_mutation":project.allow_git_mutation,"allow_git_push":project.allow_git_push,"execution_profile":project.execution_profile,"environment_keys":environment_keys})
 }
 fn edit_service_section(text:&mut String,section:&str,items:&[(&str,toml_edit::Value)])->Result<()>{use toml_edit::DocumentMut;let mut doc=text.parse::<DocumentMut>().context("Invalid config.toml for structured edit")?;if !doc.as_table().contains_key(section){doc.as_table_mut().insert(section,toml_edit::Item::Table(toml_edit::Table::new()));}if !doc[section].is_table(){bail!("[{section}] must be a table in config");}for(key,value)in items{doc[section][key]=toml_edit::Item::Value(value.clone());}*text=doc.to_string();Ok(())}
+pub fn update_connection(path:&Path,request:UpdateConnectionRequest)->Result<Value>{
+    let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
+    let public_url=config::normalize_connection_url(&request.public_url)?;
+    let ip:std::net::IpAddr=match request.connection_mode.as_str(){
+        "loopback"=>"127.0.0.1".parse().unwrap(),
+        "container"=>"0.0.0.0".parse().unwrap(),
+        _=>bail!("Connection mode must be loopback (local tunnel) or container (network proxy)"),
+    };
+    let port=cfg.server.bind.port();
+    if port==0{bail!("Choose a fixed MCP listener port in config.toml before configuring a public connection");}
+    cfg.server.bind=std::net::SocketAddr::new(ip,port);cfg.server.public_url=public_url;
+    cfg.server.lan_only=false;cfg.security.allow_http_loopback=false;cfg.validate()?;
+    edit_service_section(&mut text,"server",&[
+        ("bind",toml_edit::Value::from(cfg.server.bind.to_string())),
+        ("public_url",toml_edit::Value::from(cfg.server.public_url.as_str())),
+        ("lan_only",toml_edit::Value::from(false))])?;
+    edit_service_section(&mut text,"security",&[("allow_http_loopback",toml_edit::Value::from(false))])?;
+    let verified:Config=toml::from_str(&text).context("Generated connection config is invalid")?;verified.validate()?;
+    replace_config(path,text.as_bytes())?;
+    Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"_operation_diff":config_diff(&original,&text)}))
+}
+pub fn add_workspace(path:&Path,request:AddWorkspaceRequest)->Result<Value>{
+    let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
+    if !config::valid_id(&request.id){bail!("Workspace ID must contain only ASCII letters, digits, '_' or '-' and be at most 64 characters");}
+    if cfg.workspaces.iter().any(|w|w.id==request.id){bail!("Workspace ID {} already exists",request.id);}
+    let raw=PathBuf::from(&request.path);if !raw.is_absolute(){bail!("Workspace path must be an existing absolute directory");}
+    let root=raw.canonicalize().with_context(||format!("Cannot resolve workspace path {}",raw.display()))?;
+    let item=config::WorkspaceConfig{id:request.id.clone(),path:root.clone(),projects:vec![],
+        allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,
+        execution_profile:None,environment:vec![]};
+    cfg.workspaces.push(item);cfg.validate()?;drop(workspace::load(&cfg,path)?);
+    let mut doc=text.parse::<toml_edit::DocumentMut>().context("Invalid config.toml for structured edit")?;
+    if !doc.as_table().contains_key("workspaces")||doc.get("workspaces").and_then(toml_edit::Item::as_array).is_some_and(|a|a.is_empty()){
+        doc["workspaces"]=toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let tables=doc["workspaces"].as_array_of_tables_mut().context("Workspaces must be an array of tables")?;
+    let mut table=toml_edit::Table::new();table["id"]=toml_edit::value(request.id.as_str());
+    table["path"]=toml_edit::value(root.to_str().context("Workspace path must be UTF-8")?);
+    tables.push(table);text=doc.to_string();
+    let verified:Config=toml::from_str(&text).context("Generated workspace config is invalid")?;
+    verified.validate()?;let loaded=workspace::load(&verified,path)?;
+    if !loaded[&request.id].projects.is_empty(){bail!("A new workspace must not grant project access automatically");}
+    drop(loaded);replace_config(path,text.as_bytes())?;
+    Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,
+        "workspace":{"id":request.id,"path":root,"project_count":0},"_operation_diff":config_diff(&original,&text)}))
+}
 pub fn update_transfer(path:&Path,request:UpdateTransferRequest)->Result<Value>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();cfg.transfer=config::Transfer{enabled:request.enabled,listen:request.listen.parse().context("Invalid Transfer IP:port listener")?,advertise:request.advertise,discover:request.discover,display_name:request.display_name.clone()};cfg.validate()?;edit_service_section(&mut text,"transfer",&[("enabled",toml_edit::Value::from(cfg.transfer.enabled)),("listen",toml_edit::Value::from(request.listen)),("advertise",toml_edit::Value::from(request.advertise)),("discover",toml_edit::Value::from(request.discover)),("display_name",toml_edit::Value::from(request.display_name))])?;let verify:Config=toml::from_str(&text).context("Generated Transfer config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"transfer":verify.transfer,"_operation_diff":config_diff(&original,&text)}))}
 pub fn update_docker(path:&Path,request:UpdateDockerRequest)->Result<Value>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();if (request.enabled||request.allow_project_socket)&&!request.acknowledge_daemon_control{bail!("Enabling Docker access requires acknowledge_daemon_control=true; Docker socket access can control the host");}cfg.docker=config::Docker{enabled:request.enabled,socket:PathBuf::from(&request.socket),allowed_containers:request.allowed_containers.clone(),allow_start:request.allow_start,allow_stop:request.allow_stop,allow_restart:request.allow_restart,allow_project_socket:request.allow_project_socket};cfg.validate()?;let mut containers=toml_edit::Array::new();for name in &cfg.docker.allowed_containers{containers.push(name.as_str());}edit_service_section(&mut text,"docker",&[("enabled",toml_edit::Value::from(cfg.docker.enabled)),("socket",toml_edit::Value::from(cfg.docker.socket.to_string_lossy().as_ref())),("allowed_containers",toml_edit::Value::Array(containers)),("allow_start",toml_edit::Value::from(cfg.docker.allow_start)),("allow_stop",toml_edit::Value::from(cfg.docker.allow_stop)),("allow_restart",toml_edit::Value::from(cfg.docker.allow_restart)),("allow_project_socket",toml_edit::Value::from(cfg.docker.allow_project_socket))])?;let verified:Config=toml::from_str(&text).context("Generated Docker config is invalid")?;verified.validate()?;replace_config(path,text.as_bytes())?;Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"docker":verified.docker,"_operation_diff":config_diff(&original,&text)}))}
 pub fn update_git(path:&Path,request:UpdateGitRequest)->Result<Value>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();cfg.git.executable=PathBuf::from(&request.executable);cfg.git.author_name=request.author_name.clone();cfg.git.author_email=request.author_email.clone();cfg.validate()?;edit_service_section(&mut text,"git",&[("executable",toml_edit::Value::from(request.executable)),("author_name",toml_edit::Value::from(request.author_name)),("author_email",toml_edit::Value::from(request.author_email))])?;let verify:Config=toml::from_str(&text).context("Generated Git config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"git":verify.git,"_operation_diff":config_diff(&original,&text)}))}
 pub fn update_limits(path:&Path,request:UpdateLimitsRequest)->Result<Value>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();cfg.limits=config::Limits{max_file_bytes:request.max_file_bytes,max_read_bytes:request.max_read_bytes,max_output_bytes:request.max_output_bytes,command_timeout_seconds:request.command_timeout_seconds,max_jobs:request.max_jobs,retained_jobs:request.retained_jobs,search_max_files:request.search_max_files,search_max_bytes:request.search_max_bytes};cfg.validate()?;let data=serde_json::to_value(&cfg.limits)?;let obj=data.as_object().context("Limits must be an object")?;let mut fields=Vec::new();for(key,value)in obj{let n=value.as_u64().context("Limits must use positive integers")?;let n=i64::try_from(n).context("Limits exceed TOML signed integer range")?;fields.push((key.as_str(),toml_edit::Value::from(n)));}edit_service_section(&mut text,"limits",&fields)?;let verify:Config=toml::from_str(&text).context("Generated Limits config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,"limits":verify.limits,"_operation_diff":config_diff(&original,&text)}))}
-pub fn update_readonly_mounts(path:&Path,request:UpdateReadonlyMountsRequest)->Result<ServiceConfigMutation>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();cfg.execution.readonly_mounts=request.readonly_mounts.clone();cfg.validate()?;replace_execution_readonly_mounts(&mut text,&request.readonly_mounts)?;let verify:Config=toml::from_str(&text).context("Generated execution config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;Ok(ServiceConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,execution:json!({"readonly_mounts":verify.execution.readonly_mounts}),operation_diff:config_diff(&original,&text)})}
+/// Change the backend and host acknowledgement; AppContainer also enforces offline execution.
+ /// Host permission is never inherited from an earlier request or enabled by
+ /// selecting a backend without a fresh acknowledgement.
+ pub fn update_execution_backend(path:&Path,request:UpdateExecutionBackendRequest)->Result<Value>{
+     let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;
+     let original=text.clone();
+     if request.backend=="host" && !request.acknowledge_unsafe_host_execution{
+         bail!("Host execution requires explicit acknowledgement: it runs without sandbox protection and accepts authorized remote commands");
+     }
+     if request.backend!="host" && request.acknowledge_unsafe_host_execution{
+         bail!("Host execution acknowledgement is allowed only when backend=host");
+     }
+     cfg.execution.backend=request.backend;
+     cfg.execution.acknowledge_unsafe_host_execution=request.acknowledge_unsafe_host_execution;
+     if cfg.execution.backend=="appcontainer"{cfg.execution.allow_network=false;}
+     cfg.validate()?;
+     let mut values=vec![
+         ("backend",toml_edit::Value::from(cfg.execution.backend.as_str())),
+         ("acknowledge_unsafe_host_execution",toml_edit::Value::from(cfg.execution.acknowledge_unsafe_host_execution))
+     ];
+     if cfg.execution.backend=="appcontainer"{values.push(("allow_network",toml_edit::Value::from(false)));}
+     edit_service_section(&mut text,"execution",&values)?;
+     let verified:Config=toml::from_str(&text).context("Generated execution backend config is invalid")?;
+     verified.validate()?;
+     replace_config(path,text.as_bytes())?;
+     Ok(json!({"revision":util::digest(text.as_bytes()),"requires_restart":true,
+         "execution":{"backend":verified.execution.backend,
+             "acknowledge_unsafe_host_execution":verified.execution.acknowledge_unsafe_host_execution},
+         "_operation_diff":config_diff(&original,&text)}))
+ }
+ pub fn update_readonly_mounts(path:&Path,request:UpdateReadonlyMountsRequest)->Result<ServiceConfigMutation>{let(mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();cfg.execution.readonly_mounts=request.readonly_mounts.clone();cfg.validate()?;replace_execution_readonly_mounts(&mut text,&request.readonly_mounts)?;let verify:Config=toml::from_str(&text).context("Generated execution config is invalid")?;verify.validate()?;replace_config(path,text.as_bytes())?;Ok(ServiceConfigMutation{revision:util::digest(text.as_bytes()),requires_restart:true,execution:json!({"readonly_mounts":verify.execution.readonly_mounts}),operation_diff:config_diff(&original,&text)})}
 pub fn add_project(path:&Path,request:AddProjectRequest)->Result<ConfigMutation>{
     validate_project_permissions(request.allow_write,request.allow_exec,request.allow_git_commit,request.allow_git_mutation)?;
     let (mut text,mut cfg)=read_checked(path,&request.expected_revision)?;let original=text.clone();
@@ -182,11 +267,181 @@ pub fn update_project(path:&Path,workspace_id:&str,project_id:&str,request:Updat
 mod tests{
     use super::*;
     fn config(root:&Path,state:&Path)->Config{let mut c=Config::default();c.security.data_dir=state.into();c.workspaces=vec![crate::config::WorkspaceConfig{id:"root".into(),path:root.into(),projects:vec![],allow_write:None,allow_exec:None,allow_git_commit:None,allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![]}];c}
+
+    #[test]
+    fn setup_connection_save_preserves_identity_permissions_and_checks_revision(){
+        let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");
+        let mut c=Config::local_setup();c.security.data_dir=t.path().join("state");
+        c.server.bind="127.0.0.1:21345".parse().unwrap();
+        c.server.allowed_hosts.push("my-proxy".into());
+        let initial=toml::to_string_pretty(&c).unwrap().replace("[security]","# preserve-owner-settings\n[security]");
+        std::fs::write(&path,&initial).unwrap();
+        let key_path=c.owner_key_path();util::private_dir(&c.security.data_dir).unwrap();util::private_create(&key_path,b"fixture-owner-key").unwrap();
+        let request=UpdateConnectionRequest{expected_revision:revision(&path).unwrap(),public_url:"Demo.ngrok-free.app/".into(),connection_mode:"loopback".into()};
+        let saved=update_connection(&path,request.clone()).unwrap();let after=Config::load_file(&path).unwrap();
+        assert_eq!(saved["requires_restart"],true);assert_eq!(after.server.public_url,"https://demo.ngrok-free.app");
+        assert_eq!(after.server.bind.to_string(),"127.0.0.1:21345");assert!(!after.security.allow_http_loopback);
+        assert!(after.server.allowed_hosts.contains(&"my-proxy".into()));assert!(after.workspaces.is_empty());
+        assert_eq!(serde_json::to_value(&after.execution).unwrap(),serde_json::to_value(&c.execution).unwrap());
+        assert_eq!(serde_json::to_value(&after.transfer).unwrap(),serde_json::to_value(&c.transfer).unwrap());
+        assert_eq!(after.security.data_dir,c.security.data_dir);assert_eq!(std::fs::read(&key_path).unwrap(),b"fixture-owner-key");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# preserve-owner-settings"));
+        assert_eq!(crate::error::code(&update_connection(&path,request.clone()).unwrap_err()),"CONFIG_CONFLICT");
+        let previous=std::fs::read(&path).unwrap();let mut bad=request;bad.expected_revision=revision(&path).unwrap();
+        bad.public_url="https://user:secret@demo.ngrok-free.app/mcp".into();assert!(update_connection(&path,bad.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(),previous);
+        bad.public_url="next.ngrok.app".into();bad.connection_mode="host".into();assert!(update_connection(&path,bad.clone()).is_err());
+        bad.connection_mode="container".into();update_connection(&path,bad).unwrap();
+        assert_eq!(Config::load_file(&path).unwrap().server.bind.to_string(),"0.0.0.0:21345");
+    }
+    #[test]
+    fn setup_workspace_starts_without_project_grants_and_rejects_overlap(){
+        let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");let root=t.path().join("projects");
+        std::fs::create_dir_all(root.join("app")).unwrap();let mut c=Config::local_setup();c.security.data_dir=t.path().join("state");
+        util::private_dir(&c.security.data_dir).unwrap();std::fs::write(&path,toml::to_string_pretty(&c).unwrap()).unwrap();
+        let request=AddWorkspaceRequest{expected_revision:revision(&path).unwrap(),id:"work".into(),path:root.to_string_lossy().into_owned()};
+        let saved=add_workspace(&path,request.clone()).unwrap();assert_eq!(saved["workspace"]["project_count"],0);
+        let after=Config::load_file(&path).unwrap();let loaded=workspace::load(&after,&path).unwrap();assert_eq!(loaded.len(),1);assert!(loaded["work"].projects.is_empty());drop(loaded);
+        assert_eq!(crate::error::code(&add_workspace(&path,request.clone()).unwrap_err()),"CONFIG_CONFLICT");
+        for (id,p) in [("other",root.clone()),("child",root.join("app")),("relative",PathBuf::from("relative")),("missing",root.join("absent")),("work",root.clone())]{
+            let before=std::fs::read(&path).unwrap();let rejected=AddWorkspaceRequest{expected_revision:revision(&path).unwrap(),id:id.into(),path:p.to_string_lossy().into_owned()};
+            assert!(add_workspace(&path,rejected).is_err(),"Accepted {id}");assert_eq!(std::fs::read(&path).unwrap(),before);
+        }
+        let add=AddProjectRequest{expected_revision:revision(&path).unwrap(),workspace:"work".into(),project:Some("app".into()),path:root.join("app").to_string_lossy().into_owned(),allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:false,allow_git_push:false,execution_profile:None,environment:vec![]};
+        add_project(&path,add).unwrap();let after=Config::load_file(&path).unwrap();assert_eq!(workspace::load(&after,&path).unwrap()["work"].projects.len(),1);
+    }
+    #[test]
+    fn add_project_still_rejects_relative_and_outside_workspace_paths(){
+        let temp=tempfile::tempdir().unwrap();
+        let root=temp.path().join("workspace");
+        let child=root.join("inside");
+        let outside=temp.path().join("outside");
+        let state=temp.path().join("state");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let config_path=temp.path().join("config.toml");
+        std::fs::write(&config_path,toml::to_string_pretty(&config(&root,&state)).unwrap()).unwrap();
+        let mut request=AddProjectRequest{
+            expected_revision:revision(&config_path).unwrap(),
+            workspace:"root".into(),project:None,
+            path:"inside".into(),allow_write:true,allow_exec:true,
+            allow_git_commit:true,allow_git_mutation:false,
+            allow_git_push:false,execution_profile:Some("development".into()),
+            environment:vec![],
+        };
+        assert!(add_project(&config_path,request.clone()).unwrap_err().to_string().contains("absolute"));
+        request.path=outside.to_string_lossy().into_owned();
+        assert!(add_project(&config_path,request.clone()).unwrap_err().to_string().contains("strict descendant"));
+        request.path=root.join("not-yet-created").to_string_lossy().into_owned();
+        assert!(add_project(&config_path,request).is_err());
+        assert!(Config::load_file(&config_path).unwrap().workspaces[0].projects.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_add_project_accepts_drive_slashes_with_verbatim_workspace_root(){
+        let temp=tempfile::tempdir().unwrap();
+        let root=temp.path().join("workspace");
+        let child=root.join("EndlessVibe");
+        let state=temp.path().join("state");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let canonical_root=root.canonicalize().unwrap();
+        let root_text=canonical_root.to_string_lossy();
+        assert!(root_text.starts_with(r"\\?\"),"Windows canonical path: {root_text}");
+        let canonical_child=child.canonicalize().unwrap();
+        let child_text=canonical_child.to_string_lossy();
+        // From the OS's \\?\C:\... notation to a normal C:/... input.
+        let friendly=child_text.strip_prefix(r"\\?\").unwrap_or(&child_text);
+        let forward_slashes=friendly.replace('\\',"/");
+        let config_path=temp.path().join("config.toml");
+        std::fs::write(&config_path,toml::to_string_pretty(&config(&canonical_root,&state)).unwrap()).unwrap();
+        let outcome=add_project(&config_path,AddProjectRequest{
+            expected_revision:revision(&config_path).unwrap(),
+            workspace:"root".into(),project:None,
+            path:forward_slashes,allow_write:true,allow_exec:true,
+            allow_git_commit:true,allow_git_mutation:false,
+            allow_git_push:false,execution_profile:Some("development".into()),
+            environment:vec![],
+        }).unwrap();
+        assert_eq!(outcome.project["id"],"EndlessVibe");
+        let loaded=Config::load_file(&config_path).unwrap();
+        assert_eq!(loaded.workspaces[0].projects[0].path,PathBuf::from("EndlessVibe"));
+    }
+
     #[test]fn add_and_update_preserve_comments(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let child=root.join("demo");let state=t.path().join("state");std::fs::create_dir_all(&child).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let mut text=toml::to_string_pretty(&config(&root,&state)).unwrap();text.push_str("\n# keep-comment\n");std::fs::write(&path,&text).unwrap();let rev=revision(&path).unwrap();let added=add_project(&path,AddProjectRequest{expected_revision:rev,workspace:"root".into(),project:None,path:child.display().to_string(),allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:false,allow_git_push:false,execution_profile:Some("development".into()),environment:vec!["TEST_DATABASE_URL=postgres://localhost/test".into()]}).unwrap();assert_eq!(added.project["execution_profile"],"development");assert_eq!(added.project["environment_keys"],json!(["TEST_DATABASE_URL"]));assert!(!added.operation_diff.contains("postgres://localhost/test"));assert!(added.operation_diff.contains("environment = [REDACTED]"));let updated=update_project(&path,"root","demo",UpdateProjectRequest{expected_revision:added.revision,allow_write:true,allow_exec:false,allow_git_commit:false,allow_git_mutation:false,allow_git_push:false,execution_profile:Some("isolated".into()),environment:Some(vec![])}).unwrap();assert!(updated.requires_restart);let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-comment"));let loaded=Config::load_file(&path).unwrap();assert!(!loaded.workspaces[0].projects[0].allow_exec);}
     #[test]fn readonly_mounts_update_preserves_other_execution_text(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let state=t.path().join("state");let sdk=t.path().join("android-sdk");let tools=t.path().join("tools");std::fs::create_dir_all(&root).unwrap();std::fs::create_dir_all(&state).unwrap();std::fs::create_dir_all(&sdk).unwrap();std::fs::create_dir_all(&tools).unwrap();let path=t.path().join("config.toml");let mut cfg=config(&root,&state);cfg.execution.readonly_mounts=vec![ReadOnlyMount{source:tools.clone(),target:"/opt/tools".into()}];let mut text=toml::to_string_pretty(&cfg).unwrap();text=text.replace("[execution]\n","[execution]\n# keep-execution-comment\n");std::fs::write(&path,&text).unwrap();let rev=revision(&path).unwrap();let result=update_readonly_mounts(&path,UpdateReadonlyMountsRequest{expected_revision:rev,readonly_mounts:vec![ReadOnlyMount{source:sdk.clone(),target:"/opt/android-sdk".into()},ReadOnlyMount{source:tools,target:"/opt/tools".into()}]}).unwrap();assert!(result.requires_restart);let after=std::fs::read_to_string(&path).unwrap();assert!(after.contains("# keep-execution-comment"));assert!(after.contains("/opt/android-sdk"));let loaded=Config::load_file(&path).unwrap();assert_eq!(loaded.execution.readonly_mounts.len(),2);assert_eq!(loaded.execution.readonly_mounts[0].target,PathBuf::from("/opt/android-sdk"));}
-    #[test]fn online_git_and_limits_edits_preserve_comments_and_reject_stale_revisions(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let state=t.path().join("state");std::fs::create_dir_all(&root).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let text=toml::to_string_pretty(&config(&root,&state)).unwrap().replace("[git]\n","[git]\n# keep-git-comment\n").replace("[limits]\n","[limits]\n# keep-limits-comment\n");std::fs::write(&path,text).unwrap();let original=revision(&path).unwrap();let git=update_git(&path,UpdateGitRequest{expected_revision:original.clone(),executable:"/usr/bin/git".into(),author_name:"Developer".into(),author_email:"developer@example.org".into()}).unwrap();assert!(git["requires_restart"].as_bool().unwrap());assert_eq!(git["git"]["author_name"],"Developer");assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-git-comment"));assert!(update_git(&path,UpdateGitRequest{expected_revision:original,executable:"/usr/bin/git".into(),author_name:"Conflict".into(),author_email:"developer@example.org".into()}).is_err());let mut limit=Config::load_file(&path).unwrap().limits;limit.command_timeout_seconds=600;limit.retained_jobs=25;let out=update_limits(&path,UpdateLimitsRequest{expected_revision:git["revision"].as_str().unwrap().into(),max_file_bytes:limit.max_file_bytes,max_read_bytes:limit.max_read_bytes,max_output_bytes:limit.max_output_bytes,command_timeout_seconds:limit.command_timeout_seconds,max_jobs:limit.max_jobs,retained_jobs:limit.retained_jobs,search_max_files:limit.search_max_files,search_max_bytes:limit.search_max_bytes}).unwrap();assert_eq!(out["limits"]["command_timeout_seconds"],600);assert_eq!(out["limits"]["retained_jobs"],25);assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-limits-comment"));let mut bad=UpdateLimitsRequest{expected_revision:out["revision"].as_str().unwrap().into(),max_file_bytes:limit.max_file_bytes,max_read_bytes:limit.max_read_bytes,max_output_bytes:limit.max_output_bytes,command_timeout_seconds:3601,max_jobs:limit.max_jobs,retained_jobs:limit.retained_jobs,search_max_files:limit.search_max_files,search_max_bytes:limit.search_max_bytes};assert!(update_limits(&path,bad.clone()).is_err());bad.command_timeout_seconds=600;bad.max_read_bytes=bad.max_file_bytes+1;assert!(update_limits(&path,bad).is_err());assert_eq!(Config::load_file(&path).unwrap().limits.command_timeout_seconds,600);}
-    #[test]fn service_sections_can_be_created_when_missing(){let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");std::fs::write(&path,format!("# minimal config\n[security]\ndata_dir = {:?}\n",t.path().join("state").display().to_string())).unwrap();let rev=revision(&path).unwrap();let git=update_git(&path,UpdateGitRequest{expected_revision:rev,executable:"/usr/bin/git".into(),author_name:"Minimal".into(),author_email:"minimal@example.org".into()}).unwrap();let limits=Config::load_file(&path).unwrap().limits;let value=update_limits(&path,UpdateLimitsRequest{expected_revision:git["revision"].as_str().unwrap().into(),max_file_bytes:limits.max_file_bytes,max_read_bytes:limits.max_read_bytes,max_output_bytes:limits.max_output_bytes,command_timeout_seconds:limits.command_timeout_seconds,max_jobs:limits.max_jobs,retained_jobs:limits.retained_jobs,search_max_files:limits.search_max_files,search_max_bytes:limits.search_max_bytes}).unwrap();assert_eq!(value["requires_restart"],true);let text=std::fs::read_to_string(&path).unwrap();assert!(text.contains("# minimal config"));assert!(text.contains("[git]"));assert!(text.contains("[limits]"));}
+    #[test]fn online_git_and_limits_edits_preserve_comments_and_reject_stale_revisions(){let t=tempfile::tempdir().unwrap();let root=t.path().join("root");let state=t.path().join("state");std::fs::create_dir_all(&root).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let text=toml::to_string_pretty(&config(&root,&state)).unwrap().replace("[git]\n","[git]\n# keep-git-comment\n").replace("[limits]\n","[limits]\n# keep-limits-comment\n");std::fs::write(&path,text).unwrap();let original=revision(&path).unwrap();let git=update_git(&path,UpdateGitRequest{expected_revision:original.clone(),executable:Config::default().git.executable.to_string_lossy().into_owned(),author_name:"Developer".into(),author_email:"developer@example.org".into()}).unwrap();assert!(git["requires_restart"].as_bool().unwrap());assert_eq!(git["git"]["author_name"],"Developer");assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-git-comment"));assert!(update_git(&path,UpdateGitRequest{expected_revision:original,executable:Config::default().git.executable.to_string_lossy().into_owned(),author_name:"Conflict".into(),author_email:"developer@example.org".into()}).is_err());let mut limit=Config::load_file(&path).unwrap().limits;limit.command_timeout_seconds=600;limit.retained_jobs=25;let out=update_limits(&path,UpdateLimitsRequest{expected_revision:git["revision"].as_str().unwrap().into(),max_file_bytes:limit.max_file_bytes,max_read_bytes:limit.max_read_bytes,max_output_bytes:limit.max_output_bytes,command_timeout_seconds:limit.command_timeout_seconds,max_jobs:limit.max_jobs,retained_jobs:limit.retained_jobs,search_max_files:limit.search_max_files,search_max_bytes:limit.search_max_bytes}).unwrap();assert_eq!(out["limits"]["command_timeout_seconds"],600);assert_eq!(out["limits"]["retained_jobs"],25);assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-limits-comment"));let mut bad=UpdateLimitsRequest{expected_revision:out["revision"].as_str().unwrap().into(),max_file_bytes:limit.max_file_bytes,max_read_bytes:limit.max_read_bytes,max_output_bytes:limit.max_output_bytes,command_timeout_seconds:3601,max_jobs:limit.max_jobs,retained_jobs:limit.retained_jobs,search_max_files:limit.search_max_files,search_max_bytes:limit.search_max_bytes};assert!(update_limits(&path,bad.clone()).is_err());bad.command_timeout_seconds=600;bad.max_read_bytes=bad.max_file_bytes+1;assert!(update_limits(&path,bad).is_err());assert_eq!(Config::load_file(&path).unwrap().limits.command_timeout_seconds,600);}
+    #[test]fn service_sections_can_be_created_when_missing(){let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");std::fs::write(&path,format!("# minimal config\n[security]\ndata_dir = {:?}\n",t.path().join("state").display().to_string())).unwrap();let rev=revision(&path).unwrap();let git=update_git(&path,UpdateGitRequest{expected_revision:rev,executable:Config::default().git.executable.to_string_lossy().into_owned(),author_name:"Minimal".into(),author_email:"minimal@example.org".into()}).unwrap();let limits=Config::load_file(&path).unwrap().limits;let value=update_limits(&path,UpdateLimitsRequest{expected_revision:git["revision"].as_str().unwrap().into(),max_file_bytes:limits.max_file_bytes,max_read_bytes:limits.max_read_bytes,max_output_bytes:limits.max_output_bytes,command_timeout_seconds:limits.command_timeout_seconds,max_jobs:limits.max_jobs,retained_jobs:limits.retained_jobs,search_max_files:limits.search_max_files,search_max_bytes:limits.search_max_bytes}).unwrap();assert_eq!(value["requires_restart"],true);let text=std::fs::read_to_string(&path).unwrap();assert!(text.contains("# minimal config"));assert!(text.contains("[git]"));assert!(text.contains("[limits]"));}
+    #[cfg(windows)]
+    #[test]
+    fn choosing_appcontainer_persists_offline_without_host_permission(){
+        let directory=tempfile::tempdir().unwrap();let path=directory.path().join("config.toml");
+        let mut config=Config::default();config.execution.backend="host".into();
+        config.execution.acknowledge_unsafe_host_execution=true;config.execution.allow_network=true;
+        std::fs::write(&path,toml::to_string_pretty(&config).unwrap()).unwrap();
+        let saved=update_execution_backend(&path,UpdateExecutionBackendRequest{
+            expected_revision:revision(&path).unwrap(),backend:"appcontainer".into(),
+            acknowledge_unsafe_host_execution:false}).unwrap();
+        assert_eq!(saved["requires_restart"],true);
+        let persisted=Config::load_file(&path).unwrap();
+        assert_eq!(persisted.execution.backend,"appcontainer");
+        assert!(!persisted.execution.allow_network);
+        assert!(!persisted.execution.acknowledge_unsafe_host_execution);
+        assert_eq!(persisted.execution.allowed_programs,config.execution.allowed_programs);
+        let original=std::fs::read(&path).unwrap();
+        assert!(update_execution_backend(&path,UpdateExecutionBackendRequest{
+            expected_revision:revision(&path).unwrap(),backend:"appcontainer".into(),
+            acknowledge_unsafe_host_execution:true}).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(),original);
+    }
+    #[test]
+    fn execution_backend_requires_explicit_host_acknowledgement_and_preserves_settings(){
+        let t=tempfile::tempdir().unwrap();
+        let config_path=t.path().join("config.toml");
+        let initial=toml::to_string_pretty(&Config::default()).unwrap()
+            .replace("[execution]\n","[execution]\n# keep-execution-comment\n");
+        std::fs::write(&config_path,initial.clone()).unwrap();
+        let base=revision(&config_path).unwrap();
+        let request=UpdateExecutionBackendRequest{expected_revision:base.clone(),
+            backend:"host".into(),acknowledge_unsafe_host_execution:false};
+        assert!(update_execution_backend(&config_path,request.clone()).is_err());
+        assert_eq!(revision(&config_path).unwrap(),base);
+        let mut valid=request;
+        valid.acknowledge_unsafe_host_execution=true;
+        let saved=update_execution_backend(&config_path,valid.clone()).unwrap();
+        assert_eq!(saved["requires_restart"],true);
+        assert_eq!(saved["execution"]["backend"],"host");
+        assert!(saved["_operation_diff"].as_str().unwrap().contains("acknowledge_unsafe_host_execution"));
+        assert!(std::fs::read_to_string(&config_path).unwrap().contains("# keep-execution-comment"));
+        assert!(update_execution_backend(&config_path,valid.clone()).is_err(),"stale revision must be rejected");
+        let loaded=Config::load_file(&config_path).unwrap();
+        assert_eq!(loaded.execution.backend,"host");
+        assert!(loaded.execution.acknowledge_unsafe_host_execution);
+        assert_eq!(loaded.execution.allow_shell,Config::default().execution.allow_shell);
+        let revision_now=saved["revision"].as_str().unwrap().to_owned();
+        let invalid=UpdateExecutionBackendRequest{expected_revision:revision_now.clone(),
+            backend:"disabled".into(),acknowledge_unsafe_host_execution:true};
+        assert!(update_execution_backend(&config_path,invalid).is_err());
+        let unknown=UpdateExecutionBackendRequest{expected_revision:revision_now.clone(),
+            backend:"unknown".into(),acknowledge_unsafe_host_execution:false};
+        assert!(update_execution_backend(&config_path,unknown).is_err());
+        let disabled=update_execution_backend(&config_path,UpdateExecutionBackendRequest{
+            expected_revision:revision_now,backend:"disabled".into(),
+            acknowledge_unsafe_host_execution:false
+        }).unwrap();
+        assert_eq!(disabled["execution"]["backend"],"disabled");
+        assert!(!Config::load_file(&config_path).unwrap().execution.acknowledge_unsafe_host_execution);
+        assert!(std::fs::read_to_string(&config_path).unwrap().contains("# keep-execution-comment"));
+        if cfg!(windows){
+            let unsupported=UpdateExecutionBackendRequest{expected_revision:disabled["revision"].as_str().unwrap().into(),
+                backend:"bubblewrap".into(),acknowledge_unsafe_host_execution:false};
+            assert!(update_execution_backend(&config_path,unsupported).is_err());
+        }
+    }
     #[test]fn transfer_config_online_edit_preserves_comments_and_validates(){let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");let text=toml::to_string_pretty(&Config::default()).unwrap().replace("[transfer]\n","[transfer]\n# keep-transfer-comment\n");std::fs::write(&path,text).unwrap();let rev=revision(&path).unwrap();let cfg=UpdateTransferRequest{expected_revision:rev.clone(),enabled:true,listen:"0.0.0.0:20002".into(),advertise:true,discover:true,display_name:"Child".into()};let result=update_transfer(&path,cfg.clone()).unwrap();assert_eq!(result["requires_restart"],true);assert_eq!(Config::load_file(&path).unwrap().transfer.display_name,"Child");assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-transfer-comment"));assert!(update_transfer(&path,cfg).is_err());}
+    #[cfg(unix)]
     #[test]fn docker_config_edit_requires_explicit_acknowledgement_and_preserves_comments(){let t=tempfile::tempdir().unwrap();let path=t.path().join("config.toml");let text=toml::to_string_pretty(&Config::default()).unwrap().replace("[docker]\n","[docker]\n# keep-docker-comment\n");std::fs::write(&path,text).unwrap();let rev=revision(&path).unwrap();let mut request=UpdateDockerRequest{expected_revision:rev.clone(),enabled:true,socket:"/var/run/docker.sock".into(),allowed_containers:vec!["endlessvibe".into()],allow_start:false,allow_stop:false,allow_restart:true,allow_project_socket:false,acknowledge_daemon_control:false};assert!(update_docker(&path,request.clone()).is_err());request.acknowledge_daemon_control=true;let v=update_docker(&path,request.clone()).unwrap();assert_eq!(v["requires_restart"],true);assert_eq!(v["docker"]["allowed_containers"],json!(["endlessvibe"]));assert!(std::fs::read_to_string(&path).unwrap().contains("# keep-docker-comment"));assert!(update_docker(&path,request.clone()).is_err());let new_rev=v["revision"].as_str().unwrap().to_owned();request.expected_revision=new_rev;request.allowed_containers.push("../../docker".into());assert!(update_docker(&path,request).is_err());let cfg=Config::load_file(&path).unwrap();assert_eq!(cfg.docker.allowed_containers,vec!["endlessvibe"]);assert!(!cfg.docker.allow_project_socket);}
     #[test]fn legacy_child_project_permissions_are_editable(){let t=tempfile::tempdir().unwrap();let root=t.path().join("projects");let child=root.join("EndlessVibe");let state=t.path().join("state");std::fs::create_dir_all(&child).unwrap();std::fs::create_dir_all(&state).unwrap();let path=t.path().join("config.toml");let mut cfg=Config::default();cfg.security.data_dir=state;cfg.workspaces=vec![crate::config::WorkspaceConfig{id:"NAME".into(),path:root.clone(),projects:vec![],allow_write:Some(true),allow_exec:Some(true),allow_git_commit:Some(true),allow_git_mutation:Some(false),allow_git_push:Some(false),execution_profile:None,environment:vec![]},crate::config::WorkspaceConfig{id:"EndlessVibe".into(),path:child,projects:vec![],allow_write:Some(true),allow_exec:Some(true),allow_git_commit:Some(true),allow_git_mutation:Some(false),allow_git_push:Some(false),execution_profile:None,environment:vec![]}];std::fs::write(&path,toml::to_string_pretty(&cfg).unwrap()).unwrap();let rev=revision(&path).unwrap();update_project(&path,"NAME","EndlessVibe",UpdateProjectRequest{expected_revision:rev,allow_write:true,allow_exec:true,allow_git_commit:true,allow_git_mutation:true,allow_git_push:true,execution_profile:Some("development".into()),environment:Some(vec!["LEGACY_SERVICE=http://127.0.0.1:19031".into()])}).unwrap();let loaded=Config::load_file(&path).unwrap();let legacy=loaded.workspaces.iter().find(|w|w.id=="EndlessVibe").unwrap();assert_eq!(legacy.allow_git_mutation,Some(true));assert_eq!(legacy.allow_git_push,Some(true));assert_eq!(legacy.execution_profile.as_deref(),Some("development"));assert_eq!(legacy.environment,vec!["LEGACY_SERVICE=http://127.0.0.1:19031"]);let effective=workspace::load(&loaded,&path).unwrap();assert!(effective["NAME"].projects["EndlessVibe"].config.allow_git_mutation);assert!(effective["NAME"].projects["EndlessVibe"].config.allow_git_push);assert!(effective["NAME"].projects["EndlessVibe"].config.development());assert_eq!(effective["NAME"].projects["EndlessVibe"].config.environment_map().unwrap()["LEGACY_SERVICE"],"http://127.0.0.1:19031");}
 }

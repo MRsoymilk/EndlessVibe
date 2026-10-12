@@ -1,14 +1,19 @@
 use crate::{runtime::Runtime,util,workspace::Project};
 use anyhow::Result;
 use serde_json::json;
-use std::{fs::{File,OpenOptions},os::unix::fs::OpenOptionsExt,path::{Path,PathBuf}};
+use std::{fs::{File,OpenOptions},path::{Path,PathBuf}};
+#[cfg(unix)] use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)] use std::os::windows::fs::OpenOptionsExt;
 
 pub(super) struct IndexLock{pub(super) path:PathBuf,pub(super) file:File,pub(super) keep:bool,pub(super) published:bool}
 impl Drop for IndexLock{fn drop(&mut self){if !self.keep&&!self.published{let _=std::fs::remove_file(&self.path);}}}
 
 pub(super) fn acquire_index_lock(gitdir:&Path)->Result<IndexLock>{
     let path=gitdir.join("index.lock");
-    let file=OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&path).map_err(|_|crate::error::coded("GIT_BUSY",true,"index.lock exists; never remove another process's lock automatically"))?;
+    let mut options=OpenOptions::new();options.write(true).create_new(true);
+    #[cfg(unix)] options.mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC);
+    #[cfg(windows)] options.custom_flags(0x0020_0000);
+    let file=options.open(&path).map_err(|_|crate::error::coded("GIT_BUSY",true,"index.lock exists; never remove another process's lock automatically"))?;
     Ok(IndexLock{path,file,keep:false,published:false})
 }
 

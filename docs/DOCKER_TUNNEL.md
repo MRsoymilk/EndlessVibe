@@ -26,7 +26,7 @@ docker compose -f compose.yaml -f cloudflared.override.yaml up -d --no-deps --fo
 ```bash
 curl -q --noproxy '*' -i http://127.0.0.1:20000/health
 docker run --rm --add-host=host.docker.internal:host-gateway curlimages/curl -q --noproxy '*' -i --max-time 5 http://host.docker.internal:20000/health
-curl -i https://endlessvibe.soymilk.xin/.well-known/oauth-protected-resource
+curl -i https://mcp.example.com/.well-known/oauth-protected-resource
 ```
 
 临时 curl 容器测试的是默认桥接网络；自定义网络需要显式添加 `--network 实际名称`。这不会更改已有容器，也不需要 project 挂载。

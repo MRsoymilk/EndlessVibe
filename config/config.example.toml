@@ -14,6 +14,10 @@ allow_http_loopback = false
 extra_redirect_uris = []
 access_token_seconds = 3600
 refresh_token_seconds = 2592000
+# Windows-only deployment capability (disabled by default). Do not enable
+# unless the one explicitly trusted Project is audited. This is not shell access.
+allow_windows_service_update = false
+# windows_update_project = 'F:\project\EndlessVibe'
 
 [limits]
 max_file_bytes = 2097152
@@ -41,7 +45,7 @@ path = "/usr/local/bin:/usr/bin:/bin"
 allowed_programs = ["cargo", "rustc", "cmake", "ninja", "make", "ctest", "python3", "git", "rg"]
 # Programs that must exist inside the sandbox even when they are only launched
 # by child build/test scripts rather than directly through run_command.
-required_programs = ["cargo", "rustc", "initdb", "postgres", "pg_isready", "createdb"]
+required_programs = [] # Set only for programs required by your own builds/tests.
 readonly_mounts = []
 memory_limit_mb = 8192
 max_processes = 256

@@ -1,15 +1,75 @@
 use crate::{runtime::Runtime,tools::{process,types::LogArgs},util,workspace::Project};
 use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
-use std::{fs::OpenOptions,io::{Read,Write},os::unix::fs::{MetadataExt,OpenOptionsExt},path::PathBuf};
+use std::{fs::OpenOptions,io::{Read,Write},path::{Path,PathBuf}};
+#[cfg(unix)] use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)] use std::os::windows::fs::OpenOptionsExt;
 use tokio::process::Command;
 
 #[derive(Clone,Default)]pub(super) struct Environment{pub(super) index:Option<PathBuf>,pub(super) objects:Option<PathBuf>}
+/**
+ * @brief Convert a canonical Windows path into a Git-for-Windows CLI path.
+ *
+ * The OS can open \\?\F:\... handles, but git.exe rejects that verbatim
+ * prefix in --file, --git-dir, --work-tree and GIT_* path arguments.
+ * Refuse path components that Win32 would normalize to another file.
+ */
+pub(super) fn git_process_path(path:&Path)->Result<PathBuf>{
+    #[cfg(not(windows))]
+    { Ok(path.to_owned()) }
+    #[cfg(windows)]
+    {
+        use std::path::{Component,Prefix};
+        let Some(Component::Prefix(prefix))=path.components().next()else{
+            bail!("Git subprocess path must be absolute");
+        };
+        let raw=path.to_str().context("Git subprocess path is not valid Unicode")?;
+        let ordinary=match prefix.kind(){
+            Prefix::VerbatimDisk(_)=>raw.strip_prefix(r"\\?\")
+                .context("Invalid verbatim drive path")?.to_owned(),
+            Prefix::VerbatimUNC(_,_)=>format!(r"\\{}",raw.strip_prefix(r"\\?\UNC\")
+                .context("Invalid verbatim UNC path")?),
+            Prefix::Disk(_)|Prefix::UNC(_,_)=>raw.to_owned(),
+            _=>bail!("Unsupported Git subprocess path prefix"),
+        };
+        let result=PathBuf::from(ordinary);
+        // Win32 non-verbatim paths may trim trailing dots/spaces or interpret ADS.
+        for component in result.components(){
+            if let Component::Normal(name)=component{
+                let name=name.to_str().context("Invalid Windows path component")?;
+                if name.ends_with(['.',' '])||name.contains([':', '\r','\n']){
+                    bail!("Unsafe Git subprocess path component");
+                }
+            }
+        }
+        if result.to_str().context("Invalid Git subprocess path")?.encode_utf16().count()>=248{
+            bail!("Git-for-Windows CLI path exceeds safe non-verbatim length");
+        }
+        Ok(result)
+    }
+}
+#[cfg(windows)]
+fn windows_git_path_is_unsafe(path:&std::path::Path)->bool{
+    path.components().any(|part|match part{
+        std::path::Component::Prefix(prefix)=>{
+            // Windows canonical paths can begin with \\?\F:\\; only the drive-prefix
+            // colon is valid, while ADS and embedded newlines remain forbidden.
+            let raw=prefix.as_os_str().to_string_lossy();
+            raw.contains(['\n','\r'])||
+                (!matches!(prefix.kind(),std::path::Prefix::Disk(_)|std::path::Prefix::VerbatimDisk(_))&&raw.contains(':'))
+        },
+        std::path::Component::Normal(name)=>name.to_string_lossy().contains([':', '\n', '\r']),
+        _=>false,
+    })
+}
 
 pub(super) fn repo(w:&Project)->Result<PathBuf>{
     w.root.unchanged_root()?;let dir=w.root.path.join(".git");let md=std::fs::symlink_metadata(&dir).context("Project is not a standalone Git repository; linked worktrees and subdirectory repositories are not supported by this release")?;
     if !md.is_dir()||md.file_type().is_symlink(){bail!(".git must be a real directory (linked worktrees/bare repositories are not supported)");}
+    #[cfg(unix)]
     if dir.to_string_lossy().contains([':', '\n', '\r']){bail!("Git repository paths containing ':' or newlines are not supported");}
+    #[cfg(windows)]
+    if windows_git_path_is_unsafe(&dir){bail!("Git repository paths containing alternate data streams or newlines are not supported");}
     Ok(dir)
 }
 
@@ -18,20 +78,29 @@ pub(super) async fn preflight(rt:&Runtime,w:&Project)->Result<()>{
     for part in ["config","HEAD","index","objects","refs","packed-refs","shallow"]{let path=dir.join(part);if let Ok(md)=std::fs::symlink_metadata(&path){if md.file_type().is_symlink(){bail!("Git metadata symlinks are not supported: {part}");}}}
     for part in ["commondir","objects/info/alternates","objects/info/http-alternates"]{if dir.join(part).exists(){bail!("External/shared Git metadata is not supported: {part}");}}
     let path=dir.join("config");let mut data=Vec::new();
-    if path.exists(){let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path)?;let md=file.metadata()?;if !md.is_file()||md.nlink()!=1||md.len()>262144{bail!("Unsafe/oversized Git config");}file.take(262145).read_to_end(&mut data)?;if data.len()>262144{bail!("Oversized Git config");}}
+    if path.exists(){let mut options=OpenOptions::new();options.read(true);
+        #[cfg(unix)] options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);
+        #[cfg(windows)] options.custom_flags(0x0020_0000);
+        let file=options.open(&path)?;let md=file.metadata()?;
+        if !md.is_file()||!crate::platform::single_link(&file)||md.len()>262144||std::fs::symlink_metadata(&path)?.file_type().is_symlink(){bail!("Unsafe/oversized Git config");}
+        file.take(262145).read_to_end(&mut data)?;if data.len()>262144{bail!("Oversized Git config");}}
     let mut temp=tempfile::Builder::new().prefix("git-config-").tempfile_in(rt.config.security.data_dir.join("tmp"))?;temp.write_all(&data)?;temp.flush()?;
-    let mut cmd=Command::new(&rt.config.git.executable);process::clean_environment(&mut cmd,"/usr/bin:/bin");cmd.current_dir(rt.config.security.data_dir.join("empty-home")).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null").args(["config","--null","--no-includes","--file"]).arg(temp.path()).arg("--list");
+    let mut cmd=Command::new(&rt.config.git.executable);process::clean_environment(&mut cmd,&rt.config.execution.path);cmd.current_dir(git_process_path(&rt.config.security.data_dir.join("empty-home"))?).env("HOME",git_process_path(&rt.config.security.data_dir.join("empty-home"))?).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).args(["config","--null","--no-includes","--file"]).arg(git_process_path(temp.path())?).arg("--list");
     let result=process::capture(cmd,None,524288,5).await?;if result.code!=Some(0){bail!("Git config cannot be safely parsed");}
     for line in result.stdout.split(|b|*b==0).filter(|b|!b.is_empty()){let key=String::from_utf8_lossy(line.split(|b|*b==b'\n').next().unwrap_or_default()).to_ascii_lowercase();if ["include.","includeif.","filter.","diff.","merge.","alias.","credential.","gpg.","lfs."].iter().any(|p|key.starts_with(*p))||(key.starts_with("remote.")&&key.ends_with(".promisor"))||(key.starts_with("extensions.")&&key!="extensions.objectformat")||matches!(key.as_str(),"core.fsmonitor"|"core.sparsecheckout"|"core.sparsecheckoutcone"){bail!("Repository config key '{key}' needs manual review; helper/filter/include/sparse/partial-clone configurations are not supported by the dedicated Git tools. Existing config was not changed.");}}
     Ok(())
 }
 
 pub(super) fn command(rt:&Runtime,w:&Project,env:&Environment)->Result<Command>{
-    let gitdir=repo(w)?;let mut c=Command::new(&rt.config.git.executable);process::clean_environment(&mut c,"/usr/bin:/bin");
-    c.current_dir(&w.root.path).env("HOME",rt.config.security.data_dir.join("empty-home")).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_ATTR_NOSYSTEM","1").env("GIT_LITERAL_PATHSPECS","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_REPLACE_OBJECTS","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_AUTHOR_NAME",&rt.config.git.author_name).env("GIT_AUTHOR_EMAIL",&rt.config.git.author_email).env("GIT_COMMITTER_NAME",&rt.config.git.author_name).env("GIT_COMMITTER_EMAIL",&rt.config.git.author_email);
-    c.arg("--no-pager").arg("--git-dir").arg(&gitdir).arg("--work-tree").arg(&w.root.path);
-    for setting in ["core.hooksPath=/dev/null","core.fsmonitor=false","commit.gpgSign=false","tag.gpgSign=false","core.attributesFile=/dev/null","diff.external=","core.quotePath=false","submodule.recurse=false","protocol.allow=never","core.gitProxy=/bin/false","core.sshCommand=/bin/false"]{c.arg("-c").arg(setting);}
-    if let Some(index)=&env.index{c.env("GIT_INDEX_FILE",index);}if let Some(objects)=&env.objects{c.env("GIT_OBJECT_DIRECTORY",objects).env("GIT_ALTERNATE_OBJECT_DIRECTORIES",gitdir.join("objects"));}Ok(c)
+    let gitdir=git_process_path(&repo(w)?)?;let root=git_process_path(&w.root.path)?;let home=git_process_path(&rt.config.security.data_dir.join("empty-home"))?;let mut c=Command::new(&rt.config.git.executable);process::clean_environment(&mut c,&rt.config.execution.path);
+    c.current_dir(&root).env("HOME",&home).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",crate::platform::null_device()).env("GIT_ATTR_NOSYSTEM","1").env("GIT_LITERAL_PATHSPECS","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_REPLACE_OBJECTS","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_AUTHOR_NAME",&rt.config.git.author_name).env("GIT_AUTHOR_EMAIL",&rt.config.git.author_email).env("GIT_COMMITTER_NAME",&rt.config.git.author_name).env("GIT_COMMITTER_EMAIL",&rt.config.git.author_email);
+    c.arg("--no-pager").arg("--git-dir").arg(&gitdir).arg("--work-tree").arg(&root);
+    let null=crate::platform::null_device();
+    let hooks=format!("core.hooksPath={null}");let attrs=format!("core.attributesFile={null}");
+    let deny=if cfg!(windows){"cmd /c exit 1"}else{"/bin/false"};
+    let git_proxy=format!("core.gitProxy={deny}");let ssh_command=format!("core.sshCommand={deny}");
+    for setting in [hooks.as_str(),"core.fsmonitor=false","commit.gpgSign=false","tag.gpgSign=false",attrs.as_str(),"diff.external=","core.quotePath=false","submodule.recurse=false","protocol.allow=never",git_proxy.as_str(),ssh_command.as_str()]{c.arg("-c").arg(setting);}
+    if let Some(index)=&env.index{c.env("GIT_INDEX_FILE",git_process_path(index)?);}if let Some(objects)=&env.objects{c.env("GIT_OBJECT_DIRECTORY",git_process_path(objects)?).env("GIT_ALTERNATE_OBJECT_DIRECTORIES",git_process_path(&gitdir.join("objects"))?);}Ok(c)
 }
 
 pub(super) async fn run(rt:&Runtime,w:&Project,args:Vec<String>,env:&Environment,input:Option<Vec<u8>>)->Result<process::Captured>{let mut cmd=command(rt,w,env)?;cmd.args(args);process::capture(cmd,input,rt.config.limits.max_output_bytes.max(4*1024*1024),20).await}
@@ -46,4 +115,38 @@ fn parse_status(bytes:&[u8])->Result<Vec<Value>>{let mut values=bytes.split(|b|*
 pub async fn status(rt:&Runtime,w:&Project)->Result<Value>{preflight(rt,w).await?;let raw=good(rt,w,args(&["status","--porcelain=v1","-z","--untracked-files=all","--ignore-submodules=all"]),&Environment::default(),None).await?;let mut entries=parse_status(&raw)?;let total_entries=entries.len();let truncated=total_entries>200;entries.truncate(200);Ok(json!({"workspace":w.workspace_id,"project":w.config.id,"branch":branch(rt,w).await?,"head":head(rt,w).await?,"entries":entries,"total_entries":total_entries,"truncated":truncated,"sensitive_paths_omitted":true}))}
 pub async fn log(rt:&Runtime,w:&Project,a:LogArgs)->Result<Value>{preflight(rt,w).await?;if a.limit==0||a.limit>100{bail!("limit must be 1..100");}if head(rt,w).await?=="UNBORN"{return Ok(json!({"commits":[]}));}let values=vec!["log".into(),format!("-{}",a.limit),"--format=%H%x00%an%x00%aI%x00%s%x00".into(),"--no-decorate".into()];let raw=good(rt,w,values,&Environment::default(),None).await?;let mut out=Vec::new();let fields=raw.split(|b|*b==0).collect::<Vec<_>>();for chunk in fields.chunks(4){if chunk.len()==4{out.push(json!({"commit":String::from_utf8_lossy(chunk[0]).trim(),"author":String::from_utf8_lossy(chunk[1]),"date":String::from_utf8_lossy(chunk[2]),"subject":String::from_utf8_lossy(chunk[3])}));}}Ok(json!({"commits":out}))}
 
-#[cfg(test)]mod tests{use super::*;#[test]fn status_handles_renames_and_hides_sensitive_paths(){let v=parse_status(b" M src/main.rs\0R  new.rs\0old.rs\0?? .env\0").unwrap();assert_eq!(v.len(),2);assert_eq!(v[1]["original_path"],"old.rs");}#[test]fn object_ids_are_validated(){assert!(oid(b"bad\n".to_vec()).is_err());assert!(oid(format!("{}\n","a".repeat(40)).into_bytes()).is_ok());}}
+#[cfg(test)]mod tests{
+    use super::*;
+    #[test]fn status_handles_renames_and_hides_sensitive_paths(){
+        let v=parse_status(b" M src/main.rs\0R  new.rs\0old.rs\0?? .env\0").unwrap();
+        assert_eq!(v.len(),2);
+        assert_eq!(v[1]["original_path"],"old.rs");
+    }
+    #[test]fn object_ids_are_validated(){
+        assert!(oid(b"bad\n".to_vec()).is_err());
+        assert!(oid(format!("{}\n","a".repeat(40)).into_bytes()).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]fn git_for_windows_receives_safe_non_verbatim_paths(){
+        let disk=std::path::Path::new(r"\\?\F:\project\EndlessVibe\.git");
+        assert_eq!(git_process_path(disk).unwrap(),PathBuf::from(r"F:\project\EndlessVibe\.git"));
+        let unc=std::path::Path::new(r"\\?\UNC\server\share\repo\.git");
+        assert_eq!(git_process_path(unc).unwrap(),PathBuf::from(r"\\server\share\repo\.git"));
+        assert_eq!(git_process_path(std::path::Path::new(r"F:\project\EndlessVibe")).unwrap(),
+                   PathBuf::from(r"F:\project\EndlessVibe"));
+        for bad in [r"\\?\F:\project:ads\.git",r"\\?\F:\project\bad.",r"\\?\F:\project\bad "]{
+            assert!(git_process_path(std::path::Path::new(bad)).is_err(),"{bad:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]fn windows_verbatim_drive_is_not_a_git_alternate_data_stream(){
+        for path in [r"F:\project\EndlessVibe\.git",r"\\?\F:\project\EndlessVibe\.git",r"\\server\share\repo\.git"]{
+            assert!(!windows_git_path_is_unsafe(std::path::Path::new(path)),"{path}");
+        }
+        for path in [r"\\?\F:\project:stream\.git",r"F:\project\.git:stream","F:\\project\\foo\nbar\\.git"]{
+            assert!(windows_git_path_is_unsafe(std::path::Path::new(path)),"{path:?}");
+        }
+    }
+}

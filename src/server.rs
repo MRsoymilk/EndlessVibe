@@ -21,6 +21,29 @@ pub fn create_router(rt:Arc<Runtime>)->Router{
     Router::new().route("/health",get(web::status)).route("/favicon.ico",get(web::favicon)).route("/assets/EndlessVibe.png",get(web::brand_icon)).route("/assets/app.css",get(web::css)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
 }
 
+/// Dedicated local-only router, launched exclusively by `--init`.
+/// No MCP, OAuth, normal Dashboard pages, job execution or node management endpoints.
+pub fn create_setup_router(rt:Arc<Runtime>)->Router{
+    Router::new()
+        .route("/",get(web::setup_page))
+        .route("/setup",get(web::setup_page))
+        .route("/favicon.ico",get(web::favicon))
+        .route("/assets/EndlessVibe.png",get(web::brand_icon))
+        .route("/assets/app.css",get(web::css))
+        .route("/assets/setup.css",get(web::setup_css))
+        .route("/assets/theme.css",get(web::theme_css))
+        .route("/assets/js/preferences-init.js",get(web::preferences_init))
+        .route("/assets/js/preferences.js",get(web::preferences_js))
+        .route("/assets/js/common.js",get(web::javascript_common))
+        .route("/assets/js/setup.js",get(web::javascript_setup))
+        .route("/api/setup",get(web::setup).put(web::update_connection))
+        .route("/api/workspaces",post(web::add_workspace))
+        .route("/api/projects",post(web::add_project))
+        .with_state(rt)
+        .layer(DefaultBodyLimit::max(65536))
+        .layer(middleware::from_fn(dashboard_headers))
+}
+
 pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
     Router::new()
         .route("/",get(web::home))
@@ -30,6 +53,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/operations",get(web::home))
         .route("/mcp",get(web::home))
         .route("/config",get(web::home))
+        .route("/sandbox",get(web::home))
         .route("/nodes",get(web::home))
         .route("/assets/app.css",get(web::css))
         .route("/assets/theme.css",get(web::theme_css))
@@ -57,8 +81,11 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/nodes/peers",get(web::node_peers))
         .route("/api/nodes/pair",post(web::node_pair_start))
         .route("/api/nodes/approve",post(web::node_pair_approve))
+        .route("/api/nodes/reject",post(web::node_pair_reject))
         .route("/api/nodes/peers/{node_id}",axum::routing::delete(web::node_pair_revoke))
+        .route("/api/nodes/peers/{node_id}/grants",put(web::node_update_grants))
         .route("/api/config/reload",post(web::reload_config))
+        .route("/api/config/execution/backend",put(web::update_execution_backend))
         .route("/api/config/execution/readonly-mounts",put(web::update_readonly_mounts))
         .route("/api/config/git",put(web::update_git))
         .route("/api/config/docker",put(web::update_docker))
@@ -132,7 +159,7 @@ mod tests{
     use super::explicit_origin;
     #[test]
     fn allowed_origin_uses_explicit_ports(){
-        assert_eq!(explicit_origin("https://endlessvibe.soymilk.xin"),"https://endlessvibe.soymilk.xin:443");
+        assert_eq!(explicit_origin("https://mcp.example.com"),"https://mcp.example.com:443");
         assert_eq!(explicit_origin("http://localhost"),"http://localhost:80");
         assert_eq!(explicit_origin("https://example.test:8443/path"),"https://example.test:8443");
         assert_eq!(explicit_origin("http://[::1]"),"http://[::1]:80");

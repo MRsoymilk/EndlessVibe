@@ -3,13 +3,53 @@ use anyhow::{bail,Context,Result};
 use rusqlite::{params,OptionalExtension};
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
-use std::{collections::HashMap,fs::OpenOptions,io::Read,os::unix::fs::{MetadataExt,OpenOptionsExt},path::Path,sync::{Arc,Mutex},time::{Duration,Instant}};
-use tokio::{io::{AsyncRead,AsyncReadExt},sync::{mpsc,Semaphore,RwLock,OwnedRwLockWriteGuard}};
+use std::{collections::HashMap,fs::OpenOptions,io::Read,path::Path,sync::{Arc,Mutex,MutexGuard},time::{Duration,Instant}};
+#[cfg(unix)]use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]use std::os::windows::fs::OpenOptionsExt;
+use tokio::{io::{AsyncRead,AsyncReadExt},sync::{mpsc,Semaphore,RwLock,OwnedRwLockReadGuard,OwnedRwLockWriteGuard}};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,#[serde(default)]pub project:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,#[serde(default)]pub created_ms:u64,pub started:Option<u64>,#[serde(default)]pub started_ms:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String>,#[serde(default)]pub preflight:Value,#[serde(default)]pub summary:Value,#[serde(default)]pub summary_capture:Value,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String> }
 #[derive(Serialize,Deserialize)] struct JobRef{id:String,fingerprint:String}
-pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,cache_gate:Arc<RwLock<()>>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>> }
+pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,cache_gate:Arc<RwLock<()>>,admission:Mutex<Admission>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>>,recovery_locks:Mutex<Vec<tokio::sync::OwnedMutexGuard<()>>> }
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum Admission{Accepting,ServiceUpdate,ShuttingDown}
+impl Admission{
+    fn check(self)->Result<()>{
+        match self{
+            Self::Accepting=>Ok(()),
+            Self::ServiceUpdate=>Err(crate::error::coded("SERVICE_UPDATING",true,
+                "Service update is in progress; query existing Jobs and retry new commands after the update")),
+            Self::ShuttingDown=>Err(crate::error::coded("SERVICE_SHUTTING_DOWN",true,
+                "Service is shutting down and cannot accept new commands")),
+        }
+    }
+}
+/// Pauses new command admission while one native service update is verified.
+/// Owns the cache writer across the helper handoff, excluding submitting Jobs
+/// and worker cleanup. Drop resumes admission unless shutdown has begun;
+/// leave_paused retains the pause when the helper outcome cannot be verified.
+#[must_use="Keep the admission pause alive until the update outcome is verified"]
+pub struct ServiceUpdateGuard{
+    jobs:Arc<Jobs>,
+    cache_guard:Option<OwnedRwLockWriteGuard<()>>,
+    resume_on_drop:bool,
+}
+impl ServiceUpdateGuard{
+    pub fn leave_paused(mut self){self.resume_on_drop=false;}
+}
+impl Drop for ServiceUpdateGuard{
+    fn drop(&mut self){
+        if let Ok(mut admission)=self.jobs.admission.lock(){
+            // Release the writer while admission is still serialized, so the
+            // first resumed command cannot observe a stale cache-busy state.
+            drop(self.cache_guard.take());
+            if self.resume_on_drop&&*admission==Admission::ServiceUpdate{
+                *admission=Admission::Accepting;
+            }
+        }
+    }
+}
 fn explicit_preflight_programs(args:&CommandArgs)->Vec<String>{let mut programs=args.preflight_programs.clone();programs.sort();programs.dedup();programs}
 fn merge_preflight_programs(mut explicit:Vec<String>,detected:&[String])->Vec<String>{explicit.extend(detected.iter().cloned());explicit.sort();explicit.dedup();explicit}
 struct Output{bytes:Vec<u8>,offset:u64,total:u64}
@@ -18,14 +58,17 @@ const MCP_JOB_SUMMARY_MAX_BYTES:usize=16*1024;
 const MCP_JOB_TAIL_BYTES:usize=4096;
 fn sensitive_summary_key(key:&str)->bool{let key=key.to_ascii_lowercase();["authorization","access_token","refresh_token","password","passwd","secret","api_key","apikey","owner_key","private_key","credential"].iter().any(|part|key.contains(part))}
 fn sanitize_summary(value:&mut Value){match value{Value::Object(map)=>for(key,value)in map.iter_mut(){if sensitive_summary_key(key){*value=Value::String("[REDACTED]".into());}else{sanitize_summary(value);}},Value::Array(values)=>for value in values{sanitize_summary(value)},Value::String(text)=>{for marker in ["Bearer ","token=","password=","secret=","api_key="]{if let Some(pos)=text.to_ascii_lowercase().find(&marker.to_ascii_lowercase()){let end=text[pos..].find(char::is_whitespace).map(|v|pos+v).unwrap_or(text.len());text.replace_range(pos..end,"[REDACTED]");break;}}},_=>{}}}
-fn compact_preflight(value:&Value)->Value{let mut out=serde_json::Map::new();for key in ["backend","execution_profile","network","network_source","environment_keys","detected_programs","programs","toolchains"]{if let Some(value)=value.get(key){out.insert(key.into(),value.clone());}}Value::Object(out)}
+fn compact_preflight(value:&Value)->Value{let mut out=serde_json::Map::new();for key in ["backend","execution_profile","network","network_source","environment_keys","detected_programs","programs","toolchains","isolation"]{if let Some(value)=value.get(key){out.insert(key.into(),value.clone());}}Value::Object(out)}
 fn compact_summary(value:&Value)->Value{if value.is_null(){return Value::Null;}let text=serde_json::to_string(value).unwrap_or_default();if text.len()<=MCP_JOB_SUMMARY_MAX_BYTES{return value.clone();}let keys=value.as_object().map(|m|m.keys().take(32).cloned().collect::<Vec<_>>()).unwrap_or_default();json!({"omitted":true,"bytes":text.len(),"top_level_keys":keys,"message":"Job summary is retained server-side but omitted from the default MCP response because it is large."})}
 fn terminal(status:&str)->bool{!matches!(status,"queued"|"running")}
 fn count_before_label(text:&str,label:&str)->Option<u64>{let words=text.split_whitespace().collect::<Vec<_>>();for(index,word)in words.iter().enumerate(){if word.trim_matches(|c:char|!c.is_ascii_alphabetic())==label&&index>0{if let Ok(value)=words[index-1].trim_matches(|c:char|!c.is_ascii_digit()).parse(){return Some(value);}}}None}
 fn summarize_output(r:&JobRecord,bytes:&[u8])->Value{let text=String::from_utf8_lossy(bytes);let mut suites=0u64;let(mut passed,mut failed,mut ignored,mut measured,mut filtered)=(0u64,0u64,0u64,0u64,0u64);for line in text.lines().filter(|line|line.contains("test result:")){suites+=1;passed+=count_before_label(line,"passed").unwrap_or(0);failed+=count_before_label(line,"failed").unwrap_or(0);ignored+=count_before_label(line,"ignored").unwrap_or(0);measured+=count_before_label(line,"measured").unwrap_or(0);filtered+=count_before_label(line,"filtered").unwrap_or(0);}let last_line=text.lines().rev().map(str::trim).find(|line|!line.is_empty()).map(|line|util::bounded_text(line,512));if suites>0{json!({"kind":"test_suite","suite_summaries":suites,"passed":passed,"failed":failed,"ignored":ignored,"measured":measured,"filtered_out":filtered,"partial":r.output_truncated,"exit_code":r.exit_code,"last_line":last_line})}else{json!({"kind":"command","exit_code":r.exit_code,"partial":r.output_truncated,"last_line":last_line})}}
-fn capture_job_summary(path:&Path)->(Value,Value){
-    let file=match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path){Ok(file)=>file,Err(error)if error.kind()==std::io::ErrorKind::NotFound=>return(Value::Null,json!({"status":"not_reported","reported":false,"cleanup_complete":true})),Err(error)=>return(Value::Null,json!({"status":"error","reported":true,"cleanup_complete":false,"error":util::bounded_text(&error.to_string(),512)}))};
-    let result=(||->Result<(Value,usize)>{let md=file.metadata()?;if !md.is_file()||md.nlink()!=1||md.uid()!=unsafe{libc::geteuid()}||md.len()>MAX_JOB_SUMMARY_BYTES{bail!("unsafe or oversized job summary artifact");}let mut bytes=Vec::with_capacity(md.len() as usize);file.take(MAX_JOB_SUMMARY_BYTES+1).read_to_end(&mut bytes)?;if bytes.len() as u64>MAX_JOB_SUMMARY_BYTES{bail!("job summary exceeds 1 MiB");}let mut value:Value=serde_json::from_slice(&bytes).context("job summary is not valid JSON")?;if !value.is_object(){bail!("job summary must be a JSON object");}sanitize_summary(&mut value);Ok((value,bytes.len()))})();
+pub(super) fn capture_job_summary(path:&Path)->(Value,Value){
+    let mut options=OpenOptions::new();options.read(true);
+    #[cfg(unix)]options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);
+    #[cfg(windows)]options.custom_flags(0x0020_0000);
+    let file=match options.open(path){Ok(file)=>file,Err(error)if error.kind()==std::io::ErrorKind::NotFound=>return(Value::Null,json!({"status":"not_reported","reported":false,"cleanup_complete":true})),Err(error)=>return(Value::Null,json!({"status":"error","reported":true,"cleanup_complete":false,"error":util::bounded_text(&error.to_string(),512)}))};
+    let result=(||->Result<(Value,usize)>{let md=file.metadata()?;if !md.is_file()||!crate::platform::single_link(&file)||!crate::platform::owned_by_service(&md)||std::fs::symlink_metadata(path)?.file_type().is_symlink()||md.len()>MAX_JOB_SUMMARY_BYTES{bail!("unsafe or oversized job summary artifact");}let mut bytes=Vec::with_capacity(md.len() as usize);file.take(MAX_JOB_SUMMARY_BYTES+1).read_to_end(&mut bytes)?;if bytes.len() as u64>MAX_JOB_SUMMARY_BYTES{bail!("job summary exceeds 1 MiB");}let mut value:Value=serde_json::from_slice(&bytes).context("job summary is not valid JSON")?;if !value.is_object(){bail!("job summary must be a JSON object");}sanitize_summary(&mut value);Ok((value,bytes.len()))})();
     let cleanup_complete=std::fs::remove_file(path).is_ok();match result{Ok((value,bytes))=>(value,json!({"status":"captured","reported":true,"bytes":bytes,"cleanup_complete":cleanup_complete})),Err(error)=>(Value::Null,json!({"status":"error","reported":true,"cleanup_complete":cleanup_complete,"error":util::bounded_text(&error.to_string(),512)}))}
 }
 fn bubblewrap_failure_hint(backend:&str,status:&str,bytes:&[u8])->Option<String>{
@@ -50,7 +93,7 @@ impl Output{
 }
 impl Jobs{
     pub fn new(db:Arc<Store>,config:Arc<Config>)->Result<Arc<Self>>{
-        let s=Arc::new(Self{db,slots:Arc::new(Semaphore::new(config.limits.max_jobs)),cache_gate:Arc::new(RwLock::new(())),config,submission:tokio::sync::Mutex::new(()),active:Mutex::new(HashMap::new())});
+        let s=Arc::new(Self{db,slots:Arc::new(Semaphore::new(config.limits.max_jobs)),cache_gate:Arc::new(RwLock::new(())),admission:Mutex::new(Admission::Accepting),config,submission:tokio::sync::Mutex::new(()),active:Mutex::new(HashMap::new()),recovery_locks:Mutex::new(Vec::new())});
         let mut records=s.list_records(None,None,None,usize::MAX)?;
         for r in &mut records{let interrupted=matches!(r.status.as_str(),"queued"|"running");let legacy=r.task_id.is_none()&&r.stage.is_none();if legacy{let(task,stage)=tasks::automatic_job_context(&r.id);r.task_id=Some(task);r.stage=Some(stage);}if interrupted{if let Ok(path)=process::job_summary_host_path(&s.config,&r.workspace,&r.project,&r.id){let(summary,capture)=capture_job_summary(&path);r.summary=summary;r.summary_capture=capture;}r.status="interrupted".into();r.finished=Some(util::now());r.error=Some("Service restarted; this command is never automatically replayed".into());}if legacy||interrupted{s.save(r,None)?;}if legacy{if let Err(error)=tasks::backfill_legacy_job(&s.db,&r.workspace,&r.project,&r.id,&r.status,r.created,r.finished.unwrap_or(r.created)){tracing::warn!(error=%error,job_id=%r.id,"Could not backfill legacy job as automatic task");}}else if interrupted{if let(Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&s.db,&r.workspace,&r.project,task,stage,&r.id,"interrupted"){tracing::warn!(error=%error,job_id=%r.id,"Could not update task checkpoint after restart");}}}}
         Ok(s)
@@ -80,8 +123,95 @@ impl Jobs{
     pub fn cancel(&self,id:&str)->Result<Value>{let record=self.load(id)?;let map=self.active.lock().map_err(|_|anyhow::anyhow!("Job table poisoned"))?;if let Some(c)=map.get(id){c.cancel();Ok(json!({"job_id":id,"cancellation_requested":true}))}else{Ok(json!({"job_id":id,"cancellation_requested":false,"status":record.status}))}}
     pub fn cancel_all(&self){if let Ok(map)=self.active.lock(){for token in map.values(){token.cancel();}}}
     pub fn active_count(&self)->usize{self.active.lock().map(|m|m.len()).unwrap_or(0)}
+    fn accepting_admission(&self)->Result<MutexGuard<'_,Admission>>{
+        let admission=self.admission.lock().map_err(|_|crate::error::coded(
+            "SERVICE_UNAVAILABLE",false,"Job admission state is unavailable; service restart required"))?;
+        admission.check()?;
+        Ok(admission)
+    }
+    fn begin_submission(&self)->Result<OwnedRwLockReadGuard<()>>{
+        let _admission=self.accepting_admission()?;
+        self.cache_gate.clone().try_read_owned().map_err(|_|crate::error::coded(
+            "CACHE_BUSY",true,"Execution cache maintenance is in progress; retry this command after cleanup"))
+    }
+    pub(crate) fn with_authorization_reload<T>(&self,reload:impl FnOnce()->Result<T>)->Result<T>{
+        // Use the same order as submission/update: admission, then cache. A
+        // preflight owns a cache reader before it publishes an active Job, so
+        // active_count alone cannot prevent replacing its Project lock.
+        let _admission=self.admission.lock().map_err(|_|crate::error::coded(
+            "SERVICE_UNAVAILABLE",false,"Job admission state is unavailable; service restart required"))?;
+        // Submission resolves its Project before taking the cache reader.
+        // Only try-lock here: submission itself takes admission afterwards.
+        let _submission=if self.config.execution.backend=="appcontainer"{
+            Some(self.submission.try_lock().map_err(|_|crate::error::coded(
+                "PROJECT_BUSY",true,"A Windows command submission is resolving project authorization"))?)
+        }else{None};
+        let _cache_guard=if self.config.execution.backend=="appcontainer"{
+            let pending=self.recovery_locks.lock().map_err(|_|crate::error::coded(
+                "SANDBOX_CLEANUP_PENDING",false,"Windows sandbox recovery locks are unavailable"))?;
+            if !pending.is_empty(){return Err(crate::error::coded("SANDBOX_CLEANUP_PENDING",false,
+                "Windows sandbox cleanup is unresolved; project authorization cannot be reloaded before safe service recovery"));}
+            Some(self.cache_gate.clone().try_write_owned().map_err(|_|crate::error::coded(
+                "PROJECT_BUSY",true,"Finish Windows sandbox Jobs, preflight and cache operations before reloading project authorization"))?)
+        }else{None};
+        // Keep the guards until all Project objects and their locks are published.
+        reload()
+    }
+    pub fn begin_service_update(self:&Arc<Self>)->Result<ServiceUpdateGuard>{
+        let mut admission=self.accepting_admission()?;
+        // This must not wait: the update caller already owns its Project lock,
+        // while command submission takes a cache reader before a Project lock.
+        let cache_guard=self.cache_gate.clone().try_write_owned().map_err(|_|
+            crate::error::coded("SERVICE_BUSY",true,
+                "Service update requires all submitting Jobs, running Jobs and cache maintenance to finish"))?;
+        *admission=Admission::ServiceUpdate;
+        Ok(ServiceUpdateGuard{jobs:self.clone(),cache_guard:Some(cache_guard),resume_on_drop:true})
+    }
+    pub fn stop_accepting(&self){
+        // The same mutex encloses queued-record persistence and active-token
+        // registration. On return every accepted Job is visible to cancel_all.
+        let mut admission=self.admission.lock().unwrap_or_else(|error|error.into_inner());
+        *admission=Admission::ShuttingDown;
+    }
+    pub fn admission_status(&self)->Value{
+        match self.admission.lock(){
+            Ok(admission)=>json!({"accepting_jobs":*admission==Admission::Accepting,
+                "pause_reason":match *admission{Admission::Accepting=>None,
+                    Admission::ServiceUpdate=>Some("service_update"),Admission::ShuttingDown=>Some("shutdown")}}),
+            Err(_)=>json!({"accepting_jobs":false,"pause_reason":"admission_unavailable"}),
+        }
+    }
+    fn persist_submission(&self,rt:&Runtime,record:&JobRecord,key:&str,legacy_key:&str,shell:bool)->Result<CancellationToken>{
+        // Preflight can yield while shutdown closes admission. Check again and
+        // hold this mutex until the durable queued record has an active token.
+        // There are deliberately no awaits in this critical section.
+        let mut admission=self.accepting_admission()?;
+        if rt.shutdown.is_cancelled(){
+            *admission=Admission::ShuttingDown;
+            admission.check()?;
+        }
+        let mut active=self.active.lock().map_err(|_|anyhow::anyhow!("Job table poisoned"))?;
+        let audit_target=format!("{}/{}",record.workspace,record.project);
+        self.db.audit(if shell{"run_shell"}else{"run_command"},&audit_target,"accepted",&record.id)?;
+        self.db.transaction(|tx|{
+            tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",params![record.id,serde_json::to_string(record)?])?;
+            let expires=util::now()+7*86400;
+            let reference=JobRef{id:record.id.clone(),fingerprint:record.fingerprint.clone()};
+            store::put(tx,"job_requests",key,&reference,expires)?;
+            if legacy_key!=key{store::put(tx,"job_requests",legacy_key,&reference,expires)?;}
+            Ok(())
+        })?;
+        if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){
+            if let Err(error)=tasks::record_job(&self.db,&record.workspace,&record.project,task,stage,&record.id,"queued"){
+                tracing::warn!(error=%error,job_id=%record.id,"Job accepted but task checkpoint persistence failed");
+            }
+        }
+        let cancel=rt.shutdown.child_token();
+        active.insert(record.id.clone(),cancel.clone());
+        Ok(cancel)
+    }
     pub fn begin_cache_cleanup(&self)->Result<OwnedRwLockWriteGuard<()>>{let guard=self.cache_gate.clone().try_write_owned().map_err(|_|crate::error::coded("CACHE_BUSY",true,"Execution cache is in use by running or submitting Jobs; retry only after Jobs finish"))?;if self.active_count()>0{bail!("Execution cache is busy with active Jobs");}Ok(guard)}
-    pub async fn shutdown(&self){self.cancel_all();let until=Instant::now()+Duration::from_secs(5);while self.active_count()>0&&Instant::now()<until{tokio::time::sleep(Duration::from_millis(50)).await;}}
+    pub async fn shutdown(&self){self.stop_accepting();self.cancel_all();let until=Instant::now()+Duration::from_secs(5);while self.active_count()>0&&Instant::now()<until{tokio::time::sleep(Duration::from_millis(50)).await;}}
     pub async fn submit(self:&Arc<Self>,rt:Arc<Runtime>,a:CommandArgs,shell:bool)->Result<Value>{
         if a.request_id.is_empty()||a.request_id.len()>128||!a.request_id.bytes().all(|b|b.is_ascii_alphanumeric()||b"-_:.".contains(&b)){bail!("Provide a unique simple request_id (1..128 characters); retries with the same ID never rerun the job during retention");}
         tasks::validate_context(&a.task_id,&a.stage)?;
@@ -95,42 +225,336 @@ impl Jobs{
             if existing.fingerprint!=fingerprint&&existing.fingerprint!=legacy_fingerprint{return Err(crate::error::coded_details("IDEMPOTENCY_CONFLICT",false,"request_id was used with different command arguments",json!({"request_id":a.request_id})));}
             let mut value=self.get(&existing.id).unwrap_or_else(|_|json!({"id":existing.id.clone(),"job_id":existing.id.clone(),"status":"expired","message":"Output retention expired; request is not re-executed"}));value["reused"]=json!(true);value["canonical_workspace"]=json!(a.workspace);value["canonical_project"]=json!(a.project);return Ok(value);
         }
-        let cache_guard=self.cache_gate.clone().try_read_owned().map_err(|_|crate::error::coded("CACHE_BUSY",true,"Execution cache maintenance is in progress; retry this command after cleanup"))?;
+        let cache_guard=self.begin_submission()?;
         let project_programs=process::detect_project_programs(&w);
         let detected_programs=process::detect_command_programs(&w,&a.cwd,&a.program,&a.args);let preflight_programs=merge_preflight_programs(explicit_preflight_programs(&a),&detected_programs);let mut preflight=process::preflight_job(&rt.config,&a.program,&preflight_programs,shell).await?;preflight["detected_programs"]=json!(detected_programs);preflight["execution_profile"]=json!(execution_profile);preflight["network"]=json!(effective_network);preflight["network_source"]=json!(network_source);preflight["environment_keys"]=json!(a.environment.keys().cloned().collect::<Vec<_>>());
-        let job_id=util::random_secret()?;let summary_contract=process::job_summary_contract(&rt.config,&w.workspace_id,&w.config.id,&job_id)?;let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell,&project_programs,&a.environment,effective_network,&summary_contract.exposed_path)?;
+        let job_id=util::random_secret()?;let summary_contract=process::job_summary_contract(&rt.config,&w.workspace_id,&w.config.id,&job_id)?;let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell,&project_programs,&preflight_programs,&a.environment,effective_network,&summary_contract.exposed_path)?;
         let permit=self.slots.clone().try_acquire_owned().map_err(|_|crate::error::coded("COMMAND_SLOTS_BUSY",true,"All command slots are occupied; query existing jobs first"))?;
         let lock=w.lock.clone().try_lock_owned().map_err(|_|crate::error::coded_details("PROJECT_BUSY",true,"another operation is using this project",json!({"workspace":a.workspace.clone(),"project":a.project.clone()})))?;
-        if a.task_id.is_none(){let(task,stage)=tasks::automatic_job_context(&job_id);a.task_id=Some(task);a.stage=Some(stage);}let now=util::now();let record=JobRecord{id:job_id,workspace:a.workspace,project:a.project,program:if shell{"bash".into()}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:now,created_ms:util::now_millis(),started:None,started_ms:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None,preflight:preflight.clone(),summary:Value::Null,summary_capture:json!({"status":"pending","reported":false,"cleanup_complete":true}),task_id:a.task_id,stage:a.stage};
-        let audit_target=format!("{}/{}",record.workspace,record.project);self.db.audit(if shell{"run_shell"}else{"run_command"},&audit_target,"accepted",&record.id)?;
-        self.db.transaction(|tx|{tx.execute("INSERT INTO jobs(id,data) VALUES(?1,?2)",params![record.id,serde_json::to_string(&record)?])?;let expires=util::now()+7*86400;store::put(tx,"job_requests",&key,&JobRef{id:record.id.clone(),fingerprint:fingerprint.clone()},expires)?;if legacy_key!=key{store::put(tx,"job_requests",&legacy_key,&JobRef{id:record.id.clone(),fingerprint:fingerprint.clone()},expires)?;}Ok(())})?;
-        if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&record.workspace,&record.project,task,stage,&record.id,"queued"){tracing::warn!(error=%error,job_id=%record.id,"Job accepted but task checkpoint persistence failed");}}
-        let cancel=rt.shutdown.child_token();self.active.lock().map_err(|_|anyhow::anyhow!("Job table poisoned"))?.insert(record.id.clone(),cancel.clone());
+        if a.task_id.is_none(){let(task,stage)=tasks::automatic_job_context(&job_id);a.task_id=Some(task);a.stage=Some(stage);}let now=util::now();let record=JobRecord{id:job_id,workspace:a.workspace,project:a.project,program:if shell{if cfg!(windows){"powershell".into()}else{"bash".into()}}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:now,created_ms:util::now_millis(),started:None,started_ms:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None,preflight:preflight.clone(),summary:Value::Null,summary_capture:json!({"status":"pending","reported":false,"cleanup_complete":true}),task_id:a.task_id,stage:a.stage};
+        let cancel=self.persist_submission(&rt,&record,&key,&legacy_key,shell)?;
         rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":"queued"}));
         let result=json!({"job_id":record.id,"status":"queued","request_id":record.request_id,"preflight":compact_preflight(&preflight),"summary_contract":{"environment":"ENDLESSVIBE_JOB_SUMMARY","max_bytes":MAX_JOB_SUMMARY_BYTES},"task_id":record.task_id,"stage":record.stage,"reused":false,"canonical_workspace":record.workspace,"canonical_project":record.project,"legacy_addressing":legacy_address,"next":"Poll get_job. It includes a small terminal output tail; call get_job_output only when more log context is needed."});
-        let this=self.clone();let event_rt=rt.clone();let summary_path=summary_contract.host_path;tokio::spawn(async move{let _permit=permit;let _lock=lock;let _cache_guard=cache_guard;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout).await;if let Err(e)=result{record.status="failed".into();record.error=Some(util::bounded_text(&e.to_string(),1024));record.finished=Some(util::now());let _=this.save(&record,None);}let(summary,capture)=capture_job_summary(&summary_path);record.summary=summary;record.summary_capture=capture;let _=this.save(&record,None);if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){let _=tasks::record_job(&this.db,&record.workspace,&record.project,task,stage,&record.id,&record.status);}let audit_target=format!("{}/{}",record.workspace,record.project);let _=this.db.audit("job_finished",&audit_target,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}event_rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":record.status,"exit_code":record.exit_code,"summary_reported":record.summary_capture["reported"],"task_id":record.task_id,"stage":record.stage}));let _=this.prune();});
+        let this=self.clone();let event_rt=rt.clone();let summary_path=summary_contract.host_path;tokio::spawn(async move{let _permit=permit;let mut project_lock=Some(lock);let _cache_guard=cache_guard;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout,event_rt.config_path.clone()).await;if let Err(e)=result{if crate::error::code(&e)=="SANDBOX_CLEANUP_PENDING"{this.stop_accepting();this.recovery_locks.lock().unwrap_or_else(|poison|poison.into_inner()).push(project_lock.take().expect("project lock is held during cleanup"));}record.status="failed".into();let message=if record.backend=="appcontainer"{format!("{e:#}")}else{e.to_string()};record.error=Some(util::bounded_text(&message,1024));record.finished=Some(util::now());let _=this.save(&record,None);}if record.summary_capture["status"]=="pending"{let(summary,capture)=capture_job_summary(&summary_path);record.summary=summary;record.summary_capture=capture;}let _=this.save(&record,None);if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){let _=tasks::record_job(&this.db,&record.workspace,&record.project,task,stage,&record.id,&record.status);}let audit_target=format!("{}/{}",record.workspace,record.project);let _=this.db.audit("job_finished",&audit_target,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}event_rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":record.status,"exit_code":record.exit_code,"summary_reported":record.summary_capture["reported"],"task_id":record.task_id,"stage":record.stage}));let _=this.prune();});
         Ok(result)
     }
     fn prune(&self)->Result<()>{self.db.maintain(self.config.limits.retained_jobs).map(|_|())}
-    async fn worker(&self,r:&mut JobRecord,mut cmd:tokio::process::Command,cancel:CancellationToken,timeout:u64)->Result<()>{
+    async fn worker(&self,r:&mut JobRecord,command:process::JobCommand,cancel:CancellationToken,timeout:u64,config_path:std::path::PathBuf)->Result<()>{
+        #[cfg(not(windows))]let _=config_path;
+        match command{
+            process::JobCommand::Standard(command)=>self.worker_standard(r,command,cancel,timeout).await,
+            #[cfg(windows)]
+            process::JobCommand::AppContainer(plan)=>self.worker_appcontainer(r,plan,cancel,timeout,config_path).await,
+        }
+    }
+    #[cfg(windows)]
+    async fn worker_appcontainer(&self,r:&mut JobRecord,plan:super::windows_backend::Plan,cancel:CancellationToken,timeout:u64,config_path:std::path::PathBuf)->Result<()>{
         if cancel.is_cancelled(){r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
-        let mut child=cmd.spawn().context("Could not start job (inspect executable, namespace support and sandbox mounts)")?;let pid=child.id().context("Missing child ID")?;let mut group=process::GroupGuard::new(pid);
+        // ACL enumeration must not block the asynchronous Jobs/control plane.
+        // The caller retains the project and cache guards during preparation.
+        let mut prepared=tokio::task::spawn_blocking(move||plan.prepare(&config_path)).await
+            .map_err(|error|crate::error::coded("SANDBOX_CLEANUP_PENDING",false,
+                format!("Windows sandbox preparation was interrupted; service recovery is required: {error}")))??;
+        if cancel.is_cancelled(){prepared.finish()?;r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
+        r.status="running".into();r.started=Some(util::now());r.started_ms=Some(util::now_millis());
+        if let Err(error)=self.save(r,None){prepared.finish()?;return Err(error);}
+        if let(Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){
+            if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){
+                tracing::warn!(error=%error,job_id=%r.id,"Sandbox job is running but task checkpoint update failed");
+            }
+        }
+        let mut output=Output{bytes:vec![],offset:0,total:0};let mut last_save=Instant::now();
+        let result=prepared.run(&cancel,Duration::from_secs(timeout),|stream,bytes|{
+            if !bytes.is_empty(){output.append(stream,bytes,self.config.limits.max_output_bytes);}
+            if (bytes.is_empty()||last_save.elapsed()>=Duration::from_millis(250))&&output.total!=r.output_bytes_total{
+                r.output_bytes_total=output.total;r.output_truncated=output.offset>0;self.save(r,Some(&output))?;last_save=Instant::now();
+            }
+            Ok(())
+        }).await;
+        let summary=prepared.capture_summary();
+        let cleanup=prepared.finish();
+        if let Ok((summary,capture))=summary{r.summary=summary;r.summary_capture=capture;}
+        r.output_bytes_total=output.total;r.output_truncated=output.offset>0;
+        // Cleanup failure takes precedence over a database/output failure: it
+        // is what tells admission to retain the project lock for recovery.
+        cleanup?;
+        self.save(r,Some(&output))?;
+        let outcome=result?;
+        r.exit_code=Some(outcome.exit_code as i32);
+        r.preflight["isolation"]=json!({"kind":"less_privileged_appcontainer","token_verified":outcome.token_verified,
+            "job_empty":outcome.job_empty,"capability_count":1,"capabilities":["registryRead"],"network":false,"cleanup_complete":true});
+        r.status=if outcome.cancelled{"cancelled"}else if outcome.timed_out{"timed_out"}else if outcome.exit_code==0{"succeeded"}else{"failed"}.into();
+        r.finished=Some(util::now());
+        if outcome.timed_out{r.error=Some(format!("Execution exceeded {timeout} seconds; the Windows sandbox process tree was terminated"));}
+        self.save(r,Some(&output))
+    }
+    async fn worker_standard(&self,r:&mut JobRecord,mut cmd:tokio::process::Command,cancel:CancellationToken,timeout:u64)->Result<()>{
+        if cancel.is_cancelled(){r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
+        #[cfg(windows)]
+        let (mut child,job)=crate::tools::windows_job::spawn(&mut cmd,
+            self.config.execution.memory_limit_mb,self.config.execution.max_processes)?;
+        #[cfg(not(windows))]
+        let mut child=cmd.spawn().context("Could not start job (inspect executable, namespace support and sandbox mounts)")?;
+        let pid=child.id().context("Missing child ID")?;let mut group=process::GroupGuard::new(pid);
         r.status="running".into();r.started=Some(util::now());r.started_ms=Some(util::now_millis());self.save(r,None)?;if let (Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){tracing::warn!(error=%error,job_id=%r.id,"Job is running but task checkpoint update failed");}}
         let (tx,mut rx)=mpsc::channel::<(&'static str,Vec<u8>)>(16);
         let out=tokio::spawn(pipe(child.stdout.take().context("stdout missing")?,"stdout",tx.clone()));let err=tokio::spawn(pipe(child.stderr.take().context("stderr missing")?,"stderr",tx.clone()));drop(tx);
-        let mut output=Output{bytes:vec![],offset:0,total:0};let mut last_save=Instant::now();let deadline=tokio::time::sleep(Duration::from_secs(timeout));tokio::pin!(deadline);
+        let mut output=Output{bytes:vec![],offset:0,total:0};let mut publish=tokio::time::interval(Duration::from_millis(250));publish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);let deadline=tokio::time::sleep(Duration::from_secs(timeout));tokio::pin!(deadline);
         let wait=child.wait();tokio::pin!(wait);let mut forced:Option<&str>=None;let mut pipes_open=true;
         let status=loop{tokio::select!{
             status=&mut wait=>break status?,
-            chunk=rx.recv(),if pipes_open=>{if let Some((stream,bytes))=chunk{output.append(stream,&bytes,self.config.limits.max_output_bytes);if last_save.elapsed()>=Duration::from_millis(250){r.output_bytes_total=output.total;r.output_truncated=output.offset>0;self.save(r,Some(&output))?;last_save=Instant::now();}}else{pipes_open=false;}},
-            _=cancel.cancelled()=>{forced=Some("cancelled");process::terminate_group(pid).await;break wait.await?;},
-            _=&mut deadline=>{forced=Some("timed_out");process::terminate_group(pid).await;break wait.await?;}
+            chunk=rx.recv(),if pipes_open=>{if let Some((stream,bytes))=chunk{output.append(stream,&bytes,self.config.limits.max_output_bytes);}else{pipes_open=false;}},
+            _=publish.tick()=>{if output.total!=r.output_bytes_total{r.output_bytes_total=output.total;r.output_truncated=output.offset>0;self.save(r,Some(&output))?;}},
+            _=cancel.cancelled()=>{forced=Some("cancelled");
+                #[cfg(windows)]job.terminate();
+                #[cfg(not(windows))]process::terminate_group(pid).await;
+                break wait.await?;},
+            _=&mut deadline=>{forced=Some("timed_out");
+                #[cfg(windows)]job.terminate();
+                #[cfg(not(windows))]process::terminate_group(pid).await;
+                break wait.await?;}
         }};
         group.kill();
+        #[cfg(windows)]job.terminate();
         let _=tokio::time::timeout(Duration::from_secs(2),async{while let Some((stream,bytes))=rx.recv().await{output.append(stream,&bytes,self.config.limits.max_output_bytes);}}).await;
         out.abort();err.abort();r.exit_code=status.code();r.status=forced.unwrap_or(if status.success(){"succeeded"}else{"failed"}).into();r.finished=Some(util::now());r.output_bytes_total=output.total;r.output_truncated=output.offset>0;
-        if r.status=="timed_out"{r.error=Some(format!("Execution exceeded {timeout} seconds; process group was terminated"));}else if let Some(hint)=bubblewrap_failure_hint(&r.backend,&r.status,&output.bytes){r.error=Some(hint);}self.save(r,Some(&output))
+        if r.status=="timed_out"{r.error=Some(format!("Execution exceeded {timeout} seconds; command termination was requested"));}else if let Some(hint)=bubblewrap_failure_hint(&r.backend,&r.status,&output.bytes){r.error=Some(hint);}self.save(r,Some(&output))
     }
 }
 async fn pipe<R:AsyncRead+Unpin>(mut r:R,label:&'static str,tx:mpsc::Sender<(&'static str,Vec<u8>)>){let mut b=[0u8;8192];loop{match r.read(&mut b).await{Ok(0)|Err(_)=>break,Ok(n)=>if tx.send((label,b[..n].to_vec())).await.is_err(){break;}}}}
+#[cfg(test)]
+mod admission_tests{
+    use super::*;
+    use crate::config::{ProjectConfig,WorkspaceConfig};
+
+    fn runtime()->(tempfile::TempDir,Arc<Runtime>){runtime_with_backend("disabled")}
+    fn runtime_with_backend(backend:&str)->(tempfile::TempDir,Arc<Runtime>){
+        let dir=tempfile::tempdir().unwrap();
+        let root=dir.path().join("projects");
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let mut config=Config::default();
+        config.security.data_dir=dir.path().join("state");
+        config.execution.backend=backend.into();
+        config.execution.auto_discover_toolchains=false;
+        config.execution.path=std::env::join_paths([dir.path()]).unwrap().to_string_lossy().into_owned();
+        util::private_dir(&config.security.data_dir).unwrap();
+        util::private_create(&config.security.data_dir.join("owner.key"),
+            util::random_secret().unwrap().as_bytes()).unwrap();
+        config.workspaces=vec![WorkspaceConfig{
+            id:"root".into(),path:root,projects:vec![ProjectConfig{
+                id:"app".into(),path:"app".into(),allow_write:true,allow_exec:true,
+                allow_git_commit:false,allow_git_mutation:false,allow_git_push:false,
+                execution_profile:crate::config::default_project_profile(),environment:vec![],
+            }],allow_write:None,allow_exec:None,allow_git_commit:None,
+            allow_git_mutation:None,allow_git_push:None,execution_profile:None,environment:vec![],
+        }];
+        let path=dir.path().join("config.toml");
+        util::private_create(&path,toml::to_string_pretty(&config).unwrap().as_bytes()).unwrap();
+        let rt=Runtime::new(config,&path).unwrap();
+        (dir,rt)
+    }
+    fn command(id:&str)->CommandArgs{
+        CommandArgs{workspace:"root".into(),project:"app".into(),program:"never-run".into(),
+            args:vec![],cwd:".".into(),request_id:id.into(),timeout_seconds:None,
+            preflight_programs:vec![],environment:Default::default(),network:Some(false),
+            task_id:None,stage:None}
+    }
+    fn record(id:&str)->JobRecord{
+        JobRecord{id:format!("job_{id}"),workspace:"root".into(),project:"app".into(),
+            program:"never-run".into(),request_id:id.into(),fingerprint:"fingerprint".into(),
+            status:"queued".into(),created:util::now(),created_ms:util::now_millis(),
+            started:None,started_ms:None,finished:None,exit_code:None,
+            output_bytes_total:0,output_truncated:false,backend:"disabled".into(),
+            error:None,preflight:Value::Null,summary:Value::Null,summary_capture:Value::Null,
+            task_id:None,stage:None}
+    }
+    fn assert_code<T>(result:Result<T>,expected:&str){
+        match result{Err(error)=>assert_eq!(crate::error::code(&error),expected),
+            Ok(_)=>panic!("Expected {expected}")}
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn appcontainer_reload_cannot_replace_preflight_or_recovery_project_locks(){
+        let(_dir,rt)=runtime_with_backend("appcontainer");
+        let original=rt.project("root","app").unwrap();
+        let mut persisted=Config::load_file(&rt.config_path).unwrap();
+        persisted.workspaces[0].projects[0].id="renamed".into();
+        std::fs::write(&rt.config_path,toml::to_string_pretty(&persisted).unwrap()).unwrap();
+        // A submitter may already hold the old Project Arc before it takes
+        // its cache reader. Reload must exclude this earlier window as well.
+        let submitting=rt.jobs.submission.try_lock().unwrap();
+        assert_eq!(rt.jobs.active_count(),0);
+        assert_code(rt.dashboard_reload_config(),"PROJECT_BUSY");
+        assert!(rt.project("root","renamed").is_err());
+        drop(submitting);
+        // This is the real preflight guard, before active-token registration.
+        let preflight=rt.jobs.begin_submission().unwrap();
+        assert_eq!(rt.jobs.active_count(),0);
+        assert_code(rt.dashboard_reload_config(),"PROJECT_BUSY");
+        assert!(rt.project("root","renamed").is_err());
+        assert!(Arc::ptr_eq(&original.lock,&rt.project("root","app").unwrap().lock));
+        drop(preflight);
+        // Synthesize only an unresolved lock; no native process or ACL lease
+        // exists in this fixture. Production holds this guard until restart.
+        let held=original.lock.clone().try_lock_owned().unwrap();
+        rt.jobs.stop_accepting();
+        rt.jobs.recovery_locks.lock().unwrap().push(held);
+        assert_code(rt.dashboard_reload_config(),"SANDBOX_CLEANUP_PENDING");
+        assert!(rt.project("root","renamed").is_err());
+        assert!(Arc::ptr_eq(&original.lock,&rt.project("root","app").unwrap().lock));
+        assert_code(rt.sync_project("write_file","root","app",|_,project|{
+            std::fs::write(project.root.path.join("must-not-be-written"),b"forbidden")?;
+            Ok(json!({}))
+        }).await,"PROJECT_BUSY");
+        assert!(!original.root.path.join("must-not-be-written").exists());
+        rt.jobs.recovery_locks.lock().unwrap().clear();
+        *rt.jobs.admission.lock().unwrap()=Admission::Accepting;
+        assert_eq!(rt.dashboard_reload_config().unwrap()["reloaded"],true);
+        assert!(rt.project("root","app").is_err());
+        assert_eq!(rt.project("root","renamed").unwrap().root.path,original.root.path);
+    }
+
+    #[test]
+    fn service_update_excludes_preflight_even_without_active_job(){
+        let(_dir,rt)=runtime();
+        let submitting=rt.jobs.begin_submission().unwrap();
+        assert_eq!(rt.jobs.active_count(),0);
+        assert_code(rt.jobs.begin_service_update(),"SERVICE_BUSY");
+        assert_eq!(rt.snapshot()["accepting_jobs"],true);
+        drop(submitting);
+        let update=rt.jobs.begin_service_update().unwrap();
+        assert_code(rt.jobs.begin_submission(),"SERVICE_UPDATING");
+        assert_eq!(rt.snapshot()["job_pause_reason"],"service_update");
+        drop(update);
+        assert!(rt.jobs.begin_submission().is_ok());
+    }
+
+    #[tokio::test]
+    async fn service_update_guard_survives_handoff_and_resumes_after_helper_failure(){
+        let(_dir,rt)=runtime();
+        let update=rt.jobs.begin_service_update().unwrap();
+        let(finish,finished)=tokio::sync::oneshot::channel::<()>();
+        let monitor=tokio::spawn(async move{
+            let _update=update;
+            let _=finished.await;
+        });
+        assert_code(rt.jobs.submit(rt.clone(),command("during_update"),false).await,"SERVICE_UPDATING");
+        assert_code(rt.jobs.begin_cache_cleanup(),"CACHE_BUSY");
+        assert!(rt.jobs.list_records(None,None,None,10).unwrap().is_empty());
+        finish.send(()).unwrap();
+        monitor.await.unwrap();
+        assert_eq!(rt.snapshot()["accepting_jobs"],true);
+        assert_eq!(rt.snapshot()["job_pause_reason"],Value::Null);
+        assert!(rt.jobs.begin_submission().is_ok());
+    }
+
+    #[test]
+    fn cleanup_or_failed_update_attempt_does_not_leave_admission_paused(){
+        let(_dir,rt)=runtime();
+        let cleanup=rt.jobs.begin_cache_cleanup().unwrap();
+        assert_code(rt.jobs.begin_service_update(),"SERVICE_BUSY");
+        assert_eq!(rt.snapshot()["accepting_jobs"],true);
+        drop(cleanup);
+        drop(rt.jobs.begin_service_update().unwrap());
+        assert!(rt.jobs.begin_submission().is_ok());
+    }
+
+    #[test]
+    fn uncertain_update_stays_paused_and_shutdown_cannot_be_reopened(){
+        let(_dir,rt)=runtime();
+        rt.jobs.begin_service_update().unwrap().leave_paused();
+        assert_code(rt.jobs.begin_submission(),"SERVICE_UPDATING");
+        assert_code(rt.jobs.begin_service_update(),"SERVICE_UPDATING");
+        rt.jobs.stop_accepting();
+        assert_code(rt.jobs.begin_submission(),"SERVICE_SHUTTING_DOWN");
+        assert_eq!(rt.snapshot()["job_pause_reason"],"shutdown");
+
+        let(_second_dir,second)=runtime();
+        let update=second.jobs.begin_service_update().unwrap();
+        second.jobs.stop_accepting();
+        drop(update);
+        assert_code(second.jobs.begin_submission(),"SERVICE_SHUTTING_DOWN");
+        assert_eq!(second.snapshot()["accepting_jobs"],false);
+    }
+
+    #[test]
+    fn shutdown_during_preflight_prevents_queued_record_and_request_reservation(){
+        let(_dir,rt)=runtime();
+        let _preflight=rt.jobs.begin_submission().unwrap();
+        rt.jobs.stop_accepting();
+        let pending=record("late");
+        assert_code(rt.jobs.persist_submission(&rt,&pending,"root:app:late","root:app:late",false),
+            "SERVICE_SHUTTING_DOWN");
+        assert!(rt.jobs.load(&pending.id).is_err());
+        assert!(rt.db.get::<JobRef>("job_requests","root:app:late").unwrap().is_none());
+        assert_eq!(rt.jobs.active_count(),0);
+    }
+
+    #[test]
+    fn shutdown_waits_for_durable_admission_and_can_cancel_every_accepted_job(){
+        let(_dir,rt)=runtime();
+        let _preflight=rt.jobs.begin_submission().unwrap();
+        // Block active registration so the submission stays inside its actual
+        // admission critical section while a shutdown races with it.
+        let active=rt.jobs.active.lock().unwrap();
+        let submit_rt=rt.clone();
+        let submit=std::thread::spawn(move||{
+            let pending=record("accepted");
+            submit_rt.jobs.persist_submission(&submit_rt,&pending,
+                "root:app:accepted","root:app:accepted",false)
+        });
+        let deadline=Instant::now()+Duration::from_secs(3);
+        while rt.jobs.admission.try_lock().is_ok(){
+            assert!(Instant::now()<deadline,"Submission did not enter admission");
+            std::thread::yield_now();
+        }
+        let(stop_started,started)=std::sync::mpsc::channel();
+        let(stop_done,done)=std::sync::mpsc::channel();
+        let stop_rt=rt.clone();
+        let stop=std::thread::spawn(move||{
+            stop_started.send(()).unwrap();
+            stop_rt.jobs.stop_accepting();
+            stop_done.send(()).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        let finished_early=done.recv_timeout(Duration::from_millis(30)).is_ok();
+        drop(active);
+        let token=submit.join().unwrap().unwrap();
+        stop.join().unwrap();
+        assert!(!finished_early,"Shutdown returned before accepted Job registration");
+        assert_eq!(rt.jobs.active_count(),1);
+        assert_eq!(rt.jobs.load("job_accepted").unwrap().status,"queued");
+        rt.jobs.cancel_all();
+        assert!(token.is_cancelled());
+        assert_code(rt.jobs.begin_submission(),"SERVICE_SHUTTING_DOWN");
+    }
+
+    #[tokio::test]
+    async fn paused_or_stopped_admission_keeps_idempotent_queries_without_replay(){
+        let(_dir,rt)=runtime();
+        let args=command("retained");
+        let mut previous=record("retained");
+        previous.status="succeeded".into();
+        previous.finished=Some(util::now());
+        previous.fingerprint=util::digest(serde_json::to_vec(&(&args,false)).unwrap());
+        rt.jobs.save(&previous,None).unwrap();
+        rt.db.transaction(|tx|store::put(tx,"job_requests","root:app:retained",
+            &JobRef{id:previous.id.clone(),fingerprint:previous.fingerprint.clone()},util::now()+60)).unwrap();
+        let update=rt.jobs.begin_service_update().unwrap();
+        let reused=rt.jobs.submit(rt.clone(),args.clone(),false).await.unwrap();
+        assert_eq!(reused["job_id"],previous.id);
+        assert_eq!(reused["reused"],true);
+        let mut conflicting=args.clone();
+        conflicting.args.push("different".into());
+        assert_code(rt.jobs.submit(rt.clone(),conflicting,false).await,"IDEMPOTENCY_CONFLICT");
+        assert_code(rt.jobs.submit(rt.clone(),command("fresh"),false).await,"SERVICE_UPDATING");
+        rt.jobs.stop_accepting();
+        drop(update);
+        assert_eq!(rt.jobs.submit(rt.clone(),args,false).await.unwrap()["reused"],true);
+        assert_code(rt.jobs.submit(rt.clone(),command("fresh"),false).await,"SERVICE_SHUTTING_DOWN");
+        assert_eq!(rt.jobs.list_records(None,None,None,10).unwrap().len(),1);
+        assert_eq!(rt.jobs.active_count(),0);
+    }
+}
 #[cfg(test)]mod tests{use super::*;#[test]fn test_output_summary_aggregates_suites(){let record=JobRecord{id:"j".into(),workspace:"w".into(),project:"p".into(),program:"cargo".into(),request_id:"r".into(),fingerprint:"f".into(),status:"succeeded".into(),created:0,created_ms:0,started:Some(0),started_ms:Some(0),finished:Some(1),exit_code:Some(0),output_bytes_total:1,output_truncated:false,backend:"host".into(),error:None,preflight:Value::Null,summary:Value::Null,summary_capture:Value::Null,task_id:None,stage:None};let value=summarize_output(&record,b"test result: ok. 86 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out\ntest result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n");assert_eq!(value["kind"],"test_suite");assert_eq!(value["suite_summaries"],2);assert_eq!(value["passed"],113);assert_eq!(value["failed"],0);assert_eq!(value["ignored"],1);assert_eq!(value["filtered_out"],2);}#[test]fn large_job_summary_is_omitted_from_default_view(){let value=json!({"payload":"x".repeat(MCP_JOB_SUMMARY_MAX_BYTES+1024),"passed":true});let compact=compact_summary(&value);assert_eq!(compact["omitted"],true);assert!(compact["bytes"].as_u64().unwrap()>MCP_JOB_SUMMARY_MAX_BYTES as u64);}#[test]fn detected_command_programs_become_job_preflight(){let args=CommandArgs{workspace:"w".into(),project:"p".into(),program:"python3".into(),args:vec![],cwd:".".into(),request_id:"r".into(),timeout_seconds:None,preflight_programs:vec!["cargo".into(),"cargo".into()],environment:Default::default(),network:Some(false),task_id:None,stage:None};let merged=merge_preflight_programs(explicit_preflight_programs(&args),&["initdb".into(),"postgres".into(),"cargo".into()]);assert_eq!(merged,vec!["cargo".to_owned(),"initdb".to_owned(),"postgres".to_owned()]);}#[test]fn summary_capture_is_bounded_redacted_and_removed(){let d=tempfile::tempdir().unwrap();let path=d.path().join("summary.json");std::fs::write(&path,br#"{"passed":true,"password":"secret","nested":{"authorization":"Bearer abc"}}"#).unwrap();let(value,capture)=capture_job_summary(&path);assert_eq!(value["passed"],true);assert_eq!(value["password"],"[REDACTED]");assert_eq!(value["nested"]["authorization"],"[REDACTED]");assert_eq!(capture["status"],"captured");assert!(!path.exists());}#[test]fn ring_output_is_bounded(){let mut out=Output{bytes:vec![],offset:0,total:0};out.append("stdout",b"abcdefghijklmnopqrstuvwxyz",12);assert_eq!(out.bytes.len(),12);assert!(out.offset>0);assert_eq!(out.total,out.offset+out.bytes.len() as u64);}#[test]fn namespace_eagain_has_actionable_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"[stderr] bwrap: Creating new namespace failed: Resource temporarily unavailable\n").unwrap();assert!(h.contains("RLIMIT_NPROC"));}#[test]fn missing_sandbox_program_has_mount_hint(){let h=bubblewrap_failure_hint("bubblewrap","failed",b"[stderr] bwrap: execvp cargo: No such file or directory\n").unwrap();assert!(h.contains("readonly_mounts"));}#[test]fn source_text_cannot_fake_bwrap_hint(){assert!(bubblewrap_failure_hint("bubblewrap","failed",b"[stdout] + assert!(text.contains(\"bwrap: Creating new namespace failed: Resource temporarily unavailable\"));\n").is_none());}#[test]fn unrelated_failure_has_no_bwrap_hint(){assert!(bubblewrap_failure_hint("bubblewrap","failed",b"[stderr] cargo: error\n").is_none());assert!(bubblewrap_failure_hint("host","failed",b"[stderr] bwrap: Creating new namespace failed: Resource temporarily unavailable\n").is_none());}}
