@@ -13,6 +13,7 @@
 <script src="/assets/js/preferences-init.js"></script>
 <link rel="stylesheet" href="/assets/app.css?v=setup-1">
 <link rel="stylesheet" href="/assets/theme.css?v=design-3">
+<link rel="stylesheet" href="/assets/node-topology.css?v=1">
 <script src="/vendor/uPlot/uPlot.iife.min.js" defer></script>
 <script type="module" src="/assets/app.js?v=dashboard-setup-1" defer></script>
 </head>
@@ -56,6 +57,31 @@
 <article><span>Call success · 24h</span><strong id="node-metric-success">—</strong></article>
 </div><p id="node-metrics-detail" class="node-muted" aria-live="polite">Transfer request metrics are local-only.</p>
 <div id="node-status" class="write-status" role="status" aria-live="polite"></div>
+<section class="config-card full node-topology-panel" aria-labelledby="node-topology-title">
+  <div class="config-heading node-topology-heading">
+    <div><h3 id="node-topology-title">Node Topology · 节点通信拓扑</h3>
+      <p>父子节点关系、配对状态和远程操作的请求/响应方向</p></div>
+    <span id="node-topology-count" class="node-topology-counter">正在读取节点…</span>
+  </div>
+  <div class="node-topology-tools">
+    <div class="node-topology-legend" aria-label="连线图例">
+      <span><i class="node-topology-swatch" aria-hidden="true"></i>操作请求 · 父 → 子</span>
+      <span><i class="node-topology-swatch node-topology-swatch--response" aria-hidden="true"></i>结果响应 · 子 → 父</span>
+      <span><i class="node-topology-swatch node-topology-swatch--pending" aria-hidden="true"></i>配对申请</span>
+      <span><i class="node-topology-swatch node-topology-swatch--discovered" aria-hidden="true"></i>仅发现 · 无可信链路</span>
+    </div>
+    <div class="node-topology-controls" aria-label="拓扑视图工具">
+      <button id="node-topology-zoom-out" type="button" aria-label="缩小拓扑" title="缩小">−</button>
+      <span id="node-topology-zoom">100%</span>
+      <button id="node-topology-zoom-in" type="button" aria-label="放大拓扑" title="放大">+</button>
+      <button id="node-topology-fit" type="button" title="适合窗口 (F / 0)">适合视图</button>
+    </div>
+  </div>
+  <div id="node-topology-canvas" class="node-topology-canvas" tabindex="0" role="region" aria-label="可拖动的父子节点通信拓扑图" aria-describedby="node-topology-help"></div>
+  <p id="node-topology-summary" class="node-topology-summary" role="status">正在读取节点关系…</p>
+  <p id="node-topology-help" class="node-topology-footnote">拖动节点调整位置，拖动空白区域平移，滚轮或工具栏缩放；选中节点可查看详情。动画仅用于标识协议方向，不代表实时流量、吞吐量或连接存活状态；仅 LAN 发现的节点不绘制可信通道。</p>
+  <div id="node-topology-detail" class="node-topology-detail" aria-label="所选节点详情">选择节点以查看详情</div>
+</section>
 <div class="config-grid">
 <section class="config-card full" id="node-pair-card"><div class="config-heading"><h3>父节点 · 发起连接申请</h3><span>PARENT → CHILD · TLS</span></div><p class="config-note">输入子节点的局域网 IP:Transfer 端口，发出带验证码的配对请求。子节点同意后自动完成配对；Project 授权需之后单独设置。</p><form id="node-pair-form" class="node-pair-form"><label>Child IP:Port<input id="node-pair-address" type="text" placeholder="子节点 IP:Port" required></label><button type="submit">向子节点发起请求</button></form></section>
 <section class="config-card full" id="node-child-hint" hidden><div class="config-heading"><h3>子节点 · 等待授权请求</h3><span>CHILD · INCOMING</span></div><p class="config-note">本机为子节点，不能主动发起父节点配对。收到请求后在下方查看来源与验证码，只需点击“同意”或“拒绝”。配对本身不授予 Project 权限。</p></section>

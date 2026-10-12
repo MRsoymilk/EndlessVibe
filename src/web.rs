@@ -10,11 +10,13 @@ pub async fn setup_page()->impl IntoResponse{Html(include_str!("../web/setup.htm
 pub async fn setup_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/setup.css"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
 pub async fn theme_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/theme.css"))}
+pub async fn node_topology_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/node-topology.css"))}
 pub async fn preferences_init()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/preferences-init.js"))}
 pub async fn preferences_js()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/preferences.js"))}
 pub async fn javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/app.js"))}
 pub async fn javascript_common()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/common.js"))}
 pub async fn javascript_nodes()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/nodes.js"))}
+pub async fn javascript_node_topology()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/node-topology.js"))}
 pub async fn javascript_mcp()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/mcp.js"))}
 pub async fn javascript_charts()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/charts.js"))}
 pub async fn uplot_javascript()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/vendor/uPlot/uPlot.iife.min.js"))}
@@ -119,5 +121,24 @@ mod dashboard_sandbox_page_tests{
         assert!(SCRIPT.contains("check.disabled=false"));
         // The native backend is selectable only on Windows; the saved
         // backend must still be distinguished from the running configuration.
+    }
+
+    #[test]
+    fn dashboard_node_topology_is_served_with_local_node_page(){
+        const HTML:&str=include_str!("../web/index.html");
+        const NODES:&str=include_str!("../web/js/nodes.js");
+        const TOPOLOGY:&str=include_str!("../web/js/node-topology.js");
+        const ROUTES:&str=include_str!("server.rs");
+        assert_eq!(HTML.matches("id=\"node-topology-canvas\"").count(),1);
+        assert!(HTML.contains("/assets/node-topology.css"));
+        assert!(HTML.contains("动画仅用于标识协议方向"));
+        assert!(ROUTES.contains(".route(\"/assets/node-topology.css\",get(web::node_topology_css))"));
+        assert!(ROUTES.contains(".route(\"/assets/js/node-topology.js\",get(web::javascript_node_topology))"));
+        assert!(NODES.contains("mountNodeTopology();refreshNodes()"));
+        assert!(NODES.contains("updateNodeTopology(discovery,pending.pending||[],peers.peers||[])"));
+        assert!(TOPOLOGY.contains("export function deriveNodeTopology"));
+        assert!(TOPOLOGY.contains("export function layoutNodeTopology"));
+        assert!(TOPOLOGY.contains("remoteRole(peer)"));
+        assert!(!TOPOLOGY.contains("innerHTML"));
     }
 }

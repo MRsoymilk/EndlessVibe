@@ -1,4 +1,5 @@
 import {$,node,setText,formatTime} from "./common.js";
+import {mountNodeTopology,updateNodeTopology} from "./node-topology.js";
 let configRevision="",configDirty=false,localConfig=null,selected=null,working=false;
 let localRole="unassigned",refreshingNodes=false;
 let browserDir=".",selectedFilePath=null;
@@ -61,6 +62,7 @@ function renderPending(items){
   const outgoing=p.role==="parent";
   const rejected=p.state==="rejected";
   const card=item(p.name,outgoing?"父节点 → 子节点":"子节点 ← 父节点");
+  card.dataset.nodeId=p.node_id;
   card.classList.add(outgoing?"node-outgoing":"node-incoming");
   line(card,(outgoing?"目标子节点：":"申请父节点：")+p.node_id+" · "+p.endpoint);
   const code=node("div","node-pair-code",p.code);
@@ -85,7 +87,7 @@ function renderPending(items){
   root.append(card);
  }
 }
-function renderDiscovered(items){const root=clear("node-discovered-list",items.length?"":"没有发现其他节点。父节点可手动输入局域网 IP:Port。");for(const p of items){const card=item(p.name,p.online?"Online · 未验证":"Offline · 未验证");line(card,p.node_id+" · "+p.address);if(localRole!=="child"&&localRole!=="mixed"){card.append(btn("发起配对",async()=>{const input=$("node-pair-address");if(input)input.value=p.address;await requestPair(p.address)}));}root.append(card)}}
+function renderDiscovered(items){const root=clear("node-discovered-list",items.length?"":"没有发现其他节点。父节点可手动输入局域网 IP:Port。");for(const p of items){const card=item(p.name,p.online?"Online · 未验证":"Offline · 未验证");card.dataset.nodeId=p.node_id;line(card,p.node_id+" · "+p.address);if(localRole!=="child"&&localRole!=="mixed"){card.append(btn("发起配对",async()=>{const input=$("node-pair-address");if(input)input.value=p.address;await requestPair(p.address)}));}root.append(card)}}
 async function remote(nodeId,tool,arguments_={}){const v=await send("/api/nodes/read","POST",{node_id:nodeId,tool,arguments:arguments_});return v}
 function detail(title,content){setText("node-remote-title",title);const output=$("node-remote-output");if(output)output.textContent=typeof content==="string"?content:JSON.stringify(content,null,2);const root=$("node-project-detail");if(root)root.hidden=false;}
 // Requests are untrusted child-node data: render labels with textContent, never innerHTML.
@@ -242,6 +244,7 @@ function renderTrusted(items){
  const root=clear("node-trusted-list",items.length?"":"尚无已配对节点");
  for(const p of items){
   const card=item(p.name,p.role==="parent"?"Child (managed)":"Parent (authorized)");
+  card.dataset.nodeId=p.node_id;
   line(card,p.node_id+" · "+p.endpoint);
   line(card,p.discovery_online?"Recently discovered on LAN":"Not seen in recent LAN discovery · manual connection may still work");
   if(p.role==="parent"){
@@ -307,10 +310,11 @@ export async function refreshNodes(force=false){
   if(force||!document.querySelector("#node-trusted-list details.node-grant-details[open]"))
    renderTrusted(peers.peers||[]);
   renderTransferMetrics(metrics);
+  updateNodeTopology(discovery,pending.pending||[],peers.peers||[]);
   setText("node-updated","Updated "+formatTime(Math.floor(Date.now()/1000)));
  }catch(e){status("Nodes 刷新失败："+e.message,true)}
  finally{refreshingNodes=false}
 }
 export function renderTransferEditor(config){const form=$("transfer-editor");if(!form||configDirty)return;const c=config.transfer||{};for(const key of ["enabled","advertise","discover"])form.elements.namedItem(key).checked=!!c[key];form.elements.namedItem("display_name").value=c.display_name||"EndlessVibe";form.elements.namedItem("listen").value=c.listen||"0.0.0.0:20002";configRevision=config.revision||"";const display=$("config-transfer");if(display){display.replaceChildren();for(const [key,value] of Object.entries(c)){const dt=document.createElement("dt"),dd=document.createElement("dd");dt.textContent=key;dd.textContent=typeof value==="object"?JSON.stringify(value):String(value);display.append(dt,dd);}}}
 async function saveTransfer(event){event.preventDefault();const form=event.currentTarget,button=form.querySelector("button[type=submit]");if(!form.reportValidity())return;const payload={expected_revision:configRevision,display_name:form.elements.namedItem("display_name").value.trim(),listen:form.elements.namedItem("listen").value.trim()};for(const key of ["enabled","advertise","discover"])payload[key]=form.elements.namedItem(key).checked;button.disabled=true;try{await send("/api/config/transfer","PUT",payload);configDirty=false;const statusEl=$("transfer-editor-status");if(statusEl){statusEl.textContent="Transfer 配置已保存。重启 EndlessVibe 后生效。";statusEl.className="write-status success";}const cfg=await get("/api/config");renderTransferEditor(cfg)}catch(e){const el=$("transfer-editor-status");if(el){el.textContent="保存失败："+e.message;el.className="write-status error";}}finally{button.disabled=false}}
-export function initNodes(){const pairForm=$("node-pair-form");pairForm?.addEventListener("submit",async event=>{event.preventDefault();const address=$("node-pair-address").value.trim();try{await requestPair(address)}catch(e){status(e.message,true)}});$("node-refresh")?.addEventListener("click",refreshNodes);$("node-remote-operation")?.addEventListener("submit",submitRemoteOperation);$("node-remote-tool")?.addEventListener("change",()=>{const tool=$("node-remote-tool")?.value;const template=tool==="run_command"?{program:"git",args:["status"],request_id:"unique-request-id"}:tool==="get_job"||tool==="cancel_job"?{job_id:"child-job-id"}:tool==="get_job_output"?{job_id:"child-job-id",offset:0,limit:8192}:tool==="create_directory"?{path:"new-folder"}:tool==="write_file"?{path:"file.txt",content:"text",expected_sha256:"MISSING"}:tool==="apply_patch"?{path:"file.txt",expected_sha256:"SHA256",edits:[{old_text:"before",new_text:"after",expected_occurrences:1}]}:{paths:["file.txt"],message:"feat: update",expected_head:"HEAD",expected_diff_sha256:"DIFF_HASH"};const input=$("node-remote-args");if(input)input.value=JSON.stringify(template,null,2);});$("transfer-editor")?.addEventListener("submit",saveTransfer);$("transfer-editor")?.addEventListener("input",()=>{configDirty=true;const el=$("transfer-editor-status");if(el){el.textContent="Transfer 设置有未保存的修改";el.className="write-status pending";}});if(location.pathname==="/nodes"){refreshNodes();setInterval(()=>{if(!document.hidden)refreshNodes()},3000);}}
+export function initNodes(){const pairForm=$("node-pair-form");pairForm?.addEventListener("submit",async event=>{event.preventDefault();const address=$("node-pair-address").value.trim();try{await requestPair(address)}catch(e){status(e.message,true)}});$("node-refresh")?.addEventListener("click",refreshNodes);$("node-remote-operation")?.addEventListener("submit",submitRemoteOperation);$("node-remote-tool")?.addEventListener("change",()=>{const tool=$("node-remote-tool")?.value;const template=tool==="run_command"?{program:"git",args:["status"],request_id:"unique-request-id"}:tool==="get_job"||tool==="cancel_job"?{job_id:"child-job-id"}:tool==="get_job_output"?{job_id:"child-job-id",offset:0,limit:8192}:tool==="create_directory"?{path:"new-folder"}:tool==="write_file"?{path:"file.txt",content:"text",expected_sha256:"MISSING"}:tool==="apply_patch"?{path:"file.txt",expected_sha256:"SHA256",edits:[{old_text:"before",new_text:"after",expected_occurrences:1}]}:{paths:["file.txt"],message:"feat: update",expected_head:"HEAD",expected_diff_sha256:"DIFF_HASH"};const input=$("node-remote-args");if(input)input.value=JSON.stringify(template,null,2);});$("transfer-editor")?.addEventListener("submit",saveTransfer);$("transfer-editor")?.addEventListener("input",()=>{configDirty=true;const el=$("transfer-editor-status");if(el){el.textContent="Transfer 设置有未保存的修改";el.className="write-status pending";}});if(location.pathname==="/nodes"){mountNodeTopology();refreshNodes();setInterval(()=>{if(!document.hidden)refreshNodes()},3000);}}
