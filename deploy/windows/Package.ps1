@@ -159,10 +159,11 @@ function Get-PEImports {
 }
 
 # Only DLLs included with supported Windows 10/11 installations may be imported.
+# bcryptprimitives.dll is the Windows CNG cryptographic primitives system DLL.
 # The compiled EXE must not depend on VC++ redistributables or third-party DLLs.
 $allowed = @(
     "KERNEL32.DLL", "KERNELBASE.DLL", "NTDLL.DLL", "ADVAPI32.DLL",
-    "BCRYPT.DLL", "CRYPT32.DLL", "CRYPTBASE.DLL", "DNSAPI.DLL",
+    "BCRYPT.DLL", "BCRYPTPRIMITIVES.DLL", "CRYPT32.DLL", "CRYPTBASE.DLL", "DNSAPI.DLL",
     "IPHLPAPI.DLL", "WS2_32.DLL", "WSOCK32.DLL", "MSWSOCK.DLL",
     "OLE32.DLL", "OLEAUT32.DLL", "USERENV.DLL", "USER32.DLL",
     "SHELL32.DLL", "SHLWAPI.DLL", "SECHOST.DLL", "SECUR32.DLL",
