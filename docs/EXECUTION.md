@@ -2,15 +2,69 @@
 
 ## 通过本机 Dashboard 配置执行后端
 
-打开本机 Dashboard `http://127.0.0.1:20001/config`，在 **执行后端** 卡片选择：
+打开本机 Dashboard `http://127.0.0.1:20001/sandbox`，在 **执行后端** 卡片选择：
 
 - `disabled`：禁止执行命令（Windows/macOS 的默认设置）。
 - `bubblewrap`：Linux 沙箱，Windows/macOS 不可使用。
+- `appcontainer`：Windows 原生离线命令沙箱，使用 LPAC、按任务文件权限和 Job Object。
 - `host`：直接使用 EndlessVibe 服务账号执行命令，**没有文件、网络或进程沙箱**。已配对且获执行授权的父节点也能触发此类命令。
 
-选择 `host` 后必须勾选独立的风险确认，再通过浏览器二次确认。保存到 `[execution]` 的 `backend` / `acknowledge_unsafe_host_execution` 字段，并不修改 `allow_shell` 或 Project 授权。后端拒绝无确认的 `host` 请求、平台不支持的 `bubblewrap`、无效配置，以及过期的配置 revision。Dashboard 的配置写入接口仅接受 loopback 主机和同源请求，不通过远程 MCP/Transfer 开放。
+选择 `host` 后必须勾选独立的风险确认，再通过浏览器二次确认。保存到 `[execution]` 的 `backend` / `acknowledge_unsafe_host_execution` 字段，并不修改 `allow_shell` 或 Project 授权。选择 `appcontainer` 会同时将全局 `allow_network` 保存为 `false`；不需要 host 风险确认。后端拒绝无确认的 `host` 请求、平台不支持的后端、无效配置，以及过期的配置 revision。Dashboard 的配置写入接口仅接受 loopback 主机和同源请求，不通过远程 MCP/Transfer 开放。
 
 **保存仅写入 `config.toml`，不会立即改变正在运行的后端，也不会自动重启。** 停止旧进程后启动新版本（Windows/macOS 使用服务管理器或原启动方式），再次在配置页核对「当前运行」与「已保存」值相同。启用 `host` 时应使用专门的非管理员账号，仅授权可信 Project 和可信父节点。无需命令执行时可改回 `disabled` 并重启。
+
+## Windows 原生 AppContainer
+
+当前支持已识别内核版本的 Windows 10/11 x64。启动时核验内核共享数据的版本与布局；其他架构或未知版本拒绝执行，以保证异常恢复证据可靠。在本机 Dashboard 的沙箱页面选择 `appcontainer`，或在停服后编辑已有配置：
+
+```toml
+[execution]
+backend = "appcontainer"
+acknowledge_unsafe_host_execution = false
+allow_network = false
+allow_shell = false
+auto_discover_toolchains = true
+```
+
+沿用初始化生成的 Windows `execution.path`，使用绝对目录和分号分隔；TOML 路径不展开环境变量。按实际安装情况配置 `allowed_programs` / `required_programs`。服务重启后，`get_service_status` 和 Dashboard 的当前后端必须显示 `appcontainer`；仅保存配置不会切换正在运行的进程。现有 `host` / `disabled` 安装不会自动更改。
+
+此后端接入正常的 `run_command` / Jobs 流程，直接在已授权项目中执行本机程序，包括由 Cargo 启动的编译器和测试。顶层程序仍受现有 allowlist、项目检测和权限检查约束；`trusted_host` profile 必须配合已确认的 host backend，不能绕过 AppContainer。
+
+### 文件与任务边界
+
+每个 Job 创建独立的 AppContainer 身份及私有目录。服务先检查路径、记录恢复日志，再为精确的项目目录授予读写权限，为已发现且获准的工具链授予只读执行权限；存在的 `.git` 在 `allow_git_mutation=false` 时保持只读。创建原生进程时，通过 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 原子加入限制总内存与进程数的 Job Object，避免创建和归属之间留下孤儿进程。服务在进程仍挂起时验证 LPAC 身份、低完整性、精确权限及 Job 归属，最后才允许执行。唯一附加 capability 为 `registryRead`，供本机工具及普通子进程读取 Windows 初始化所需的注册表项；不授予网络 capability。准备、验证或启动失败不会自动改为 host 执行。
+
+项目权限按 Job 撤销。正常结束、取消和超时均先终止并确认整个进程树退出，再收集摘要、撤销该身份的权限并删除私有 Profile。服务保持项目锁直到这套流程结束；若不能确认进程树退出或权限清理完成，保留恢复日志、暂停新任务并保持项目锁。项目授权热加载与提交检查、运行中的 Jobs 和缓存操作互斥；清理未完成时不激活新的项目映射，不能通过更换项目 ID 绕过旧锁。
+
+恢复同时核对独立的执行阶段记录：创建进程前持久化 `running`，确认整个 Job 已空后才持久化 `empty`。服务重启在独占实例锁下先验证执行证据及全部待回收 SID，再恢复 ACL、回收 Profile，最后删除执行记录。若服务异常退出而记录仍为 `running`，同一次 Windows 启动中不会仅凭服务已退出就撤销权限，必须在完整 Windows 重启、内核启动序号改变后才能继续恢复。`prepared` / `empty` 记录可在服务重启时恢复。缺失、损坏或不可信的证据均拒绝恢复；中断的命令不会自动重放。启动序号取自微软公开的 [KUSER_SHARED_DATA.BootId](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-kuser_shared_data)，不以墙钟或 PID 猜测是否重启。
+
+stdin/stdout/stderr 使用三个明确允许继承的标准管道；非交互式 stdin 从启动起即为 EOF。输出沿用现有分页及大小上限，静默期间也会周期性提交已收到的输出。`ENDLESSVIBE_JOB_SUMMARY` 指向任务私有目录，摘要通过原有大小、文件类型及路径检查后进入 `get_job` 结果。任务返回的 `preflight.isolation` 包含令牌验证、进程树结束及清理状态；Dashboard 的静态工具检查本身不代表某条项目命令已经执行成功。
+
+### Windows 工具链与离线 Cargo
+
+服务解析已经安装的 Rustup 默认工具链或服务级 `RUSTUP_TOOLCHAIN`，运行实际的 `cargo.exe` / `rustc.exe`，不在沙箱外运行 rustup、安装工具或执行项目脚本。MSVC 和 Windows SDK 使用匹配的本机编译器、链接器、库和头文件目录。Rust 等普通工具目录需要服务账户能设置精确的临时只读权限；自定义只读目录仍受同一检查约束。
+
+自动识别的 MSVC / SDK 子目录会先检查服务账户是否有设置临时权限所需的访问权。同一工具链家族中任一所选目录权限不足时，服务将该家族已发现、已授权且可安全读取的精确子目录一起复制到本任务私有 Profile，保留相对布局，并重写程序、PATH、库和头文件路径；未触发复制的其他家族仍保留原位。若显式只读配置要求相关目录必须原位使用，则明确报告配置冲突。复制不修改原安装目录的权限或所有者，也不复制整个安装目录、宿主用户目录或凭据。副本封闭前保持文件句柄，封闭后将本任务身份的实际允许权限收紧为只读执行；私有根阻断上层权限继承重新放宽副本，Temp、Cargo home 和缓存目录仍可写。副本随整个任务的 Profile 一起回收。
+
+工具复制最多处理 64 个源根、64 层相对目录；源和目标分别最多 100,000 个对象，单文件最多 512 MiB，每任务累计复制内容最多 8 GiB。拒绝 reparse point、别名位于所选源树集合之外的硬链接、不稳定文件及超预算的数据。准备过程检查 90 秒截止时间；超过截止不再启动子进程，命令运行超时单独计算。复制预算不代表运行中的磁盘配额。
+
+Cargo 使用全新的私有 `CARGO_HOME`、`CARGO_NET_OFFLINE=true` 和 sparse registry 配置。服务只从本机公开 crates.io 缓存复制 `Cargo.lock` 中引用且已经存在的 `.crate` 与对应索引，校验包摘要和索引中的版本、校验值；不复制宿主配置、凭据或 Git registry。未缓存的当前目标依赖由 Cargo 的离线错误明确报告，应先在可信的宿主环境准备依赖。无依赖项目无需宿主 Cargo 缓存。
+
+缓存准备最多读取 4,096 个锁定包、8 个已有公开 sparse namespace，单文件最多 64 MiB，每任务合计最多 512 MiB；超过限制直接失败。这些是复制预算，并非运行中磁盘配额。非 crates.io registry 和 Git source 不在此离线缓存接口的支持范围。无需依赖源码时，可直接运行：
+
+```text
+cargo test --offline --locked --target-dir target/native-lpac
+```
+
+### 明确限制
+
+AppContainer Job 不授予网络能力，包括 `development` profile；`network=true` 会被拒绝，依赖 loopback、数据库、网络下载或后台服务的构建不能在此离线后端运行。EndlessVibe 的 MCP、Transfer 和宿主机 ngrok 进程独立于 Job 的网络策略，服务连接本身不会因此关闭。
+
+授权树中的 junction、symlink 和其他 reparse point 会在执行前拒绝；运行后新出现的 reparse point 也会使权限回收停止并保留日志，不沿链接修改目标。硬链接仅在全部别名都位于此次授权库存、且权限一致时允许；跨项目或跨只读/可写边界的硬链接被拒绝。服务与项目路径必须保持稳定，不能把配置、凭据或状态目录包含进授权树。
+
+此模式使用同一 Windows 内核，不提供虚拟机边界、磁盘配额或对同用户宿主程序、管理员并发改权限的防护。项目内的源文件、配置和已有秘密对获执行授权的项目代码可见；需要保护的凭据应放在项目外。
+
+固定 `--probe-windows-sandbox` 自检仍保留，用于固定 `hash_input` 协议及受信 worker 的映像检查。它与一般命令执行具有不同用途，不能替代实际 Cargo 和 Jobs 回归测试。
 
 ## 默认 bubblewrap
 
@@ -95,9 +149,9 @@ readonly_mounts = [{ source = "/home/user/.rustup/toolchains/stable-x86_64-unkno
 
 将这些字段合并到已有 `[execution]`，不要重复声明整个表；示例路径必须替换为真实目录。允许的目标路径限制在 `/opt/...` 或 `/cache-readonly/...`，不得通过 mount 暴露服务 config/state。额外 SDK 只读挂载扩大可见范围，需要自行检查其中是否有密钥。程序查找与共享库依赖仍需在目标环境验证。
 
-## Sandbox 内临时 PostgreSQL
+## Linux Bubblewrap 内临时 PostgreSQL
 
-`allow_network=false` 不妨碍**同一个 Job** 内的父进程和子进程使用该 Job 自己的 loopback namespace。因此集成测试不必挂宿主 Docker socket，也不必连接开发数据库：测试脚本可以在 sandbox 内自行启动一次性 PostgreSQL，并只监听 `127.0.0.1`。
+本节仅适用于 Linux Bubblewrap。`allow_network=false` 不妨碍**同一个 Job** 内的父进程和子进程使用该 Job 自己的 loopback namespace。因此集成测试不必挂宿主 Docker socket，也不必连接开发数据库：测试脚本可以在 sandbox 内自行启动一次性 PostgreSQL，并只监听 `127.0.0.1`。Windows AppContainer 不提供这一网络 namespace，仍拒绝 loopback 网络访问。
 
 若 PostgreSQL 已安装在 `/usr/bin` 和系统库目录，通常无需额外 mount；若使用自定义 PostgreSQL 安装，应只读挂载包含 `bin/`、所需 `lib/`/`share/` 的最小安装前缀，例如：
 
@@ -227,13 +281,15 @@ Storage Health 将 SQLite / Backups / exec-cache 分开展示。`/api/storage/ma
 
 ## 配置热重载
 
-Dashboard 的 Project 新增与权限修改在写入并完整验证 `config.toml` 后，会立即重建 Workspace/Project 授权表并原子替换 Runtime 中的新操作视图，无需重启服务。手工编辑配置后也可以在 Config 页面执行 `Reload project config`，对应本地 `POST /api/config/reload`。
+Dashboard 的 Project 新增与权限修改在写入并完整验证 `config.toml` 后，会尝试热重载 Workspace/Project 授权表；成功时原子替换 Runtime 中的新操作视图，无需重启服务。手工编辑配置后也可以在 Config 页面执行 `Reload project config`，对应本地 `POST /api/config/reload`。
 
 热重载只覆盖 Workspace/Project 授权模型。`server`、`security`、`limits`、`execution`、`git` 等服务级配置在进程启动时固定；如果这些字段与启动时持久配置不同，reload 返回 `RELOAD_RESTART_REQUIRED`，旧授权表继续生效，必须重启 EndlessVibe。
 
-对于同一 Workspace/Project 且路径未变化的 Project，新授权对象复用旧 Project lock。因此 reload 前已经运行的文件、Git 或命令操作继续持有原来的 `Arc<Project>` 并完成，新操作使用新权限但仍与旧操作共享同一把锁，不会在同一目录并发。reload 时已被删除或改路径、但仍有操作在运行的旧 Project 会暂时保留在 retired 集合中供 shutdown 等待，不重新接受新操作。
+使用 `appcontainer` 时，命令提交检查、运行中的 Jobs 或缓存操作尚未结束会阻止热重载，返回 `PROJECT_BUSY`；未决沙箱清理也会阻止激活新映射，返回 `SANDBOX_CLEANUP_PENDING`。旧授权表及项目锁保持有效。普通活动结束后可单独重试 `Reload project config`；未决清理须先满足上文的安全恢复条件。
 
-如果 Project 配置已成功写入但由于同时存在服务级配置变化而无法热重载，Dashboard 返回成功写入结果并设置 `requires_restart=true` 与 `reload_warning`；客户端不应重复提交同一配置写操作。
+在允许热重载的情况下，对于同一 Workspace/Project 且路径未变化的 Project，新授权对象复用旧 Project lock。因此 reload 前已经运行的文件、Git 或命令操作继续持有原来的 `Arc<Project>` 并完成，新操作使用新权限但仍与旧操作共享同一把锁，不会在同一目录并发。reload 时已被删除或改路径、但仍有操作在运行的旧 Project 会暂时保留在 retired 集合中供 shutdown 等待，不重新接受新操作。
+
+如果 Project 配置已成功写入，但因服务级配置变化、AppContainer 任务/缓存活动或未决清理而无法热重载，Dashboard 的 Project 新增/修改接口仍返回保存成功，并设置 `requires_restart=true` 与 `reload_warning`。这里表示保存内容尚未激活，不保证仅重启服务即可解除未决清理；客户端不应重复提交同一配置写操作。直接调用 `POST /api/config/reload` 失败时返回对应错误，不返回保存成功的 warning 结果。
 
 ## 生命周期、持久化与资源
 

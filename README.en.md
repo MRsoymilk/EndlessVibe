@@ -74,7 +74,7 @@ EndlessVibe is **not** a cloud IDE or a multi-tenant remote shell. It is designe
 | **Dashboard** | Runtime charts, Projects, Tasks, Operations, Nodes, configuration, and storage management |
 | **Authentication** | OAuth 2.0 Authorization Code, PKCE, dynamic client registration, tool scopes |
 | **Node Transfer** | LAN discovery, TLS pairing, scoped grants, persistent remote request status and history |
-| **Execution Profiles** | Bubblewrap by default, with explicitly configured Development / Trusted Host profiles |
+| **Execution Profiles** | Linux Bubblewrap and native offline Windows AppContainer, with explicit Project authorization |
 | **Docker (optional)** | Restrained Docker Engine operations scoped to explicitly allowed containers |
 
 ### Workspace and Project Model
@@ -97,7 +97,7 @@ Different Projects can run independent operations concurrently. File changes, co
 - **Linux 5.6+, macOS, or Windows 10/11** (macOS and Windows are newly adapted targets; native builds and tests are required before calling them release-ready)
 - Rust / Cargo **1.88+**
 - Git and a C/C++ compiler toolchain installed on the target operating system
-- Linux requires Bubblewrap and unprivileged user namespaces by default; on macOS and Windows, command execution is disabled by default until an administrator explicitly acknowledges the unsandboxed host backend
+- Linux requires Bubblewrap and unprivileged user namespaces by default. Windows offers a native offline `appcontainer` backend; new Windows/macOS configurations still disable command execution until a backend is selected. Unsandboxed host execution requires explicit acknowledgement
 
 Linux refuses to run as root. Capability-based filesystem access applies to all supported builds; **Bubblewrap is Linux-only, and the Docker Unix Socket transport is not implemented on Windows**. See [Cross-Platform Support and Limitations](docs/PORTABILITY.md).
 
@@ -210,17 +210,15 @@ The setting persists in `config.toml`, preserving all Workspace/Project grants a
 
 Native Windows deployment now exposes three MCP tools: `windows_service_update_plan`, `windows_service_update`, and `windows_service_update_status`, **disabled by default** and bound to one explicit administrator-approved Project. A confirmed update requires both reviewed SHA-256 hashes and a unique request_id; a native detached helper performs graceful shutdown, version switching, and best-effort rollback without PowerShell. Bootstrap the new Windows child and Linux parent MCP builds once before using the tools. See [Windows deployment security](docs/WINDOWS_DEPLOY.md).
 
-**Windows AppContainer self-check:** After stopping the Windows service, run `cargo build --locked --target-dir target/windows-stage` and `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`. This verifies the native lowbox token, Job Object and fixed `hash_input` receipt, with a combined 64 KiB private stdout/stderr limit, tamper detection and Job termination on overflow; it does not enable a general command sandbox or read user Projects. See [Windows sandbox limitations](docs/PORTABILITY.md).
+### Native Windows command sandbox
 
-The sandbox self-check now stages only the already-running EndlessVibe EXE (up to 128 MiB), copies through a pinned file handle, verifies SHA-256 before and after the lowbox worker runs, and reports success only after profile and recovery journal cleanup. It does not accept Project binaries or third-party executables. A bounded PE64 static-import audit rejects unknown DLLs and delay-load imports; MSVC runtimes are checked in Windows System32 and rehashed after execution. This is not complete Windows loader-path attestation. The fixed Worker now pauses at two private gates so its parent can inspect mapped DLL paths via Toolhelp before and after the operation; modules outside System32 are rejected. These snapshots cannot detect transient loads between checks or prove Authenticode identity.
+On recognized Windows 10/11 x64 kernels, select `appcontainer` under **Sandbox → Execution backend** in the local Dashboard and restart the service to run authorized command Jobs in Windows LPAC. Native tools, Cargo builds/tests, live stdout/stderr, job summaries, cancellation and timeouts use the regular Jobs interface. Each task has a fresh identity and Job Object. The entire process tree must exit before Project permissions and the private profile are reclaimed. Saved configuration and the active backend are reported separately; existing installations do not switch automatically. After a crash, a valid `running` record from the current Windows boot blocks recovery until a full Windows restart changes the verified boot sequence; `prepared` / `empty` records can recover after a service restart. Missing, malformed or untrusted evidence remains invalid after a Windows restart, and recovery is still refused.
 
-Worker SystemRoot, SystemDrive and PATH now come from native Windows system-directory APIs instead of inherited host variables. ComSpec is absent and extra variables are limited to the ENDLESSVIBE_ namespace.
+The authorized Project is writable, toolchains are read-only, and an existing `.git` remains read-only unless Git mutation is authorized. Every AppContainer Job stays offline, including `development` Projects. Cargo uses only cached, checksum-verified public dependencies in a fresh private home, without host Cargo configuration or credentials. Required missing dependencies must be prepared in a trusted environment. The service's MCP, LAN Transfer and host ngrok connections are separate from this Job network policy.
 
-The broker now compares each mapped section's kernel-reported NT-device filename against its Toolhelp path through GetMappedFileNameW and QueryDosDeviceW at both barriers; this is not a signature or loaded-file-byte identity proof.
+Native Rust tests cover file boundaries, Git restrictions, inherited handles, descendant termination, permission recovery and an actual offline Cargo compile/link/test through Jobs. Preparation and cleanup errors are explicit; there is no fallback to host execution. See [Execution](docs/EXECUTION.md#windows-原生-appcontainer) and [Platform support](docs/PORTABILITY.md) for toolchain permissions, link handling, recovery and offline limits.
 
-It also pins each reopened image file by Windows handle and compares volume serial, file index, size and last-write time across both checks, rejecting same-name replacements. This does not prove mapped-memory bytes or Authenticode signatures.
-
-Offline embedded Authenticode diagnostics now use WinVerifyTrust for approved System32 MSVC runtime imports. Results distinguish trusted embedded signatures from cases requiring further Catalog verification; this is not a publisher-identity check or execution authorization.
+The separate fixed-worker self-check remains available as `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox` after stopping the service. It validates the fixed `hash_input` protocol, native token, Job Object, bounded logs and recovery record. Its trusted-worker digest, PE imports, System32 mapping and offline embedded-signature diagnostics retain their documented limits and do not substitute for general command Jobs tests.
 
 - Local MCP (OAuth): `http://127.0.0.1:20000/mcp`, **loopback only**, not an HTTP endpoint for other LAN computers.
 - Local Dashboard: `http://127.0.0.1:20001/nodes`, **loopback only**.

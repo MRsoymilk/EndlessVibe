@@ -12,6 +12,7 @@ tested independently before support can be considered verified.
 | Git file/diff/commit workflows | Supported | Portable implementation | Portable implementation |
 | Bubblewrap execution | Supported (if installed) | Not available | Not available |
 | Host command execution | Explicit opt-in | Explicit opt-in | Explicit opt-in |
+| Native AppContainer command Jobs | Not available | Not available | LPAC, offline, per-job ACL leases and Job Object |
 | Built-in `--status` / `--stop` / `--restart` | Linux PID start-ticks verification | Use OS process manager | Windows creation-time verification + per-instance shutdown event (native validation pending) |
 | Docker Engine Unix-socket integration | Optional | Depends on Unix socket | Unix-socket transport unavailable |
 
@@ -43,7 +44,7 @@ No host-command execution backend needs to be enabled for process control.
 
 ### Windows Job Object resource containment
 
-Windows command Jobs now start their child suspended, attach a native Job
+Windows host command Jobs start their child suspended, attach a native Job
 Object, then resume the original thread. Each task uses the configured
 execution.memory_limit_mb and execution.max_processes to cap aggregate Job
 memory and active processes. Closing the Job Object terminates remaining
@@ -52,20 +53,70 @@ Assignment failures abort the suspended process rather than running outside
 the resource limits. The old taskkill-based cleanup is not needed for these
 managed command Jobs.
 
-Job Objects do not restrict file access, registry, network or user security
-tokens: this is a resource-containment stage, NOT a Windows AppContainer
-sandbox. Host mode still requires explicit unsafe-host authorization.
+Job Objects provide resource and process-tree containment. The `appcontainer`
+backend adds LPAC token and per-job filesystem permissions; host mode keeps
+the service account's file and network access and requires explicit unsafe-host
+authorization.
 
 ### Windows sandbox status in the local Dashboard
 
-The /sandbox page has a Check Sandbox action on Windows as well as Linux.
-On Windows this is a policy/status check: it does not execute Project code,
-launch a sandboxed task or claim that AppContainer is production-ready.
-It reports whether Job Objects resource limits apply to currently enabled
-command jobs, marks filesystem/network isolation as absent for host mode,
-shows the fixed-operation AppContainer worker protocol version and native
-self-check CLI, and reports the protected startup profile-recovery facility.
-AppContainer remains unselectable as a general command execution backend.
+The `/sandbox` page checks native tool availability and displays the selected
+and active execution backends. Windows can select `appcontainer` for general
+command Jobs. The policy check does not execute Project code; saving a backend
+requires restart before it becomes active. Host mode explicitly reports absent
+filesystem and network isolation.
+
+### Native AppContainer command Jobs
+
+On recognized Windows 10/11 x64 kernels, the backend executes configured native
+programs and their descendants inside a per-job LPAC identity. Process creation
+atomically joins a memory/process-limited Job Object through the startup job-list
+attribute. The suspended token and Job membership are verified before resuming.
+The sole added capability is `registryRead`; no network capability is granted.
+The authorized Project is
+read/write, exact toolchain roots are read/execute, and an existing `.git` is
+read-only unless the Project permits Git mutation. There is no host fallback.
+
+ACL changes are journaled before grants. Paths are pinned without following
+reparse points; external or conflicting hardlinks fail preparation. Three fresh
+standard pipes carry stdin/stdout/stderr; host credentials and arbitrary
+handles are not inherited. Jobs retain live output, cancellation, timeout,
+summary capture and restart-interrupted status. Normal completion also kills
+orphaned descendants. Verified whole-Job exit precedes ACL/profile cleanup.
+Unverified cleanup retains recovery records, blocks new Jobs and keeps the
+Project lock. Authorization reload cannot replace Project locks during command
+submission, running Jobs or unresolved cleanup. A service-instance lock alone
+does not prove old descendants have
+exited. Per-identity prepared/running/empty records are checked before any ACL
+recovery; every pending ACL SID must have matching proof. A `running` record
+from the same Windows boot blocks recovery, including after a service restart.
+A full Windows restart with a different verified kernel boot sequence permits
+recovery; prepared/empty records need only a service restart. Unknown shared-data
+ABIs, missing proof and malformed records fail closed. ACLs are recovered before
+profiles, and execution evidence is deleted last.
+
+All profiles, including `development`, remain offline in this backend.
+`network=true` is rejected. MCP/Transfer and host tunnels remain separate
+service processes. A private Cargo home receives only verified, locked public
+crates.io cache data; host Cargo configuration, credentials and Git registry
+caches stay outside it. Ordinary tool roots require the exact permissions
+needed for a temporary read-only ACL lease. Automatically detected MSVC/SDK
+roots with a selected leaf lacking ACL-editing permission trigger copying of
+that family's already
+authorized native subdirectories into a bounded per-job private tool tree,
+without changing the installed source ACL or owner. Other families stay in
+place. Selected relative layout and executable/library/header paths are
+preserved or remapped; a conflicting explicit in-place mount is rejected. The copy
+is sealed with effective read/execute grants and protected inheritance, while
+profile Temp and cache siblings remain writable. Preparation checks a separate
+90-second deadline and refuses to launch after it expires. See
+[Windows configuration, toolchains and limits](EXECUTION.md#windows-原生-appcontainer).
+
+No disk quota is provided. Reparse points introduced during a Job make cleanup
+fail closed rather than traversing them. This model does not claim to contain
+an administrator or another trusted host process running as the service user.
+Existing installations keep their configured backend until explicitly changed
+and restarted.
 
 ### Native fixed AppContainer self-check (Windows)
 
@@ -227,13 +278,11 @@ tests inspect the exact Windows wide-string environment block, and verify
 that this change preserves the AppContainer identity, file/network restrictions
 and two-gate loaded-module checks.
 
-**This does not authenticate arbitrary executables** or provide a secure
-loading path for user code. A future general sandbox backend still needs
-a separate executable identity/allowlist policy, verified dependencies,
-cancellation, quotas, filesystem boundaries and security review.
-
-Production support remains limited to the fixed hash_input self-check;
-general AppContainer command execution is not available.
+These fixed-worker checks authenticate only the staged EndlessVibe worker.
+General command Jobs use the separate AppContainer backend described above,
+which treats the executable and its Project code as untrusted and confines
+them through the OS. Fixed-worker module attestation is not reported for
+arbitrary programs.
 
 ### Versioned isolated-worker protocol
 
@@ -248,9 +297,9 @@ before it accepts the receipt. Unknown fields, versions and operations
 fail closed.
 
 The fixed hash_input worker is now compiled into the Windows executable and
-can run only within a verified AppContainer process. This does not make it
-a production command-execution backend: cargo, arbitrary Project binaries,
-scripts, shell commands and general file writes remain unsupported.
+can run only within a verified AppContainer process. Its fixed protocol still
+accepts no arbitrary command. General programs use the separate command Jobs
+backend, with their normal authorization, output and lifecycle contracts.
 
 ### Verified AppContainer protocol round trip
 
@@ -273,13 +322,13 @@ synthetic private sample, not user Project content.
 
 ### Windows AppContainer identity verification
 
-The Windows-only AppContainer prototype creates an unpredictable one-time
+The Windows-only fixed AppContainer worker creates an unpredictable one-time
 profile with no network capabilities and uses the Win32 extended startup
 attributes to launch a suspended, low-privilege process. Native tests inspect
 its access token and confirm that it actually has AppContainer identity.
 Temporary profiles are deleted after their process has exited.
 
-The AppContainer input-staging prototype reads only individually selected
+The fixed AppContainer input staging reads only individually selected
 files via the existing capability-rooted Project reader. It refuses sensitive
 names, symlinks, and traversal, and copies at most 2 MiB per file into the
 ephemeral AppContainer profile. The original Project's ACLs are unchanged.
@@ -325,9 +374,9 @@ AppContainer process to verify over-budget termination.
 This is a polling limit, **not a filesystem disk quota**: a burst may
 temporarily exceed 64 KiB between polls. The existing Windows test harness
 also demonstrates file-backed live stdout/stderr for cooperating processes.
-Neither facility is transparent capture of arbitrary external executables;
-the generic `run_command` path still uses explicitly acknowledged host mode
-and does **not** inherit the fixed worker's AppContainer protection.
+These fixed-worker file logs remain separate from the anonymous pipes used
+for general AppContainer command stdout/stderr. `run_command` uses the active
+configured backend; acknowledged host mode remains unsandboxed.
 The Windows service now runs an orphaned-profile recovery scan during
 Runtime::new, after obtaining the exclusive service.lock and before
 accepting any commands. The private recovery directory lives under
@@ -343,11 +392,12 @@ The production fixed-operation self-check now journals every AppContainer
 profile *before* creating it. Normal completion removes the record only after
 native profile cleanup; after an interrupted CLI probe, the next exclusive
 service startup can recover and remove the orphaned profile.
-The previous CreateProcess cross-token handle inheritance experiment
-failed native validation and was discarded. General-purpose command
-execution, crash-safe job lifecycle and filesystem quotas are still
-separate work; the current fixed-operation protocol is not an arbitrary
-Project command runner.
+General command Jobs use their own verified native process launcher with an
+explicit three-handle inheritance list. Their ACL recovery runs before this
+profile recovery under the same service instance lock. Newly created journal
+directories have protected native DACLs; pre-existing directories and records
+with untrusted write permissions are rejected. Filesystem disk quotas remain
+unimplemented.
 
 ### Windows MSVC toolchain in host jobs
 
@@ -366,10 +416,10 @@ defaults. This fixes host toolchain setup; it does not add sandbox isolation.
 ## Safe defaults
 
 On Linux, Bubblewrap is the default execution backend. Windows and macOS
-default to `execution.backend = "disabled"`; command jobs are unavailable
-until an administrator deliberately configures the `host` backend and sets
-`acknowledge_unsafe_host_execution = true`. That mode runs executable code
-with the service account's OS privileges and is **not** a sandbox.
+default to `execution.backend = "disabled"`. On Windows, select `appcontainer`
+to enable native offline command Jobs. On either platform, selecting `host`
+requires `acknowledge_unsafe_host_execution = true` and runs executable code
+with the service account's OS privileges without sandbox protection.
 
 File APIs use a capability-held Project directory on non-Linux hosts and
 reject parent traversal, sensitive path components, and symbolic links.
@@ -388,10 +438,13 @@ cargo check --locked --all-targets
 cargo test --locked
 ```
 
-Run `cargo check --locked --all-targets` and `cargo test --locked --lib`
-on each supported OS separately. Run the complete `cargo test --locked` suite
-on Linux for the Linux-specific integration tests. Do not interpret passing
-checks on Linux as proof of Windows or macOS compatibility.
+Run the full `cargo test --locked` suite on each supported OS separately.
+Windows integration fixtures use native test executables and include real
+Jobs-based AppContainer execution and an offline Cargo compile/link/test.
+The native boundary tests verify file restrictions, inherited handles, process
+trees and ACL recovery. Do not interpret Linux checks as Windows or macOS
+validation. A test that needs an installed toolchain must report its absence
+as a failure rather than silently skipping the execution claim.
 
 The local Dashboard binds to `127.0.0.1:20001` and should not be exposed
 via a public reverse proxy. MCP itself requires correct OAuth settings and

@@ -74,7 +74,7 @@
 | **Dashboard** | 状态图表、Projects、Tasks、Operations、Nodes、配置与存储管理 |
 | **Authentication** | OAuth 2.0 Authorization Code、PKCE、动态客户端注册及工具 Scope |
 | **Node Transfer** | 局域网发现、TLS 配对、Project 授权、远程请求状态与历史 |
-| **Execution Profiles** | 默认 Bubblewrap 沙箱；可显式切换 Development / Trusted Host |
+| **Execution Profiles** | Linux Bubblewrap、Windows AppContainer 离线沙箱；显式项目授权 |
 | **Docker（可选）** | 通过受限 Engine API 查看、管理获授权的容器 |
 
 ### Workspace 与 Project
@@ -97,7 +97,7 @@ Workspace: projects                  /home/user/projects
 - **Linux 5.6+、macOS、Windows 10/11**（macOS / Windows 为新增适配平台，需要在对应系统验证后正式发布）
 - Rust / Cargo **1.88+**
 - Git、C/C++ 编译工具链（需安装于目标操作系统）
-- Linux 默认需要 Bubblewrap 与可用的非特权 User Namespace；macOS / Windows 默认禁用命令执行，必须由管理员确认后才可启用 host backend
+- Linux 默认需要 Bubblewrap 与可用的非特权 User Namespace；Windows 可选择原生 `appcontainer` 离线沙箱。macOS / Windows 新配置仍默认禁用命令执行，`host` 需显式风险确认
 
 Linux 下仍拒绝以 root 身份启动。跨平台文件操作采用目录句柄边界检查；**Bubblewrap 只在 Linux 可用，Windows 没有 Docker Unix Socket 接口，不能将两者视为跨平台已实现的功能**。详见 [跨平台支持与安全限制](docs/PORTABILITY.md)。
 
@@ -210,17 +210,15 @@ LAN-only 会持久化到 `config.toml`，并保留原 Workspace / Project 权限
 
 Windows 服务自更新现在提供 `windows_service_update_plan`、`windows_service_update` 与 `windows_service_update_status` 三个 MCP 工具，**默认关闭**；管理员必须显式绑定一个精确 Project。实际更新须 `confirm=true`、当前及候选版本 SHA-256 和唯一 request_id，由原生辅助进程完成优雅停服、更新与失败回滚，不启用 PowerShell。第一次仍需手动安装新版 Windows 子节点，并更新 Linux 父节点的 MCP 工具版本；完整安全边界见 [Windows 原生部署](docs/WINDOWS_DEPLOY.md)。
 
-**Windows AppContainer 沙箱自检：** 在 Windows 服务停止后执行 `cargo build --locked --target-dir target/windows-stage`，然后运行 `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`。该功能验证真实低权限令牌、Job Object 和固定 `hash_input` 回执，并以 64 KiB 合计预算校验私有 stdout/stderr、检测篡改并在超限时终止 Job；它不会启用任意命令沙箱，也不读取用户项目。详情见 [Windows 沙箱状态与限制](docs/PORTABILITY.md)。
+### Windows 原生命令沙箱
 
-沙箱自检现在只暂存正在运行的 EndlessVibe 自身 EXE（最多 128 MiB），通过已打开文件句柄拷贝，并在低权限进程执行前后进行 SHA-256 校验；确认 Profile 清理及恢复记录移除后才报告成功。它不接受用户项目或第三方 EXE。 新增 PE64 静态导入表审计：拒绝未知 DLL 和延迟加载项；MSVC 运行库仅检查从 Windows System32 获取的文件并在执行前后重验摘要。此检查不等于完整的 Windows Loader 路径证明。 固定 Worker 运行前后还会通过父进程 Toolhelp 双快照核对已加载模块，拒绝 System32 之外的映像；该检查不能证明期间不存在短暂加载和卸载的模块，也不验证 Authenticode 签名。
+在已识别内核版本的 Windows 10/11 x64 上，通过本机 Dashboard **沙箱 → 执行后端** 选择 `appcontainer` 并重启服务，即可让已授权的 `run_command` Jobs 在 Windows LPAC 中运行。支持本机工具、Cargo 编译与测试、实时 stdout/stderr、任务摘要、取消和超时；每次任务使用独立身份与 Job Object，整个进程树退出后才撤销项目权限和回收私有目录。页面区分“已保存”与“当前运行”的后端，现有安装不会自动切换。异常退出后，若可信执行记录仍是本次 Windows 启动中的 `running`，恢复必须等待完整 Windows 重启并核验启动序号变化；`prepared` / `empty` 记录可在服务重启时恢复。缺失、损坏或不可信的证据不会因为重启 Windows 而变得有效，恢复仍会被拒绝。
 
-Worker 启动时的 SystemRoot、SystemDrive 和 PATH 现在由 Windows 原生系统目录 API 推导，不继承宿主同名变量，也不提供 ComSpec；额外变量限定为 ENDLESSVIBE_ 命名空间。
+项目目录可写、工具链只读，未经 Git mutation 授权的现有 `.git` 保持只读。Windows 沙箱任务始终离线，包括 `development` profile；不授予网络能力、不暴露宿主 Cargo 配置和凭据。Cargo 只使用已缓存并经过锁文件校验的公开依赖，缺失的当前目标依赖需先在可信环境准备。服务自身的 MCP、LAN Transfer 和宿主 ngrok 连接不受 Job 离线策略影响。
 
-新增 GetMappedFileNameW + QueryDosDeviceW 交叉核验实际映像映射路径，执行前后均要求与 Toolhelp 路径一致。此检查不代表签名或底层文件字节身份验证。
+**原生隔离测试** 位于现有 Rust 单元测试及 `tests/integration.rs` 中，覆盖文件边界、Git 只读、继承句柄、子孙进程终止、权限回收及实际离线 Cargo 编译。启动或回收失败会明确报告，不自动回退到 host。工具链权限、链接、恢复和离线限制见 [执行模型](docs/EXECUTION.md#windows-原生-appcontainer) 与 [跨平台支持](docs/PORTABILITY.md)。
 
-现进一步固定各映像对应的 Windows 文件句柄，并在两次检查期间核对卷序列号、文件索引、大小和修改时间，拒绝同名文件替换；仍不声称验证了内存映像字节或 Authenticode 签名。
-
-新增 Windows 离线 Authenticode 嵌入式签名诊断（WinVerifyTrust），仅检查已批准的 System32 MSVC 运行库，并在自检结果中区分验证通过与需进一步检查 Catalog 的情况。当前不校验 Catalog 或发布者身份，签名诊断不作为执行授权依据。
+**固定 Worker 自检** 仍可在停服后运行 `.\target\windows-stage\debug\endlessvibe.exe --probe-windows-sandbox`。它验证固定 `hash_input` 协议、低权限令牌、Job Object、受限日志和恢复记录；受信 worker 还进行 EXE 摘要、PE 导入、System32 映像映射及离线嵌入式签名诊断。这些检查的具体保障与限制见跨平台文档，不代替一般命令的 Jobs 验收。
 
 - 本机 MCP（OAuth）：`http://127.0.0.1:20000/mcp`，**只监听 loopback**，不是供局域网设备直接调用的 HTTP 地址。
 - 本机 Dashboard：`http://127.0.0.1:20001/nodes`，**只允许本机访问**。
@@ -317,8 +315,8 @@ execution_profile = "isolated"
 
 | Profile | 用途 |
 | --- | --- |
-| `isolated` | 默认受限开发环境，使用 Bubblewrap 的隔离能力 |
-| `development` | 可信开发项目，可按配置共享主机网络，但仍受执行后端约束 |
+| `isolated` | 受限开发环境，使用当前已配置的 Bubblewrap 或 Windows AppContainer |
+| `development` | 可信开发项目，仍受执行后端约束；Windows AppContainer 始终离线 |
 | `trusted_host` | 显式高风险选项：配合已确认的 Host 后端，允许运行 PATH 中已安装的本机工具 |
 
 `trusted_host` **不是默认功能**。它要求全局启用无沙箱的 Host 执行，会影响其他可执行项目的隔离安全性；仅应在受控环境中使用。
