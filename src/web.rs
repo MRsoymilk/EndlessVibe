@@ -106,12 +106,12 @@ mod dashboard_sandbox_page_tests{
         assert_eq!(HTML.matches("id=\"execution-backend-editor\"").count(),1);
         assert_eq!(HTML.matches("id=\"sandbox-check\"").count(),1);
         assert!(HTML.contains("<option value=\"appcontainer\" disabled>"));
-        assert!(SCRIPT.contains("option.value===\"appcontainer\")option.disabled=true"));
+        assert!(SCRIPT.contains("option.value===\"appcontainer\")option.disabled=os!==\"windows\""));
         assert!(SCRIPT.contains("location.pathname===\"/sandbox\"?\"sandbox\""));
         assert!(SCRIPT.contains("currentPage===\"sandbox\""));
-        assert!(SCRIPT.contains("if(data.diagnostics?.windows_security)"));
+        assert!(SCRIPT.contains("windows=!!diag.windows_security"));
         assert!(SCRIPT.contains("check.disabled=false"));
-        // AppContainer remains test-only and may never be advertised as an
-        // actually selectable or active command backend.
+        // The native backend is selectable only on Windows; the saved
+        // backend must still be distinguished from the running configuration.
     }
 }
