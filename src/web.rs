@@ -6,6 +6,8 @@ use std::{convert::Infallible,sync::Arc,time::Duration};
 use tokio_stream::{wrappers::BroadcastStream,StreamExt};
 
 pub async fn home()->impl IntoResponse{Html(include_str!("../web/index.html"))}
+pub async fn setup_page()->impl IntoResponse{Html(include_str!("../web/setup.html"))}
+pub async fn setup_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/setup.css"))}
 pub async fn css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css"))}
 pub async fn theme_css()->impl IntoResponse{([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/theme.css"))}
 pub async fn preferences_init()->impl IntoResponse{([(header::CONTENT_TYPE,"text/javascript; charset=utf-8")],include_str!("../web/js/preferences-init.js"))}

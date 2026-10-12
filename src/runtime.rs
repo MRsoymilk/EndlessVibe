@@ -237,11 +237,18 @@ impl Runtime{
             setup_command_argument(&executable.to_string_lossy()),setup_command_argument(&config_path.to_string_lossy()));
         let restart_supported=cfg!(any(windows,target_os="linux"));
         let command=if restart_supported{format!("{start_command} --restart")}else{String::new()};
-        let workspaces=self.workspaces_snapshot();let projects=workspaces.values().map(|w|w.projects.len()).sum::<usize>();
+        // Show persisted authorization, not the running snapshot: a pending
+        // connection restart must not hide just-saved workspace/project entries.
+        let workspaces=persisted.workspaces.iter().map(|w|json!({
+            "id":w.id,"path":w.path,"project_count":w.projects.len(),
+            "projects":w.projects.iter().map(|p|json!({"id":p.id,"path":p.path}))
+                .collect::<Vec<_>>()
+        })).collect::<Vec<_>>();
+        let projects=persisted.workspaces.iter().map(|w|w.projects.len()).sum::<usize>();
         Ok(json!({"revision":revision,"requires_restart":file_pending||!matches_active,
             "needs_setup":!persisted.server.lan_only&&!persisted.public_connection_configured(),
             "host_os":std::env::consts::OS,"config_path":config_path,"owner_key_path":self.config.owner_key_path(),
-            "workspace_count":workspaces.len(),"project_count":projects,
+            "workspace_count":workspaces.len(),"project_count":projects,"workspaces":workspaces,
             "saved":setup_connection(&persisted),"active":setup_connection(&self.config),
             "startup_override_detected":startup_override_detected,"connection_matches_saved":matches_active,
             "environment_overrides":{"bind":std::env::var_os("ENDLESSVIBE_BIND").is_some(),"public_url":std::env::var_os("ENDLESSVIBE_PUBLIC_URL").is_some()},

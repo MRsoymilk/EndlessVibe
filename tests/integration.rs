@@ -63,9 +63,42 @@ fn dashboard_starts_with_generic_paths_and_config_defaults(){
 
 
 #[tokio::test]
+async fn setup_router_and_normal_dashboard_have_separate_surfaces(){
+    let f=fixture(|_|{});
+    let setup=server::create_setup_router(f.rt.clone());
+    for url in ["/","/setup"]{
+        let response=http(&setup,"GET",url,Body::empty(),None,None,None).await;
+        assert_eq!(response.status(),StatusCode::OK);
+        let html=String::from_utf8(to_bytes(response.into_body(),128*1024).await.unwrap().to_vec()).unwrap();
+        for marker in ["id=\"wizard-progress\"","data-wizard-step=\"0\"",
+            "data-wizard-step=\"1\"","data-wizard-step=\"2\"","data-wizard-step=\"3\"",
+            "aria-labelledby=\"setup-workspaces-title\" hidden"]{
+            assert!(html.contains(marker),"{url} missing {marker}");
+        }
+        assert!(!html.contains("class=\"top-nav\"")&&!html.contains("href=\"/projects\""));
+    }
+    for path in ["/projects","/config","/nodes","/api/config","/api/tasks",
+        "/api/nodes","/mcp","/oauth/token","/assets/app.js"]{
+        assert_eq!(http(&setup,"GET",path,Body::empty(),None,None,None).await.status(),
+            StatusCode::NOT_FOUND,"Setup exposes {path}");
+    }
+    for path in ["/api/setup","/assets/js/setup.js","/assets/setup.css"]{
+        assert_eq!(http(&setup,"GET",path,Body::empty(),None,None,None).await.status(),
+            StatusCode::OK,"Wizard lacks {path}");
+    }
+    let normal=server::create_dashboard_router(f.rt.clone());
+    for path in ["/setup","/api/setup","/api/workspaces","/assets/js/setup.js","/assets/setup.css"]{
+        assert_eq!(http(&normal,"GET",path,Body::empty(),None,None,None).await.status(),
+            StatusCode::NOT_FOUND,"Normal Dashboard exposes {path}");
+    }
+    let page=http(&normal,"GET","/",Body::empty(),None,None,None).await;
+    let html=String::from_utf8(to_bytes(page.into_body(),128*1024).await.unwrap().to_vec()).unwrap();
+    assert!(!html.contains("data-page=\"setup\"")&&!html.contains("href=\"/setup\""));
+}
+#[tokio::test]
 async fn dashboard_setup_is_local_and_distinguishes_saved_from_active_connection(){
     let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;});
-    let app=server::create_dashboard_router(f.rt.clone());let public=server::create_router(f.rt.clone());
+    let app=server::create_setup_router(f.rt.clone());let public=server::create_router(f.rt.clone());
     let initial=json_body(http(&app,"GET","/api/setup",Body::empty(),None,None,None).await).await;
     assert_eq!(initial["needs_setup"],true);assert_eq!(initial["requires_restart"],false);
     assert_eq!(initial["workspace_count"],0);assert_eq!(initial["active"]["bind"],"127.0.0.1:20000");
@@ -79,7 +112,7 @@ async fn dashboard_setup_is_local_and_distinguishes_saved_from_active_connection
     }
     let page=http(&app,"GET","/setup",Body::empty(),None,None,None).await;
     let html=String::from_utf8(to_bytes(page.into_body(),2*1024*1024).await.unwrap().to_vec()).unwrap();
-    assert!(html.contains("data-page=\"setup\""));
+    assert!(html.contains("data-wizard-step=\"0\""));
     let put=|origin:Option<&str>,body:Value|{
         let mut request=Request::builder().method("PUT").uri("/api/setup").header(header::HOST,"localhost").header(header::CONTENT_TYPE,"application/json");
         if let Some(origin)=origin{request=request.header(header::ORIGIN,origin);}
@@ -120,9 +153,46 @@ async fn dashboard_setup_is_local_and_distinguishes_saved_from_active_connection
     assert!(token["access_token"].is_string(),"new OAuth authorization must work after switching domains");
 }
 #[tokio::test]
+async fn setup_wizard_sees_saved_projects_with_pending_connection_restart(){
+    let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;});
+    let app=server::create_setup_router(f.rt.clone());
+    let post=|verb:&str,url:&str,body:Value|Request::builder().method(verb).uri(url)
+        .header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001")
+        .header(header::CONTENT_TYPE,"application/json")
+        .body(Body::from(body.to_string())).unwrap();
+    let initial=f.rt.dashboard_setup().unwrap();
+    let saved=app.clone().oneshot(post("PUT","/api/setup",json!({
+        "expected_revision":initial["revision"],"public_url":"wizard.ngrok.app","connection_mode":"loopback"
+    }))).await.unwrap();
+    assert_eq!(saved.status(),StatusCode::OK);
+    let saved=json_body(saved).await;
+    assert_eq!(saved["requires_restart"],true);
+    let root=f._dir.path().join("workspace");
+    let added=app.clone().oneshot(post("POST","/api/workspaces",json!({
+        "expected_revision":saved["revision"],"id":"newroot","path":root
+    }))).await.unwrap();
+    assert_eq!(added.status(),StatusCode::OK);
+    let current=json_body(http(&app,"GET","/api/setup",Body::empty(),None,None,None).await).await;
+    assert_eq!(current["workspace_count"],1);
+    assert_eq!(current["workspaces"][0]["id"],"newroot");
+    let project=app.clone().oneshot(post("POST","/api/projects",json!({
+        "expected_revision":current["revision"],"workspace":"newroot","project":"app",
+        "path":root.join("project"),"allow_write":false,"allow_exec":false,
+        "allow_git_commit":false,"allow_git_mutation":false,"allow_git_push":false,
+        "execution_profile":"isolated"
+    }))).await.unwrap();
+    assert_eq!(project.status(),StatusCode::OK);
+    let status=json_body(http(&app,"GET","/api/setup",Body::empty(),None,None,None).await).await;
+    assert_eq!(status["workspace_count"],1);
+    assert_eq!(status["project_count"],1);
+    assert_eq!(status["workspaces"][0]["projects"][0]["id"],"app");
+    assert_eq!(status["active"]["public_url"],"http://127.0.0.1:20000");
+    assert_eq!(status["saved"]["public_url"],"https://wizard.ngrok.app");
+}
+#[tokio::test]
 async fn dashboard_setup_adds_first_workspace_without_implicit_project_access(){
     let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;});
-    let root=f._dir.path().join("workspace");let app=server::create_dashboard_router(f.rt.clone());
+    let root=f._dir.path().join("workspace");let app=server::create_setup_router(f.rt.clone());
     let post=|path:&str,body:Value|Request::builder().method("POST").uri(path).header(header::HOST,"localhost")
         .header(header::ORIGIN,"http://localhost:20001").header(header::CONTENT_TYPE,"application/json").body(Body::from(body.to_string())).unwrap();
     let initial=f.rt.dashboard_setup().unwrap();

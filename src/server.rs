@@ -21,6 +21,29 @@ pub fn create_router(rt:Arc<Runtime>)->Router{
     Router::new().route("/health",get(web::status)).route("/favicon.ico",get(web::favicon)).route("/assets/EndlessVibe.png",get(web::brand_icon)).route("/assets/app.css",get(web::css)).merge(oauth).merge(protected).with_state(rt.clone()).layer(middleware::from_fn_with_state(rt,headers_and_logging))
 }
 
+/// Dedicated local-only router, launched exclusively by `--init`.
+/// No MCP, OAuth, normal Dashboard pages, job execution or node management endpoints.
+pub fn create_setup_router(rt:Arc<Runtime>)->Router{
+    Router::new()
+        .route("/",get(web::setup_page))
+        .route("/setup",get(web::setup_page))
+        .route("/favicon.ico",get(web::favicon))
+        .route("/assets/EndlessVibe.png",get(web::brand_icon))
+        .route("/assets/app.css",get(web::css))
+        .route("/assets/setup.css",get(web::setup_css))
+        .route("/assets/theme.css",get(web::theme_css))
+        .route("/assets/js/preferences-init.js",get(web::preferences_init))
+        .route("/assets/js/preferences.js",get(web::preferences_js))
+        .route("/assets/js/common.js",get(web::javascript_common))
+        .route("/assets/js/setup.js",get(web::javascript_setup))
+        .route("/api/setup",get(web::setup).put(web::update_connection))
+        .route("/api/workspaces",post(web::add_workspace))
+        .route("/api/projects",post(web::add_project))
+        .with_state(rt)
+        .layer(DefaultBodyLimit::max(65536))
+        .layer(middleware::from_fn(dashboard_headers))
+}
+
 pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
     Router::new()
         .route("/",get(web::home))
@@ -30,7 +53,6 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/operations",get(web::home))
         .route("/mcp",get(web::home))
         .route("/config",get(web::home))
-        .route("/setup",get(web::home))
         .route("/sandbox",get(web::home))
         .route("/nodes",get(web::home))
         .route("/assets/app.css",get(web::css))
@@ -41,7 +63,6 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/manifest.webmanifest",get(web::webmanifest))
         .route("/assets/app.js",get(web::javascript))
         .route("/assets/js/common.js",get(web::javascript_common))
-        .route("/assets/js/setup.js",get(web::javascript_setup))
         .route("/assets/js/mcp.js",get(web::javascript_mcp))
         .route("/assets/js/nodes.js",get(web::javascript_nodes))
         .route("/assets/js/charts.js",get(web::javascript_charts))
@@ -52,8 +73,6 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/metrics",get(web::metrics))
         .route("/api/activity",get(web::activity))
         .route("/api/config",get(web::config))
-        .route("/api/setup",get(web::setup).put(web::update_connection))
-        .route("/api/workspaces",post(web::add_workspace))
         .route("/api/nodes",get(web::node_discoveries))
         .route("/api/nodes/metrics",get(web::node_metrics))
         .route("/api/nodes/read",post(web::node_read))

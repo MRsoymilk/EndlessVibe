@@ -6,7 +6,7 @@ use std::{path::{Path,PathBuf},sync::Arc};
 fn arguments()->Result<Option<Cli>>{
     let mut c=Cli::default();let mut args=std::env::args().skip(1);
     while let Some(arg)=args.next(){match arg.as_str(){
-        "--help"|"-h"=>{println!("EndlessVibe {}\n\nStart here on a new computer:\n  endlessvibe\n  Open http://127.0.0.1:20001/setup for connection help and configuration.\n\nReopen setup (existing configuration and owner key are preserved):\n  endlessvibe --init\n\nExplicit CLI initialization (creates config and exits):\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Open local web setup, or create config with explicit --workspace\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override MCP bind address (web setup starts on 127.0.0.1:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --probe-windows-sandbox       Run the fixed AppContainer hash-input self-check (service must be stopped)\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWindows process control verifies PID creation time and uses a local graceful shutdown event.\nWhen upgrading an older Windows process, stop it once manually and relaunch before --restart.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
+        "--help"|"-h"=>{println!("EndlessVibe {}\n\nFirst-time configuration (wizard only):\n  endlessvibe --init\n  Open http://127.0.0.1:20001/\n\nNormal launch (Dashboard only):\n  endlessvibe\n\nExplicit CLI initialization (creates config and exits):\n  endlessvibe --init --workspace project=/home/user/project\n\nMount projects later (service must be stopped):\n  endlessvibe --add-project project:sample-app=/home/user/project/sample-app\n  endlessvibe --add-project project=/home/user/project/another-app\n\nOptions:\n  --config PATH                 Configuration file (default: XDG config/endlessvibe/config.toml)\n  --init                        Run the local-only initialization wizard, or create config with explicit --workspace\n  --workspace ID=/ABS/PATH      Create a workspace root at initialization; repeat for multiple roots\n  --add-project WORKSPACE[:ID]=/ABS/PATH  Mount a project below an existing workspace; ID defaults to directory name\n  --public-url HTTPS_ORIGIN     Public origin, without /mcp\n  --lan-only                    Use paired TLS LAN nodes, no public ChatGPT URL; also converts an existing config while stopped\n  --bind IP:PORT                Override MCP bind address (web setup starts on 127.0.0.1:20000)\n  --read-only                   Make projects added by --add-project read-only\n  --no-exec                     Disable command execution for projects added by --add-project\n  --allow-shell                 Initialize with run_shell enabled (broad execution permission)\n  --unsafe-host-exec            EXPLICIT opt-in: run commands with host-user permissions, no sandbox\n  --check-sandbox               Probe bubblewrap plus configured allowed/required programs\n  --probe-windows-sandbox       Run the fixed AppContainer hash-input self-check (service must be stopped)\n  --issue-token                 Print a short-lived local diagnostic bearer token; keep private\n  --revoke-all                  Revoke all access/refresh tokens and pending authorizations\n  --rotate-owner-key            Rotate owner key and revoke tokens; service must be stopped\n  --audit-tail                  Print recent private audit events\n  --status                      Show whether the configured service instance is running\n  --stop                        Gracefully stop the configured service instance\n  --restart                     Gracefully stop it, then start this binary as the new instance\n  --version                     Print version\n\nLinux defaults to bubblewrap; Windows/macOS default to disabled command execution.\nWindows process control verifies PID creation time and uses a local graceful shutdown event.\nWhen upgrading an older Windows process, stop it once manually and relaunch before --restart.\nWith --lan-only, local MCP remains OAuth-protected and the LAN Transfer listener uses TLS pairing.\n",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--version"|"-V"=>{println!("EndlessVibe {}",env!("CARGO_PKG_VERSION"));return Ok(None);},
         "--config"=>c.config=Some(PathBuf::from(args.next().context("--config needs a path")?)),
         "--workspace"=>c.workspaces.push(args.next().context("--workspace needs ID=/absolute/path")?),
@@ -32,13 +32,6 @@ fn web_setup_requested(c:&Cli)->Result<bool>{
         bail!("Use --init with optional --config to reopen web setup; explicit CLI initialization options also require --workspace ID=/absolute/root/path");
     }
     Ok(true)
-}
-fn automatic_setup_allowed(c:&Cli)->bool{
-    !c.init&&!c.lan_only&&c.workspaces.is_empty()&&c.add_projects.is_empty()
-        &&!c.read_only&&!c.no_exec&&!c.allow_shell&&!c.unsafe_host
-        &&!c.check_sandbox&&!c.probe_windows_sandbox&&!c.issue_token
-        &&!c.revoke_all&&!c.rotate_key&&!c.audit&&!c.status&&!c.stop&&!c.restart
-        &&c.public_url.is_none()&&c.bind.is_none()
 }
 fn setup_config_exists(path:&Path)->Result<bool>{
     match std::fs::symlink_metadata(path){
@@ -74,13 +67,12 @@ fn initialize_web_setup(path:&Path,cfg:Config)->Result<bool>{
     eprintln!("Created {}\nLocal setup: {SETUP_URL}\nNo Workspace or Project has been authorized.\nOwner key: {} (keep private; existing keys are preserved)\n",path.display(),key_path.display());
     Ok(true)
 }
-fn report_existing_setup(settings:&Config)->Result<bool>{
+fn ensure_setup_service_stopped(settings:&Config)->Result<()>{
     match service_state(settings)?{
-        ServiceState::Stopped=>Ok(false),
-        ServiceState::Running(_)|ServiceState::LegacyRunning=>{
-            println!("EndlessVibe is already running.\nLocal setup and connection help: {SETUP_URL}\nConfiguration, owner key and Project permissions are unchanged.\nIf this page is unavailable in an older running version, update and restart that service first.");
-            Ok(true)
-        },
+        ServiceState::Stopped=>Ok(()),
+        ServiceState::Running(_)|ServiceState::LegacyRunning=>bail!(
+            "EndlessVibe is running. Stop it with --stop or the original service manager before launching --init; normal Dashboard never exposes the initialization wizard"
+        ),
     }
 }
 
@@ -308,8 +300,33 @@ async fn main()->Result<()>{
     if cli.lan_only {return convert_to_lan_only(&path);}
     if !cli.add_projects.is_empty(){return add_projects(&cli,&path);}
     if !cli.workspaces.is_empty()||cli.read_only||cli.no_exec||cli.allow_shell||cli.unsafe_host{bail!("Workspace/permission flags require --init or --add-project");}
-    if web_setup||automatic_setup_allowed(&cli){initialize_web_setup(&path,Config::local_setup())?;}
-    let mut settings=Config::load(&path)?;if web_setup&&report_existing_setup(&settings)?{return Ok(());}
+    if web_setup{initialize_web_setup(&path,Config::local_setup())?;}
+    let mut settings=Config::load(&path)?;
+    if web_setup{
+        ensure_setup_service_stopped(&settings)?;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:20001").await
+            .context("Cannot listen on local setup 127.0.0.1:20001; stop the normal service first")?;
+        let rt=Runtime::new(settings,&path)?;
+        let service_pid=util::install_service_identity(&rt.config.security.data_dir)?;
+        eprintln!("EndlessVibe initialization mode (local only)\nWizard: http://127.0.0.1:20001/\nNo public MCP or Transfer listener is running.\nFinish the wizard, stop with Ctrl+C, then start without --init.\n");
+        #[cfg(windows)]
+        let shutdown_handle=service_pid.shutdown_handle();
+        let shutdown_rt=rt.clone();
+        let result=axum::serve(listener,server::create_setup_router(rt.clone()))
+            .with_graceful_shutdown(async move{
+                #[cfg(windows)]
+                shutdown_signal(shutdown_handle).await;
+                #[cfg(not(windows))]
+                shutdown_signal().await;
+                shutdown_rt.jobs.stop_accepting();
+                shutdown_rt.shutdown.cancel();
+            }).await;
+        rt.jobs.stop_accepting();
+        rt.shutdown.cancel();
+        rt.jobs.shutdown().await;
+        rt.wait_for_operations().await;
+        return result.context("Initialization wizard server failed");
+    }
     if let Some(url)=cli.public_url{settings.server.public_url=url.trim_end_matches('/').into();}if let Some(bind)=cli.bind{settings.server.bind=bind.parse()?;}settings.validate()?;
     if cli.check_sandbox{if cli.issue_token||cli.revoke_all||cli.rotate_key||cli.audit{bail!("--check-sandbox cannot be combined with credential/audit maintenance operations");}let diagnostics=process::sandbox_diagnostics(&settings).await?;println!("{}",serde_json::to_string_pretty(&diagnostics)?);let programs=process::probe_bubblewrap(&settings).await?;for(program,path)in &programs{println!("sandbox program: {program} -> {path}");}println!("bubblewrap sandbox probe: ok ({} allowed/required programs visible)",programs.len());return Ok(());}
     if cli.issue_token||cli.revoke_all||cli.rotate_key||cli.audit{
@@ -344,7 +361,7 @@ async fn main()->Result<()>{
     if rt.config.server.lan_only {
         eprintln!("Mode: LAN-only (no public ChatGPT URL)\nNodes Dashboard: http://127.0.0.1:20001/nodes\nLAN Transfer (paired TLS): {}\nLocal MCP (OAuth): {}/mcp\n",rt.config.transfer.listen,rt.config.server.public_url);
     }else{eprintln!("Dashboard: http://127.0.0.1:20001/\nMCP: {}/mcp\nAuthentication: OAuth (authorization code + S256 PKCE)\n",rt.config.server.public_url);}
-    eprintln!("Setup and connection help (this computer only): {SETUP_URL}\nReopen at any time with: endlessvibe --init --config \"{}\"\n",path.display());
+    eprintln!("To reconfigure, stop this service and run: endlessvibe --init --config \"{}\"\n",path.display());
     #[cfg(windows)]
     let shutdown_handle=_service_pid.shutdown_handle();
     let shutdown_rt=rt.clone();
@@ -404,11 +421,10 @@ async fn shutdown_signal(
     #[test]
     fn setup_mode_distinguishes_reopen_explicit_init_and_maintenance(){
         let mut c=Cli::default();
-        assert!(automatic_setup_allowed(&c));
-        assert!(!web_setup_requested(&c).unwrap());
+        assert!(!web_setup_requested(&c).unwrap(),"Normal startup must never enter the wizard");
         c.init=true;
         assert!(web_setup_requested(&c).unwrap());
-        assert!(!automatic_setup_allowed(&c));
+
         c.config=Some("alternate.toml".into());
         assert!(web_setup_requested(&c).unwrap());
         c.workspaces.push("root=/explicit/root".into());
@@ -424,7 +440,7 @@ async fn shutdown_signal(
             Cli{status:true,..Cli::default()},Cli{stop:true,..Cli::default()},
             Cli{restart:true,..Cli::default()},Cli{lan_only:true,..Cli::default()},
             Cli{add_projects:vec!["root=/explicit/app".into()],..Cli::default()}]{
-            assert!(!automatic_setup_allowed(&c),"Maintenance must not initialize a missing configuration");
+            assert!(!web_setup_requested(&c).unwrap(),"Maintenance must not enter setup mode");
         }
     }
     #[test]
@@ -443,7 +459,7 @@ async fn shutdown_signal(
         let owner=util::private_read(&state.join("owner.key"),4096).unwrap();
         assert_eq!(std::str::from_utf8(&owner).unwrap().trim().len(),43);
         endlessvibe::platform::validate_private_file(&path).unwrap();
-        assert!(!report_existing_setup(&saved).unwrap());
+        ensure_setup_service_stopped(&saved).unwrap();
     }
     #[test]
     fn reopening_setup_preserves_config_owner_key_and_authorization_bytes(){
@@ -464,7 +480,7 @@ async fn shutdown_signal(
         util::private_create(&state.join("state.sqlite3"),authorization).unwrap();
         assert!(!initialize_web_setup(&path,setup_cfg(&state)).unwrap());
         let saved=Config::load_file(&path).unwrap();
-        assert!(!report_existing_setup(&saved).unwrap());
+        ensure_setup_service_stopped(&saved).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(),original.as_bytes());
         assert_eq!(util::private_read(&state.join("owner.key"),4096).unwrap(),owner.as_bytes());
         assert_eq!(std::fs::read(state.join("state.sqlite3")).unwrap(),authorization);
@@ -479,11 +495,11 @@ async fn shutdown_signal(
         let saved=Config::load_file(&path).unwrap();
         let original=std::fs::read(&path).unwrap();let owner=std::fs::read(state.join("owner.key")).unwrap();
         let _instance=util::single_instance(&state.join("service.lock")).unwrap();
-        assert!(report_existing_setup(&saved).unwrap(),"Legacy instances still reuse the existing setup page");
+        assert!(ensure_setup_service_stopped(&saved).is_err(),"Active legacy service must block standalone setup");
         #[cfg(any(target_os="linux",windows))]
         {
             let _identity=util::install_service_identity(&state).unwrap();
-            assert!(report_existing_setup(&saved).unwrap(),"Verified running instances must not start a duplicate service");
+            assert!(ensure_setup_service_stopped(&saved).is_err(),"Active verified service must block standalone setup");
         }
         assert!(!initialize_web_setup(&path,setup_cfg(&state)).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(),original);
