@@ -227,11 +227,12 @@ impl Jobs{
         r.status="running".into();r.started=Some(util::now());r.started_ms=Some(util::now_millis());self.save(r,None)?;if let (Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){tracing::warn!(error=%error,job_id=%r.id,"Job is running but task checkpoint update failed");}}
         let (tx,mut rx)=mpsc::channel::<(&'static str,Vec<u8>)>(16);
         let out=tokio::spawn(pipe(child.stdout.take().context("stdout missing")?,"stdout",tx.clone()));let err=tokio::spawn(pipe(child.stderr.take().context("stderr missing")?,"stderr",tx.clone()));drop(tx);
-        let mut output=Output{bytes:vec![],offset:0,total:0};let mut last_save=Instant::now();let deadline=tokio::time::sleep(Duration::from_secs(timeout));tokio::pin!(deadline);
+        let mut output=Output{bytes:vec![],offset:0,total:0};let mut publish=tokio::time::interval(Duration::from_millis(250));publish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);let deadline=tokio::time::sleep(Duration::from_secs(timeout));tokio::pin!(deadline);
         let wait=child.wait();tokio::pin!(wait);let mut forced:Option<&str>=None;let mut pipes_open=true;
         let status=loop{tokio::select!{
             status=&mut wait=>break status?,
-            chunk=rx.recv(),if pipes_open=>{if let Some((stream,bytes))=chunk{output.append(stream,&bytes,self.config.limits.max_output_bytes);if last_save.elapsed()>=Duration::from_millis(250){r.output_bytes_total=output.total;r.output_truncated=output.offset>0;self.save(r,Some(&output))?;last_save=Instant::now();}}else{pipes_open=false;}},
+            chunk=rx.recv(),if pipes_open=>{if let Some((stream,bytes))=chunk{output.append(stream,&bytes,self.config.limits.max_output_bytes);}else{pipes_open=false;}},
+            _=publish.tick()=>{if output.total!=r.output_bytes_total{r.output_bytes_total=output.total;r.output_truncated=output.offset>0;self.save(r,Some(&output))?;}},
             _=cancel.cancelled()=>{forced=Some("cancelled");
                 #[cfg(windows)]job.terminate();
                 #[cfg(not(windows))]process::terminate_group(pid).await;
