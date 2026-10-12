@@ -30,7 +30,9 @@ pub async fn metrics(State(rt):State<Arc<Runtime>>)->impl IntoResponse{match rt.
 pub async fn activity(State(rt):State<Arc<Runtime>>)->impl IntoResponse{let audits=rt.db.audits(50);let jobs=rt.jobs.list(crate::tools::types::ListJobsArgs{workspace:None,project:None,task_id:None,limit:30});match(audits,jobs){(Ok(audits),Ok(jobs))=>Json(json!({"generated_at":crate::util::now(),"audits":audits,"jobs":jobs["jobs"]})).into_response(),(Err(error),_)|(_,Err(error))=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":format!("{error:#}")}))).into_response()}}
 pub async fn node_discoveries(State(rt):State<Arc<Runtime>>)->impl IntoResponse{Json(rt.transfer.discoveries())}
 pub async fn node_metrics(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.db.transfer_metrics())}
-pub async fn node_read(State(rt):State<Arc<Runtime>>,Json(args):Json<crate::transfer::router::NodeCallArgs>)->Response{if !crate::transfer::router::readonly(&args.tool){return (StatusCode::FORBIDDEN,Json(json!({"error":"Only read-only tools are allowed"}))).into_response();}mutation_response(rt.transfer.call_node(&args.node_id,&args.tool,args.arguments).await)}
+#[derive(Deserialize)]pub struct NodeFlowQuery{pub limit:Option<usize>}
+pub async fn node_flow_events(State(rt):State<Arc<Runtime>>,Query(query):Query<NodeFlowQuery>)->Response{mutation_response(rt.db.node_flow_events(query.limit.unwrap_or(100)))}
+pub async fn node_read(State(rt):State<Arc<Runtime>>,Json(args):Json<crate::transfer::router::NodeCallArgs>)->Response{if !crate::transfer::router::readonly(&args.tool){return (StatusCode::FORBIDDEN,Json(json!({"error":"Only read-only tools are allowed"}))).into_response();}let meta=json!({"node_id":args.node_id,"tool":args.tool,"arguments_sha256":crate::util::digest(args.arguments.to_string())});let operation=rt.begin_operation("node_read","","",meta);let result=rt.transfer.call_node(&args.node_id,&args.tool,args.arguments).await;mutation_response(rt.finish_operation(operation,result))}
 #[derive(Deserialize)]#[serde(deny_unknown_fields)]pub struct NodeWriteDashboard{pub node_id:String,pub tool:String,pub arguments:Value,pub confirm:bool,#[serde(default)]pub request_id:Option<String>}
 pub async fn node_write(State(rt):State<Arc<Runtime>>,Json(args):Json<NodeWriteDashboard>)->Response{if !crate::transfer::router::writable(&args.tool)||!args.confirm{return (StatusCode::FORBIDDEN,Json(json!({"error":"Explicit confirmation and an authorized remote operation are required"}))).into_response();}let audit=json!({"node_id":args.node_id,"tool":args.tool,"arguments_sha256":crate::util::digest(args.arguments.to_string())});let operation=rt.begin_operation("node_dashboard_write","","",audit);let result=rt.transfer.call_node_with_request_id(&args.node_id,&args.tool,args.arguments,args.request_id.as_deref()).await;mutation_response(rt.finish_operation(operation,result))}
 pub async fn node_pending(State(rt):State<Arc<Runtime>>)->Response{mutation_response(rt.transfer.reconcile_pending().await)}
@@ -131,11 +133,15 @@ mod dashboard_sandbox_page_tests{
         const ROUTES:&str=include_str!("server.rs");
         assert_eq!(HTML.matches("id=\"node-topology-canvas\"").count(),1);
         assert!(HTML.contains("/assets/node-topology.css"));
-        assert!(HTML.contains("动画仅用于标识协议方向"));
+        assert!(HTML.contains("动画仅标识协议方向"));
         assert!(ROUTES.contains(".route(\"/assets/node-topology.css\",get(web::node_topology_css))"));
         assert!(ROUTES.contains(".route(\"/assets/js/node-topology.js\",get(web::javascript_node_topology))"));
         assert!(NODES.contains("mountNodeTopology();refreshNodes()"));
-        assert!(NODES.contains("updateNodeTopology(discovery,pending.pending||[],peers.peers||[])"));
+        assert!(NODES.contains("updateNodeTopology(discovery,pending.pending||[],peers.peers||[],flows)"));
+        assert!(NODES.contains("/api/nodes/flow-events?limit=120"));
+        assert!(ROUTES.contains(".route(\"/api/nodes/flow-events\",get(web::node_flow_events))"));
+        assert!(TOPOLOGY.contains("export function matchNodeFlowEvents"));
+        assert!(TOPOLOGY.contains("/operations?seq="));
         assert!(TOPOLOGY.contains("export function deriveNodeTopology"));
         assert!(TOPOLOGY.contains("export function layoutNodeTopology"));
         assert!(TOPOLOGY.contains("remoteRole(peer)"));

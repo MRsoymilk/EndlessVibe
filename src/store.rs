@@ -105,6 +105,82 @@ impl Store {
     pub fn operations(&self,limit:usize)->Result<Vec<serde_json::Value>>{
         self.transaction(|tx|{let mut q=tx.prepare("SELECT seq,started,finished,tool,workspace,project,status,duration_ms,added_lines,removed_lines,error,error_code,substr(input_json,1,1200),substr(diff,1,1600) FROM operation_log ORDER BY seq DESC LIMIT ?1")?;let rows=q.query_map([limit.clamp(1,200) as i64],|r|{let input_preview=r.get::<_,String>(12)?;let input=serde_json::from_str::<serde_json::Value>(&input_preview).unwrap_or_else(|_|serde_json::json!({"preview":input_preview}));Ok(serde_json::json!({"seq":r.get::<_,i64>(0)?,"started":r.get::<_,u64>(1)?,"finished":r.get::<_,Option<u64>>(2)? ,"tool":r.get::<_,String>(3)?,"workspace":r.get::<_,String>(4)?,"project":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?,"duration_ms":r.get::<_,u64>(7)?,"added_lines":r.get::<_,u64>(8)?,"removed_lines":r.get::<_,u64>(9)?,"error":r.get::<_,String>(10)?,"error_code":r.get::<_,String>(11)?,"input_preview":input,"diff_preview":r.get::<_,String>(13)?} ))})?;Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)})
     }
+    /// Local dashboard projection of Transfer operations, never exposing payloads,
+    /// arguments, raw response bodies, file contents or errors.
+    pub fn node_flow_events(&self, limit: usize) -> Result<serde_json::Value> {
+        self.transaction(|tx| {
+            let mut statement = tx.prepare(
+                "SELECT seq,started,finished,tool,workspace,project,status,duration_ms,error_code,input_json,output_json
+                 FROM operation_log
+                 WHERE tool IN ('node_read','node_write','node_dashboard_write')
+                    OR substr(tool,1,9)='transfer_'
+                 ORDER BY seq DESC LIMIT ?1"
+            )?;
+            let rows = statement.query_map([limit.clamp(1,150) as i64], |row| {
+                Ok((
+                    row.get::<_,i64>(0)?,
+                    row.get::<_,u64>(1)?,
+                    row.get::<_,Option<u64>>(2)?,
+                    row.get::<_,String>(3)?,
+                    row.get::<_,String>(4)?,
+                    row.get::<_,String>(5)?,
+                    row.get::<_,String>(6)?,
+                    row.get::<_,u64>(7)?,
+                    row.get::<_,String>(8)?,
+                    row.get::<_,String>(9)?,
+                    row.get::<_,String>(10)?
+                ))
+            })?;
+            let mut events = Vec::new();
+            for row in rows {
+                let (seq, started, finished, stored_tool, workspace, project, status,
+                    duration_ms, error_code, input_json, output_json) = row?;
+                let input:serde_json::Value=match serde_json::from_str(&input_json){Ok(value)=>value,Err(_)=>continue};
+                let (peer_id, side, actual_tool) = if let Some(tool) = stored_tool.strip_prefix("transfer_") {
+                    (input.get("parent_node").and_then(|v| v.as_str()), "incoming", tool)
+                } else {
+                    (input.get("node_id").and_then(|v| v.as_str()),
+                     "outgoing", input.get("tool").and_then(|v| v.as_str()).unwrap_or(""))
+                };
+                let Some(peer_id) = peer_id else { continue };
+                if peer_id.len()!=24 || !peer_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || actual_tool.is_empty() || actual_tool.len()>64 { continue }
+                // Legacy proxy calls keep the target in the operation row;
+                // direct MCP node_read calls keep it under arguments instead.
+                let target=input.get("arguments").filter(|v|v.is_object()).unwrap_or(&input);
+                let workspace=if workspace.is_empty(){
+                    target.get("workspace").and_then(|v|v.as_str()).unwrap_or("").to_owned()
+                }else{workspace};
+                let project=if project.is_empty(){
+                    target.get("project").and_then(|v|v.as_str()).unwrap_or("").to_owned()
+                }else{project};
+                let output = if status=="succeeded" {
+                    serde_json::from_str::<serde_json::Value>(&output_json).unwrap_or(serde_json::Value::Null)
+                } else { serde_json::Value::Null };
+                let result_summary =
+                    if status=="succeeded" {
+                        if let Some(summary)=output.get("result_summary").and_then(serde_json::Value::as_str) {
+                            summary.to_owned()
+                        } else if output.get("redacted").and_then(serde_json::Value::as_bool)==Some(true) {
+                            match output.get("bytes").and_then(serde_json::Value::as_u64) {
+                                Some(bytes)=>format!("响应已记录 · {bytes} B"),
+                                None=>"响应已记录".into()
+                            }
+                        } else {node_flow_result_summary(actual_tool,&status,&output,&error_code)}
+                    } else {node_flow_result_summary(actual_tool,&status,&output,&error_code)};
+                events.push(serde_json::json!({
+                    "seq":seq,"peer_id":peer_id,"side":side,"tool":actual_tool,
+                    "workspace":workspace,"project":project,"status":status,
+                    "started":started,"finished":finished,"duration_ms":duration_ms,
+                    "result_summary":result_summary
+                }));
+            }
+            Ok(serde_json::json!({
+                "generated_at":crate::util::now(),"scope":"local_only",
+                "contains_payloads":false,"events":events
+            }))
+        })
+    }
     pub fn operation(&self,seq:i64)->Result<serde_json::Value>{
         self.transaction(|tx|{let value=tx.query_row("SELECT seq,started,finished,tool,workspace,project,status,duration_ms,input_json,output_json,diff,added_lines,removed_lines,error,error_code FROM operation_log WHERE seq=?1",[seq],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,u64>(1)?,r.get::<_,Option<u64>>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,u64>(7)?,r.get::<_,String>(8)?,r.get::<_,String>(9)?,r.get::<_,String>(10)?,r.get::<_,u64>(11)?,r.get::<_,u64>(12)?,r.get::<_,String>(13)?,r.get::<_,String>(14)?))).optional()?.context("Operation not found")?;let input=serde_json::from_str::<serde_json::Value>(&value.8).unwrap_or_else(|_|serde_json::json!({"raw":value.8}));let output=serde_json::from_str::<serde_json::Value>(&value.9).unwrap_or_else(|_|serde_json::json!({"raw":value.9}));Ok(serde_json::json!({"seq":value.0,"started":value.1,"finished":value.2,"tool":value.3,"workspace":value.4,"project":value.5,"status":value.6,"duration_ms":value.7,"input":input,"output":output,"diff":value.10,"added_lines":value.11,"removed_lines":value.12,"error":value.13,"error_code":value.14}))})
     }
@@ -174,6 +250,37 @@ impl Store {
         })
     }
 }
+/// Only return whitelisted aggregate response metadata, not operation output data.
+/// Exact input/output remains accessible from the existing local Operations page.
+pub(crate) fn node_flow_result_summary(tool:&str, status:&str, result:&serde_json::Value, error_code:&str)->String{
+    if status=="running" { return "等待返回".into() }
+    if status=="interrupted" { return "连接或任务中断 · 需核查".into() }
+    if status!="succeeded" {
+        return if error_code.is_empty() { "执行失败".into() }
+          else { format!("执行失败 · {}",bounded_operation_text(error_code,48)) };
+    }
+    let count=|key:&str|result.get(key).and_then(serde_json::Value::as_array).map(|a|a.len());
+    match tool {
+        "git_log"=>count("commits").map(|n|format!("{n} 条提交")).unwrap_or_else(||"已返回".into()),
+        "git_status"=>count("entries").map(|n|format!("{n} 项变更")).unwrap_or_else(||"已返回".into()),
+        "git_diff"=>
+            result.get("files_changed").and_then(serde_json::Value::as_u64)
+                .map(|n|format!("{n} 个文件")).unwrap_or_else(||"已返回".into()),
+        "search_code"=>count("matches").map(|n|format!("{n} 条匹配")).unwrap_or_else(||"已返回".into()),
+        "list_workspaces"=>count("workspaces").map(|n|format!("{n} 个 Workspace")).unwrap_or_else(||"已返回".into()),
+        "list_projects"=>count("projects").map(|n|format!("{n} 个 Project")).unwrap_or_else(||"已返回".into()),
+        "list_directory"=>
+            result.get("total").and_then(serde_json::Value::as_u64)
+                .map(|n|format!("{n} 个条目")).unwrap_or_else(||"已返回".into()),
+        "read_file"=>
+            result.get("lines_returned").and_then(serde_json::Value::as_u64)
+                .map(|n|format!("{n} 行")).unwrap_or_else(||"已返回".into()),
+        "git_commit"=>"已提交".into(),
+        "write_file"|"apply_patch"|"create_directory"=>"已完成".into(),
+        "run_command"=>"任务已提交".into(),
+        _=>"已返回".into()
+    }
+}
 fn percentile_summary(mut values:Vec<u64>)->serde_json::Value{values.sort_unstable();let pick=|percent:usize|->Option<u64>{if values.is_empty(){return None;}let index=((values.len()*percent+99)/100).saturating_sub(1).min(values.len()-1);Some(values[index])};serde_json::json!({"samples":values.len(),"p50":pick(50),"p95":pick(95),"p99":pick(99)})}
 fn sensitive_operation_key(key:&str)->bool{let key=key.to_ascii_lowercase();["authorization","access_token","refresh_token","password","passwd","secret","api_key","apikey","owner_key","private_key","credential"].iter().any(|part|key.contains(part))}
 fn sanitize_operation_value(value:&mut serde_json::Value){match value{serde_json::Value::Object(map)=>{for(key,value)in map.iter_mut(){if sensitive_operation_key(key){*value=serde_json::Value::String("[REDACTED]".into());}else if key.eq_ignore_ascii_case("environment"){if let Some(environment)=value.as_object_mut(){for value in environment.values_mut(){*value=serde_json::Value::String("[REDACTED]".into());}}else{*value=serde_json::Value::String("[REDACTED]".into());}}else if key.eq_ignore_ascii_case("script"){if let Some(text)=value.as_str(){*value=serde_json::json!({"omitted":true,"bytes":text.len(),"sha256":crate::util::digest(text)});}else{sanitize_operation_value(value);}}else{sanitize_operation_value(value);}}},serde_json::Value::Array(values)=>for value in values{sanitize_operation_value(value)},serde_json::Value::String(text)=>{for marker in ["Bearer ","token=","password=","secret=","api_key="]{if let Some(pos)=text.to_ascii_lowercase().find(&marker.to_ascii_lowercase()){let end=text[pos..].find(char::is_whitespace).map(|v|pos+v).unwrap_or(text.len());text.replace_range(pos..end,"[REDACTED]");break;}}},_=>{}}}
@@ -223,6 +330,91 @@ pub fn count(tx: &Transaction<'_>, namespace: &str) -> Result<usize> { Ok(tx.que
         assert_eq!(metrics["scope"],"local_only");
         assert!(!metrics.to_string().contains("PRIVATE_SECRET"));
         assert!(!metrics.to_string().contains("TOP_SECRET"));
+    }
+
+    #[test]
+    fn node_flow_events_follow_peer_identity_and_omit_payloads(){
+        let d=tempfile::tempdir().unwrap();
+        let store=Store::open(&d.path().join("db")).unwrap();
+        let parent="0123456789abcdef01234567";
+        let child="89abcdef0123456701234567";
+        let local=store.operation_start("git_log","w","p",
+            &serde_json::json!({"workspace":"w","project":"p"})).unwrap();
+        store.operation_finish(local,"succeeded",1,Some(&serde_json::json!({"commits":["local"]})),"","","").unwrap();
+        let outbound=store.operation_start("node_read","","",
+            &serde_json::json!({"node_id":child,"tool":"git_log",
+                "arguments":{"workspace":"w","project":"p","limit":12,"secret":"INPUT_PRIVATE"}})).unwrap();
+        store.operation_finish(outbound,"succeeded",34,
+            Some(&serde_json::json!({"commits":[
+                {"subject":"TOP_SECRET_PRIVATE"},{"subject":"STILL_SECRET"}]})),
+            "","","").unwrap();
+        let inbound=store.operation_start("transfer_read_file","w","p",
+            &serde_json::json!({"parent_node":parent,"arguments":{"path":"private.env"}})).unwrap();
+        store.operation_finish(inbound,"succeeded",56,
+            Some(&serde_json::json!({"lines_returned":2,"content":"SECRET_FILE_BYTES"})),
+            "","","").unwrap();
+        let failed=store.operation_start("node_write","w","p",
+            &serde_json::json!({"node_id":child,"tool":"git_commit",
+                "arguments_sha256":"hashed-only"})).unwrap();
+        store.operation_finish(failed,"failed",67,None,"","PROJECT_BUSY","DANGEROUS_ERROR_DETAILS").unwrap();
+        let running=store.operation_start("node_dashboard_write","w","p",
+            &serde_json::json!({"node_id":child,"tool":"run_command"})).unwrap();
+        let invalid=store.operation_start("transfer_git_log","w","p",
+            &serde_json::json!({"parent_node":"not-a-valid-node"})).unwrap();
+        store.operation_finish(invalid,"succeeded",1,None,"","","").unwrap();
+
+        let snapshot=store.node_flow_events(150).unwrap();
+        let events=snapshot["events"].as_array().unwrap();
+        assert_eq!(events.len(),4);
+        assert_eq!(snapshot["scope"],"local_only");
+        assert_eq!(snapshot["contains_payloads"],false);
+        let outgoing=events.iter().find(|e|e["seq"]==outbound).unwrap();
+        assert_eq!(outgoing["peer_id"],child);
+        assert_eq!(outgoing["side"],"outgoing");
+        assert_eq!(outgoing["tool"],"git_log");
+        assert_eq!(outgoing["workspace"],"w");
+        assert_eq!(outgoing["project"],"p");
+        assert_eq!(outgoing["result_summary"],"2 条提交");
+        assert_eq!(outgoing["duration_ms"],34);
+        let incoming=events.iter().find(|e|e["seq"]==inbound).unwrap();
+        assert_eq!(incoming["peer_id"],parent);
+        assert_eq!(incoming["side"],"incoming");
+        assert_eq!(incoming["result_summary"],"2 行");
+        let failure=events.iter().find(|e|e["seq"]==failed).unwrap();
+        assert_eq!(failure["result_summary"],"执行失败 · PROJECT_BUSY");
+        let waiting=events.iter().find(|e|e["seq"]==running).unwrap();
+        assert_eq!(waiting["result_summary"],"等待返回");
+        assert!(waiting["finished"].is_null());
+        for secret in ["TOP_SECRET_PRIVATE","STILL_SECRET","INPUT_PRIVATE",
+                "SECRET_FILE_BYTES","private.env","DANGEROUS_ERROR_DETAILS"] {
+            assert!(!snapshot.to_string().contains(secret),"leaked {secret}");
+        }
+    }
+
+    #[test]
+    fn node_flow_uses_safe_summaries_for_redacted_operation_logs(){
+        let d=tempfile::tempdir().unwrap();
+        let store=Store::open(&d.path().join("db")).unwrap();
+        let peer="0123456789abcdef01234567";
+        let old=store.operation_start("node_read","","",
+            &serde_json::json!({"node_id":peer,"tool":"git_log"})).unwrap();
+        store.operation_finish(old,"succeeded",20,
+            Some(&serde_json::json!({"redacted":true,"bytes":401,"sha256":"sha-only"})),
+            "","","").unwrap();
+        let current=store.operation_start("transfer_git_log","w","p",
+            &serde_json::json!({"parent_node":peer,"arguments":{"limit":10}})).unwrap();
+        store.operation_finish(current,"succeeded",30,
+            Some(&serde_json::json!({"redacted":true,"bytes":812,
+                "sha256":"sha-only","result_summary":"3 条提交"})),
+            "","","").unwrap();
+        let snapshot=store.node_flow_events(20).unwrap();
+        let events=snapshot["events"].as_array().unwrap();
+        assert_eq!(events.len(),2);
+        assert_eq!(events[0]["seq"],current);
+        assert_eq!(events[0]["result_summary"],"3 条提交");
+        assert_eq!(events[1]["seq"],old);
+        assert_eq!(events[1]["result_summary"],"响应已记录 · 401 B");
+        assert!(!snapshot.to_string().contains("sha-only"));
     }
     #[test] fn operation_log_redacts_and_tracks_diff(){let d=tempfile::tempdir().unwrap();let s=Store::open(&d.path().join("db")).unwrap();let id=s.operation_start("apply_patch","root","demo",&serde_json::json!({"authorization":"Bearer abc","path":"src/main.rs","environment":{"TEST_DATABASE_URL":"postgres://user:password@127.0.0.1:5432/test"}})).unwrap();s.operation_finish(id,"succeeded",12,Some(&serde_json::json!({"changed":true})),"--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n","","").unwrap();let detail=s.operation(id).unwrap();assert_eq!(detail["added_lines"],1);assert_eq!(detail["removed_lines"],1);assert_eq!(detail["input"]["authorization"],"[REDACTED]");assert_eq!(detail["input"]["environment"]["TEST_DATABASE_URL"],"[REDACTED]");}
 }

@@ -65,6 +65,33 @@
 .node-topology-detail p{margin:0;color:var(--text)}
 .node-topology-detail .node-topology-detail-muted{color:var(--muted)}
 .node-topology-detail .node-topology-jump{margin-left:auto;white-space:nowrap}
+.node-topology-flow-meta{
+  fill:var(--muted);font-size:10px;font-weight:650;
+  paint-order:stroke;stroke:var(--panel2);stroke-width:5px;
+  stroke-linejoin:round;pointer-events:none;
+}
+.node-topology-flow-meta[data-state="succeeded"]{fill:var(--accent)}
+.node-topology-flow-meta[data-state="running"]{fill:var(--amber)}
+.node-topology-flow-meta[data-state="failed"],
+.node-topology-flow-meta[data-state="interrupted"]{fill:var(--red)}
+.node-topology-flow-meta.is-dimmed{opacity:.12}
+.node-topology-recent{flex:1 1 100%;min-width:0;padding-top:11px;border-top:1px solid var(--border)}
+.node-topology-recent-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:9px}
+.node-topology-recent-heading strong{font-size:11px;color:var(--text)}
+.node-topology-recent-heading a{font-size:11px}
+.node-topology-recent-list{display:grid;gap:6px}
+.node-topology-recent-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(90px,1fr) minmax(180px,1.4fr);gap:8px;align-items:center;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--panel);font-size:11px}
+.node-topology-recent-row span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.node-topology-operation-link{font:650 11px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
+.node-topology-operation-target{color:var(--muted)}
+.node-topology-operation-status{color:var(--accent);text-align:right}
+.node-topology-operation-status[data-state="running"]{color:var(--amber)}
+.node-topology-operation-status[data-state="failed"],.node-topology-operation-status[data-state="interrupted"]{color:var(--red)}
+@media(max-width:760px){
+  .node-topology-recent-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .node-topology-operation-status{grid-column:1/-1;text-align:left}
+}
+.operation-entry.operation-deep-linked{outline:2px solid var(--accent);outline-offset:2px}
 @keyframes node-topology-flow{to{stroke-dashoffset:-38}}
 @media(prefers-reduced-motion:reduce){.node-topology-link{animation:none}.node-topology-card{transition:none}}
 @media(max-width:760px){

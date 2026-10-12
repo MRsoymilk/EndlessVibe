@@ -289,9 +289,10 @@ export async function refreshNodes(force=false){
  if(!$("node-identity")||refreshingNodes)return;
  refreshingNodes=true;
  try{
-  const [discovery,pending,config,metrics]=await Promise.all([
+  const [discovery,pending,config,metrics,flows]=await Promise.all([
    get("/api/nodes"),get("/api/nodes/pending"),get("/api/config"),
-   get("/api/nodes/metrics").catch(()=>null)
+   get("/api/nodes/metrics").catch(()=>null),
+   get("/api/nodes/flow-events?limit=120").catch(()=>null)
   ]);
   const peers=await get("/api/nodes/peers");
   localConfig=config;
@@ -310,7 +311,7 @@ export async function refreshNodes(force=false){
   if(force||!document.querySelector("#node-trusted-list details.node-grant-details[open]"))
    renderTrusted(peers.peers||[]);
   renderTransferMetrics(metrics);
-  updateNodeTopology(discovery,pending.pending||[],peers.peers||[]);
+  updateNodeTopology(discovery,pending.pending||[],peers.peers||[],flows);
   setText("node-updated","Updated "+formatTime(Math.floor(Date.now()/1000)));
  }catch(e){status("Nodes 刷新失败："+e.message,true)}
  finally{refreshingNodes=false}

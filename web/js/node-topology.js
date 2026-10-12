@@ -146,6 +146,65 @@ export function layoutNodeTopology(model) {
   return {positions, discoveredY: discovered.length ? discoveredY : null};
 }
 
+
+// Each node displays only local operation_log rows that explicitly identify
+// its peer. Cross-machine sequence numbers must never be treated as a shared ID.
+export function matchNodeFlowEvents(model, response, maxPerPeer = 6) {
+  const byPeer = new Map();
+  const trusted = new Map(model.nodes.filter(n => n.kind === "trusted")
+    .map(n => [n.id, n]));
+  if (response?.scope !== "local_only" || !Array.isArray(response.events)) return byPeer;
+  const ordered = response.events.filter(e => Number.isSafeInteger(e?.seq) && e.seq > 0)
+    .sort((a, b) => b.seq - a.seq);
+  for (const event of ordered) {
+    const peer = trusted.get(event.peer_id);
+    if (!peer || !["parent","child"].includes(peer.role) ||
+        (peer.role === "child" ? "outgoing" : "incoming") !== event.side)
+      continue;
+    const items = byPeer.get(peer.id) || [];
+    if (items.length >= maxPerPeer || items.some(existing => existing.seq === event.seq))
+      continue;
+    items.push(event);
+    byPeer.set(peer.id, items);
+  }
+  return byPeer;
+}
+
+function eventLabel(edge, event, available) {
+  if (!available) return "本机日志暂不可用";
+  if (!event) return edge.kind === "request" ? "暂无近期请求" : "暂无近期结果";
+  const seq = "#" + event.seq;
+  const tool = safeString(event.tool, "unknown");
+  if (edge.kind === "request") {
+    const target = [safeString(event.workspace), safeString(event.project)].filter(Boolean).join("/");
+    return seq + " · " + tool + (target ? " · " + target : "");
+  }
+  if (event.status === "running") return seq + " · 等待结果";
+  const summary = safeString(event.result_summary, "状态未知");
+  const duration = Number.isFinite(event.duration_ms) && event.duration_ms >= 0 ?
+    " · " + event.duration_ms + " ms" : "";
+  return seq + " · " + summary + duration;
+}
+function shortEventText(text, max = 39) {
+  const value = String(text);
+  return value.length > max ? value.slice(0, max - 1) + "…" : value;
+}
+function renderFlowLabels() {
+  if (!view?.model) return;
+  for (const edge of view.model.edges) {
+    const parts = view.paths.get(edge.key);
+    if (!parts?.event) continue;
+    const latest = view.flows.get(edge.peerKey)?.[0];
+    const text = eventLabel(edge, latest, view.flowAvailable);
+    setText(parts.event, shortEventText(text));
+    const state = latest?.status || "empty";
+    parts.event.dataset.state = view.flowAvailable ? state : "unavailable";
+    parts.event.setAttribute("aria-label", text);
+    const title = parts.event.querySelector("title");
+    if (title) title.textContent = text;
+  }
+}
+
 function setText(target, value) {
   if (target && target.textContent !== String(value)) target.textContent = String(value);
 }
@@ -198,6 +257,42 @@ function showDetail(item) {
     host.append(element("p", "node-topology-detail-muted",
       "授权 Project: " + item.grants.map(g => g.workspace + "/" + g.project).join(", ")));
   }
+  if (item.kind === "trusted") {
+    const recent = element("section", "node-topology-recent");
+    const heading = element("div", "node-topology-recent-heading");
+    heading.append(element("strong", "", "最近的操作请求 / 返回 · 本机日志"));
+    const all = element("a", "", "操作日志 ↗");
+    all.href = "/operations";
+    heading.append(all);
+    recent.append(heading);
+    const entries = view.flows.get(item.id) || [];
+    if (!view.flowAvailable) {
+      recent.append(element("p", "node-topology-detail-muted", "操作记录暂不可用"));
+    } else if (!entries.length) {
+      recent.append(element("p", "node-topology-detail-muted", "暂无该节点的近期操作记录"));
+    } else {
+      const list = element("div", "node-topology-recent-list");
+      for (const event of entries.slice(0, 5)) {
+        const row = element("div", "node-topology-recent-row");
+        const link = element("a", "node-topology-operation-link",
+          "#" + event.seq + " · " + event.tool);
+        link.href = "/operations?seq=" + encodeURIComponent(event.seq);
+        const target = [event.workspace, event.project].filter(Boolean).join("/");
+        const info = element("span", "node-topology-operation-target", target || "节点级操作");
+        const result = element("span", "node-topology-operation-status",
+          safeString(event.result_summary, "等待结果") +
+          (event.status === "running" ? "" : " · " + event.duration_ms + " ms"));
+        result.dataset.state = event.status;
+        const when = Number.isFinite(event.started) && event.started > 0 ?
+          new Date(event.started * 1000).toLocaleTimeString() : "时间未知";
+        row.title = when + " · " + event.side + " · " + (target || "节点级操作");
+        row.append(link, info, result);
+        list.append(row);
+      }
+      recent.append(list);
+    }
+    host.append(recent);
+  }
   if (item.kind !== "local") {
     const targetId = item.kind === "trusted" ? "node-trusted-list" :
       item.kind === "pending" ? "node-pending-list" : "node-discovered-list";
@@ -226,6 +321,7 @@ function selectNode(key) {
     const edge = view.model.edges.find(e => e.key === edgeKey);
     parts.path.classList.toggle("is-dimmed", key !== "local" && edge?.peerKey !== key);
     parts.label.classList.toggle("is-dimmed", key !== "local" && edge?.peerKey !== key);
+    parts.event?.classList.toggle("is-dimmed", key !== "local" && edge?.peerKey !== key);
   }
   showDetail(view.model.nodes.find(item => item.key === key));
 }
@@ -281,6 +377,10 @@ function drawGeometry() {
     part.path.setAttribute("d", info.path);
     part.label.setAttribute("x", info.x);
     part.label.setAttribute("y", info.y);
+    if (part.event) {
+      part.event.setAttribute("x", info.x);
+      part.event.setAttribute("y", info.y + (edge.kind === "request" ? -18 : 19));
+    }
   }
 }
 
@@ -408,6 +508,7 @@ export function mountNodeTopology() {
   view = {
     canvas, scene, svg, cardsLayer, paths: new Map(), cards: new Map(),
     positions: new Map(), manual: new Set(), model: null, selected: "local",
+    flowAvailable: false, flows: new Map(),
     x: 0, y: 0, scale: 1, drag: null, userMoved: false, discoveredY: null,
     sectionLabel: null, zoomLabel: document.getElementById("node-topology-zoom"),
     detail: document.getElementById("node-topology-detail")
@@ -427,7 +528,7 @@ export function mountNodeTopology() {
   window.addEventListener("resize", () => {if (view && !view.userMoved) fitTopology();});
 }
 
-export function updateNodeTopology(discovery, pending, peers) {
+export function updateNodeTopology(discovery, pending, peers, flowResponse = null) {
   if (!view) return;
   const model = deriveNodeTopology(discovery, pending, peers);
   const previousIds = [...view.cards.keys()].sort().join("\u0000");
@@ -441,6 +542,8 @@ export function updateNodeTopology(discovery, pending, peers) {
   }
   view.positions = newPositions;
   view.model = model;
+  view.flowAvailable = flowResponse?.scope === "local_only" && Array.isArray(flowResponse.events);
+  view.flows = matchNodeFlowEvents(model, flowResponse);
   view.discoveredY = layout.discoveredY;
 
   const nextKeys = new Set(model.nodes.map(n => n.key));
@@ -468,7 +571,7 @@ export function updateNodeTopology(discovery, pending, peers) {
   const nextEdges = new Set(model.edges.map(e => e.key));
   for (const [key, parts] of view.paths) {
     if (!nextEdges.has(key)) {
-      parts.path.remove(); parts.label.remove(); view.paths.delete(key);
+      parts.path.remove(); parts.label.remove(); parts.event?.remove(); view.paths.delete(key);
     }
   }
   for (const edge of model.edges) {
@@ -481,13 +584,20 @@ export function updateNodeTopology(discovery, pending, peers) {
       const label = svgElement("text", {class: "node-topology-edge-label node-topology-edge-label--" + edge.kind,
         "text-anchor": "middle"});
       label.textContent = edge.label;
-      view.svg.append(path, label);
-      parts = {path, label};
+      const event = edge.kind === "request" || edge.kind === "response" ?
+        svgElement("text", {
+          class: "node-topology-flow-meta node-topology-flow-meta--" + edge.kind,
+          "text-anchor": "middle"
+        }) : null;
+      if (event) view.svg.append(path, label, event);
+      else view.svg.append(path, label);
+      parts = {path, label, event};
       view.paths.set(edge.key, parts);
     }
     const dimmed = view.selected !== "local" && edge.peerKey !== view.selected;
     parts.path.classList.toggle("is-dimmed", dimmed);
     parts.label.classList.toggle("is-dimmed", dimmed);
+    parts.event?.classList.toggle("is-dimmed", dimmed);
   }
   if (view.discoveredY !== null) {
     if (!view.sectionLabel) {
@@ -501,6 +611,7 @@ export function updateNodeTopology(discovery, pending, peers) {
   }
 
   drawGeometry();
+  renderFlowLabels();
   if (previousIds !== nextIds && !view.userMoved) fitTopology();
   if (!model.nodes.some(n => n.key === view.selected)) view.selected = "local";
   showDetail(model.nodes.find(n => n.key === view.selected));
