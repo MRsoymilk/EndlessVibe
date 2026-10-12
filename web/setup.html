@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1018">
+<title>EndlessVibe · 初始化向导</title>
+<link rel="icon" type="image/png" href="/assets/EndlessVibe.png">
+<script src="/assets/js/preferences-init.js"></script>
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/theme.css">
+<link rel="stylesheet" href="/assets/setup.css">
+<script type="module" src="/assets/js/setup.js" defer></script>
+</head>
+<body class="wizard-body">
+<main class="wizard-shell">
+<header class="wizard-header">
+<div class="wizard-brand"><img src="/assets/EndlessVibe.png" alt="" width="72" height="48"><div><p class="eyebrow">ENDLESSVIBE · FIRST RUN</p><h1>初始化向导</h1><p>仅在运行 <code>--init</code> 时提供，本机访问</p></div></div>
+<div class="display-preferences" role="group" aria-label="主题和语言">
+<label class="display-preference" for="theme-select"><span>主题</span><select id="theme-select" aria-label="主题"><option value="dark">深色</option><option value="light">浅色</option></select></label>
+<label class="display-preference" for="language-select"><span>语言</span><select id="language-select" aria-label="语言"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
+</div>
+</header>
+<nav class="wizard-nav" aria-label="初始化流程"><ol id="wizard-progress">
+<li><button type="button" data-wizard-target="0" aria-current="step"><span class="wizard-number">1</span><span>连接域名</span></button></li>
+<li><button type="button" data-wizard-target="1" disabled><span class="wizard-number">2</span><span>Workspace</span></button></li>
+<li><button type="button" data-wizard-target="2" disabled><span class="wizard-number">3</span><span>授权 Project</span></button></li>
+<li><button type="button" data-wizard-target="3" disabled><span class="wizard-number">4</span><span>完成配置</span></button></li>
+</ol></nav>
+<div id="setup-load-status" class="write-status" role="status" aria-live="polite"></div>
+<div id="wizard-navigation-status" class="write-status" role="status" aria-live="polite"></div>
+
+<section data-wizard-step="0" class="wizard-stage setup-page" aria-labelledby="setup-domain-title">
+<div class="wizard-stage-heading"><div><p class="eyebrow">STEP 1 / 4</p><h2 id="setup-domain-title">连接域名</h2><p>配置供 ChatGPT 访问的 HTTPS 地址。先准备自己的域名、Cloudflare Tunnel 或 ngrok 地址。</p></div><span id="setup-state" class="setup-state" data-state="new">待配置</span></div>
+<section class="config-card full" aria-labelledby="setup-status-title">
+<div class="config-heading"><h3 id="setup-status-title">连接配置状态</h3><span id="setup-host-os">—</span></div>
+<div class="setup-state-grid"><article><p class="label">已保存地址</p><strong class="mono-value" id="setup-saved-url">—</strong><p>监听 <code id="setup-saved-bind">—</code></p></article><article><p class="label">当前运行地址</p><strong class="mono-value" id="setup-active-url">—</strong><p>监听 <code id="setup-active-bind">—</code></p></article></div>
+<p id="setup-state-note" class="config-note">正在读取配置…</p>
+<div id="setup-environment-note" class="setup-notice" hidden><strong>启动参数可能覆盖配置</strong><p id="setup-environment-variables">环境变量：<code id="setup-environment-keys"></code></p><p>如保存地址与当前地址不一致，请检查启动参数 <code>--bind</code>、<code>--public-url</code> 及相应环境变量。</p></div>
+<details class="setup-help"><summary>本机配置文件位置</summary><code id="setup-config-path">—</code></details>
+</section>
+<section class="config-card full">
+<form id="setup-connection-form" class="settings-editor">
+<fieldset id="setup-connection-fields" class="setup-fields">
+<label class="setup-domain-label" for="setup-public-url">公网域名或 HTTPS 根地址<input id="setup-public-url" name="public_url" type="text" inputmode="url" autocomplete="url" autocapitalize="none" spellcheck="false" maxlength="2048" placeholder="例如 your-domain.ngrok-free.app，不包含 /mcp" required></label>
+<p id="setup-domain-hint" class="config-note">只填写 HTTPS 根域名，不包含路径、令牌或查询参数。</p>
+<div class="setup-modes" role="group" aria-label="代理部署位置"><label class="setup-mode"><input type="radio" name="connection_mode" value="loopback" checked><span><strong>本机隧道</strong><small>ngrok 或 Cloudflare 代理与 EndlessVibe 运行在同一台主机</small></span></label><label class="setup-mode"><input type="radio" name="connection_mode" value="container"><span><strong>Docker 中的代理</strong><small>隧道服务运行在容器中，EndlessVibe 运行在宿主机</small></span></label></div>
+<div class="setup-preview"><div><span>MCP 地址</span><code id="setup-endpoint-preview">输入域名后生成</code></div><div><span>反向代理上游</span><code id="setup-upstream">—</code></div><div><span>服务监听地址</span><code id="setup-bind-preview">—</code></div></div>
+<p id="setup-loopback-help" class="config-note">将 HTTPS 域名完整转发至上方本机上游地址，保留 /mcp、/.well-known 和 /oauth 路径。</p>
+<p id="setup-container-help" class="config-note" hidden>容器中的 127.0.0.1 指向容器自身。请确保容器能够访问宿主机地址（例如配置 host.docker.internal）；Dashboard 不会向容器或公网开放。</p>
+<details class="setup-help"><summary>ngrok 示例命令</summary><pre class="setup-command"><code id="setup-ngrok-command">输入域名后生成命令</code></pre><p>这里使用 MCP 端口 <code id="setup-tunnel-port">—</code>，不是 Dashboard 的 20001。请先在 ngrok 本机 CLI 完成账号认证，不要把密钥填入本页。</p><a href="https://ngrok.com/docs/getting-started/" rel="noopener noreferrer" target="_blank">ngrok 官方帮助 ↗</a></details>
+<div class="config-reload-actions"><button type="submit" id="setup-save" disabled>保存连接设置</button><span id="setup-save-status" class="write-status" role="status" aria-live="polite"></span></div>
+</fieldset>
+</form>
+<div id="setup-connection-conflict" class="setup-notice" hidden><p>保存期间配置发生了变化，已保留你的输入。</p><button type="button" id="setup-reload-connection">重新载入已保存配置</button></div>
+</section>
+</section>
+
+<section data-wizard-step="1" class="wizard-stage setup-page" aria-labelledby="setup-workspaces-title" hidden>
+<div class="wizard-stage-heading"><div><p class="eyebrow">STEP 2 / 4</p><h2 id="setup-workspaces-title">添加 Workspace</h2><p>登记项目的管理根目录。Workspace 本身不授予访问权限。</p></div><span class="wizard-step-status" id="setup-workspace-count">0</span></div>
+<section class="config-card full">
+<div class="config-heading"><h3>已登记的管理根</h3><span>WORKSPACES</span></div>
+<div id="setup-workspace-list" class="wizard-entry-list">暂无 Workspace</div>
+<form id="setup-workspace-form" class="settings-editor">
+<fieldset id="setup-workspace-fields" class="setup-fields">
+<div class="settings-fields"><label>Workspace 名称<input name="id" type="text" required maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="例如 projects" spellcheck="false"></label>
+<label>管理根绝对路径<input name="path" type="text" required maxlength="4096" placeholder="请填写已存在的项目根目录" spellcheck="false"></label></div>
+<p id="setup-workspace-path-hint" class="config-note">请输入已存在的绝对目录。</p>
+<div class="config-reload-actions"><button type="submit" id="setup-add-workspace" disabled>添加 Workspace</button><span id="setup-workspace-status" class="write-status" role="status" aria-live="polite"></span></div>
+</fieldset></form>
+<div id="setup-workspace-conflict" class="setup-notice" hidden><p>配置已变化。当前表单内容会保留，刷新后可重新提交。</p><button id="setup-reload-workspace" type="button">刷新配置</button></div>
+</section>
+</section>
+
+<section data-wizard-step="2" class="wizard-stage setup-page" aria-labelledby="setup-project-title" hidden>
+<div class="wizard-stage-heading"><div><p class="eyebrow">STEP 3 / 4</p><h2 id="setup-project-title">授权 Project</h2><p>选择具体项目及其权限；默认只读，不自动开放整个 Workspace。</p></div><span class="wizard-step-status" id="setup-project-count">0</span></div>
+<section class="config-card full">
+<div class="config-heading"><h3>已登记的 Project</h3><span>EXPLICIT ACCESS</span></div>
+<div id="setup-project-list" class="wizard-entry-list">暂无 Project</div>
+<form id="setup-project-form" class="settings-editor">
+<fieldset id="setup-project-fields" class="setup-fields">
+<div class="settings-fields">
+<label>Workspace<select id="setup-project-workspace" name="workspace" required></select></label>
+<label>Project 名称（可选）<input name="project" type="text" maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="留空使用目录名" spellcheck="false"></label>
+<label class="wizard-full-field">Project 绝对路径<input name="path" type="text" required maxlength="4096" placeholder="必须位于选定 Workspace 内" spellcheck="false"></label>
+<label>执行模式<select name="execution_profile"><option value="isolated">isolated · 受限执行</option><option value="development">development · 开发项目</option></select></label>
+</div>
+<div class="wizard-permissions" role="group" aria-label="Project 权限"><label><input type="checkbox" name="allow_write"> 允许写入文件</label><label><input type="checkbox" name="allow_exec"> 允许执行命令</label><label><input type="checkbox" name="allow_git_commit"> 允许 Git Commit</label></div>
+<p class="config-note">执行命令需要同时允许写入；Git Commit 也需要写入。Git mutation / Push 默认关闭，可在正式启动后通过 Project 权限另行授权。</p>
+<div class="config-reload-actions"><button type="submit" id="setup-add-project">添加并授权 Project</button><span id="setup-project-status" class="write-status" role="status" aria-live="polite"></span></div>
+</fieldset></form>
+<div id="setup-project-conflict" class="setup-notice" hidden><p>配置在保存过程中变化。已保留表单输入，请刷新配置并重试。</p><button id="setup-reload-project" type="button">刷新后重试</button></div>
+</section>
+</section>
+
+<section data-wizard-step="3" class="wizard-stage setup-page" aria-labelledby="setup-complete-title" hidden>
+<div class="wizard-stage-heading"><div><p class="eyebrow">STEP 4 / 4</p><h2 id="setup-complete-title">完成配置并连接 ChatGPT</h2><p>配置已保存。退出初始化模式并正常启动 EndlessVibe 后，再完成公网连接和 OAuth 授权。</p></div><span class="wizard-step-status">READY</span></div>
+<section class="config-card full">
+<h3>关闭初始化模式，正常启动</h3>
+<p class="config-note">在运行 <code>endlessvibe --init</code> 的终端按 <kbd>Ctrl+C</kbd>（或在原服务管理器停止），然后运行以下命令。<strong>正常启动不会再显示本向导。</strong></p>
+<p id="setup-restart-note" class="config-note">正在生成启动说明…</p>
+<p id="setup-restart-command-label" class="config-note">在本机终端执行：</p>
+<pre class="setup-command"><code id="setup-restart-command">—</code></pre>
+<div class="config-reload-actions"><button type="button" id="setup-copy-start">复制启动命令</button><span id="setup-start-status" class="write-status" role="status" aria-live="polite"></span></div>
+<details class="setup-help"><summary>如何重新初始化？</summary><p>停止正在运行的服务后执行 <code>endlessvibe --init</code> 即可。现有配置、Owner Key 和项目授权都将保留。</p></details>
+</section>
+<section class="config-card full">
+<h3>将 MCP 地址添加到 ChatGPT</h3>
+<label class="setup-domain-label" for="setup-mcp-url">MCP URL<input id="setup-mcp-url" readonly spellcheck="false" placeholder="先保存域名"></label>
+<div class="config-reload-actions"><button type="button" id="setup-copy-mcp" disabled>复制 MCP 地址</button><span id="setup-copy-status" class="write-status" role="status" aria-live="polite"></span></div>
+<p id="setup-mcp-note" class="config-note">等待配置…</p>
+<ol class="setup-checklist"><li>确认隧道和服务正常运行；HTTPS 域名必须能够访问 <code>/mcp</code> 与 OAuth 元数据。</li><li>在 <a href="https://chatgpt.com/plugins" target="_blank" rel="noopener noreferrer">ChatGPT Plugins ↗</a> 创建自定义 MCP 服务，粘贴上述地址并选择 OAuth。</li><li>在 EndlessVibe 授权页面使用本机 Owner Key 完成授权，然后在 ChatGPT 中选择 EndlessVibe。</li><li>尝试读取已授权 Project，以实际工具调用确认连接成功。</li></ol>
+<details class="setup-help"><summary>Owner Key 存储位置</summary><code id="setup-owner-key-path">—</code><p>不要将 Owner Key、Token 或其他凭据粘贴到 ChatGPT 对话或 MCP URL 中。</p></details>
+<p class="config-note">公网连通与 ChatGPT 授权不会通过本地向导自动宣称验证成功。</p>
+<button type="button" id="setup-check-restart">检查当前保存状态</button>
+<div id="setup-final-status" class="write-status" role="status" aria-live="polite"></div>
+</section>
+</section>
+
+<footer class="wizard-footer"><button id="wizard-prev" type="button" disabled>上一步</button><span id="wizard-position" role="status" aria-live="polite">第 1 步，共 4 步</span><button id="wizard-next" type="button" disabled>下一步</button></footer>
+</main>
+</body>
+</html>
