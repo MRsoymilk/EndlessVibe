@@ -133,9 +133,78 @@ pub fn apply_owner_directory_permissions(_: &Path) -> anyhow::Result<()> {
     // administrator/System or a shared profile is not supported by this default.
     Ok(())
 }
+/// Render Windows paths for humans without changing the OS-native path used
+/// for file access, ACL checks, or canonicalization.
+///
+/// Windows canonicalize() can return \\?\C:\... or \\?\UNC\server\share.
+/// Users should see C:\... and \\server\share instead. This function must
+/// never be used for authorization decisions or in place of filesystem paths.
+pub fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        windows_display_path(&text)
+    } else {
+        text.into_owned()
+    }
+}
+
+fn windows_display_path(input: &str) -> String {
+    let path = input.replace('/', "\\");
+    let Some(rest) = path.strip_prefix(r"\\?\") else {
+        return path;
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':' && bytes[2] == b'\\' {
+        return rest.to_string();
+    }
+    if rest.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"UNC\")) {
+        let unc = &rest[4..];
+        let mut components = unc.split('\\');
+        if matches!((components.next(), components.next()),
+            (Some(server), Some(share)) if !server.is_empty() && !share.is_empty()) {
+            return format!(r"\\{unc}");
+        }
+    }
+    // Other namespaces (for example volume GUIDs and device paths) do not
+    // have an equivalent ordinary path. Do not disguise their identity.
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_user_paths_are_unprefixed_for_display_only() {
+        assert_eq!(windows_display_path(r"\\?\C:\Users\lww\AppData\Local\EndlessVibe\owner.key"),
+            r"C:\Users\lww\AppData\Local\EndlessVibe\owner.key");
+        assert_eq!(windows_display_path(r"C:\Users\lww\AppData\Roaming\EndlessVibe/config.toml"),
+            r"C:\Users\lww\AppData\Roaming\EndlessVibe\config.toml");
+        assert_eq!(windows_display_path(r"\\?\UNC\server\share\owner.key"),
+            r"\\server\share\owner.key");
+        assert_eq!(windows_display_path(r"\\?\unc\server\share/config.toml"),
+            r"\\server\share\config.toml");
+        assert_eq!(windows_display_path(r"\\?\Volume{GUID}\folder\file"),
+            r"\\?\Volume{GUID}\folder\file");
+        assert_eq!(windows_display_path(r"\\.\PhysicalDrive0"),
+            r"\\.\PhysicalDrive0");
+        assert_eq!(windows_display_path(r"\\?\UNC\server"),
+            r"\\?\UNC\server");
+    }
+
+    #[test]
+    fn display_paths_do_not_mutate_native_paths() {
+        let path = Path::new(r"\\?\C:\Users\lww\AppData\Local\EndlessVibe\owner.key");
+        let unchanged = path.to_path_buf();
+        let rendered = display_path(path);
+        assert_eq!(path, unchanged);
+        if cfg!(windows) {
+            assert_eq!(rendered, r"C:\Users\lww\AppData\Local\EndlessVibe\owner.key");
+        } else {
+            assert_eq!(rendered, unchanged.to_string_lossy());
+        }
+    }
+
     #[test]
     fn identity_and_hardlink_checks() {
         let dir = tempfile::tempdir().unwrap();

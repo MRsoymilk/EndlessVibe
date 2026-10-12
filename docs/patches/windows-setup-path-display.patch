@@ -1,0 +1,133 @@
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -133,9 +133,78 @@
+     // administrator/System or a shared profile is not supported by this default.
+     Ok(())
+ }
++/// Render Windows paths for humans without changing the OS-native path used
++/// for file access, ACL checks, or canonicalization.
++///
++/// Windows canonicalize() can return \\?\C:\... or \\?\UNC\server\share.
++/// Users should see C:\... and \\server\share instead. This function must
++/// never be used for authorization decisions or in place of filesystem paths.
++pub fn display_path(path: &Path) -> String {
++    let text = path.to_string_lossy();
++    if cfg!(windows) {
++        windows_display_path(&text)
++    } else {
++        text.into_owned()
++    }
++}
++
++fn windows_display_path(input: &str) -> String {
++    let path = input.replace('/', "\\");
++    let Some(rest) = path.strip_prefix(r"\\?\") else {
++        return path;
++    };
++    let bytes = rest.as_bytes();
++    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic()
++        && bytes[1] == b':' && bytes[2] == b'\\' {
++        return rest.to_string();
++    }
++    if rest.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"UNC\")) {
++        let unc = &rest[4..];
++        let mut components = unc.split('\\');
++        if matches!((components.next(), components.next()),
++            (Some(server), Some(share)) if !server.is_empty() && !share.is_empty()) {
++            return format!(r"\\{unc}");
++        }
++    }
++    // Other namespaces (for example volume GUIDs and device paths) do not
++    // have an equivalent ordinary path. Do not disguise their identity.
++    path
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    #[test]
++    fn windows_user_paths_are_unprefixed_for_display_only() {
++        assert_eq!(windows_display_path(r"\\?\C:\Users\lww\AppData\Local\EndlessVibe\owner.key"),
++            r"C:\Users\lww\AppData\Local\EndlessVibe\owner.key");
++        assert_eq!(windows_display_path(r"C:\Users\lww\AppData\Roaming\EndlessVibe/config.toml"),
++            r"C:\Users\lww\AppData\Roaming\EndlessVibe\config.toml");
++        assert_eq!(windows_display_path(r"\\?\UNC\server\share\owner.key"),
++            r"\\server\share\owner.key");
++        assert_eq!(windows_display_path(r"\\?\unc\server\share/config.toml"),
++            r"\\server\share\config.toml");
++        assert_eq!(windows_display_path(r"\\?\Volume{GUID}\folder\file"),
++            r"\\?\Volume{GUID}\folder\file");
++        assert_eq!(windows_display_path(r"\\.\PhysicalDrive0"),
++            r"\\.\PhysicalDrive0");
++        assert_eq!(windows_display_path(r"\\?\UNC\server"),
++            r"\\?\UNC\server");
++    }
++
++    #[test]
++    fn display_paths_do_not_mutate_native_paths() {
++        let path = Path::new(r"\\?\C:\Users\lww\AppData\Local\EndlessVibe\owner.key");
++        let unchanged = path.to_path_buf();
++        let rendered = display_path(path);
++        assert_eq!(path, unchanged);
++        if cfg!(windows) {
++            assert_eq!(rendered, r"C:\Users\lww\AppData\Local\EndlessVibe\owner.key");
++        } else {
++            assert_eq!(rendered, unchanged.to_string_lossy());
++        }
++    }
++
+     #[test]
+     fn identity_and_hardlink_checks() {
+         let dir = tempfile::tempdir().unwrap();
+--- a/src/runtime.rs
++++ b/src/runtime.rs
+@@ -232,27 +232,31 @@
+         let file_pending=revision!=active_revision;
+         let startup_override_detected=!matches_active&&service_config_revision(&persisted)?==self.active_service_revision;
+         let config_path=if self.config_path.is_absolute(){self.config_path.clone()}else{std::env::current_dir()?.join(&self.config_path)};
++        // Normalize only user-facing text; never replace the native paths
++        // used by file access, owner-key handling, or authorization checks.
++        let config_display=crate::platform::display_path(&config_path);
++        let owner_key_display=crate::platform::display_path(&self.config.owner_key_path());
+         let executable=std::env::current_exe().unwrap_or_else(|_|PathBuf::from(if cfg!(windows){"endlessvibe.exe"}else{"endlessvibe"}));
+         let start_command=format!("{}{} --config {}",if cfg!(windows){"& "}else{""},
+-            setup_command_argument(&executable.to_string_lossy()),setup_command_argument(&config_path.to_string_lossy()));
++            setup_command_argument(&crate::platform::display_path(&executable)),setup_command_argument(&config_display));
+         let restart_supported=cfg!(any(windows,target_os="linux"));
+         let command=if restart_supported{format!("{start_command} --restart")}else{String::new()};
+         // Show persisted authorization, not the running snapshot: a pending
+         // connection restart must not hide just-saved workspace/project entries.
+         let workspaces=persisted.workspaces.iter().map(|w|json!({
+-            "id":w.id,"path":w.path,"project_count":w.projects.len(),
+-            "projects":w.projects.iter().map(|p|json!({"id":p.id,"path":p.path}))
++            "id":w.id,"path":crate::platform::display_path(&w.path),"project_count":w.projects.len(),
++            "projects":w.projects.iter().map(|p|json!({"id":p.id,"path":crate::platform::display_path(&p.path)}))
+                 .collect::<Vec<_>>()
+         })).collect::<Vec<_>>();
+         let projects=persisted.workspaces.iter().map(|w|w.projects.len()).sum::<usize>();
+         Ok(json!({"revision":revision,"requires_restart":file_pending||!matches_active,
+             "needs_setup":!persisted.server.lan_only&&!persisted.public_connection_configured(),
+-            "host_os":std::env::consts::OS,"config_path":config_path,"owner_key_path":self.config.owner_key_path(),
++            "host_os":std::env::consts::OS,"config_path":config_display,"owner_key_path":owner_key_display,
+             "workspace_count":workspaces.len(),"project_count":projects,"workspaces":workspaces,
+             "saved":setup_connection(&persisted),"active":setup_connection(&self.config),
+             "startup_override_detected":startup_override_detected,"connection_matches_saved":matches_active,
+             "environment_overrides":{"bind":std::env::var_os("ENDLESSVIBE_BIND").is_some(),"public_url":std::env::var_os("ENDLESSVIBE_PUBLIC_URL").is_some()},
+-            "restart":{"supported":restart_supported,"command":command,"start_command":start_command,"dashboard_url":"http://127.0.0.1:20001/setup"},
++            "restart":{"supported":restart_supported,"command":command,"start_command":start_command,"dashboard_url":"http://127.0.0.1:20001/"},
+             "public_reachability":"not_checked","chatgpt_connection":"not_verified"}))
+     }
+     pub fn dashboard_update_connection(&self,mut request:UpdateConnectionRequest)->Result<Value>{
+--- a/tests/integration.rs
++++ b/tests/integration.rs
+@@ -100,6 +100,10 @@
+     let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;});
+     let app=server::create_setup_router(f.rt.clone());let public=server::create_router(f.rt.clone());
+     let initial=json_body(http(&app,"GET","/api/setup",Body::empty(),None,None,None).await).await;
++    assert_eq!(initial["config_path"],serde_json::json!(
++        endlessvibe::platform::display_path(&f.rt.config_path)));
++    assert_eq!(initial["owner_key_path"],serde_json::json!(
++        endlessvibe::platform::display_path(&f.rt.config.owner_key_path())));
+     assert_eq!(initial["needs_setup"],true);assert_eq!(initial["requires_restart"],false);
+     assert_eq!(initial["workspace_count"],0);assert_eq!(initial["active"]["bind"],"127.0.0.1:20000");
+     assert_eq!(initial["public_reachability"],"not_checked");assert_eq!(initial["chatgpt_connection"],"not_verified");
