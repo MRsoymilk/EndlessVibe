@@ -122,6 +122,22 @@ cargo build --release
 cargo test --locked
 ```
 
+**发布包（Windows 单 EXE / Linux AppImage）：**
+
+```powershell
+# Windows 10/11 x64，要求 Rust MSVC 与 C++ Build Tools
+.\deploy\windows\Package.ps1
+# 输出：dist\windows\endlessvibe.exe（只有这一个 EXE）
+```
+
+```bash
+# Linux x86_64 / aarch64，需事先安装官方 appimagetool
+./deploy/linux/package-appimage.sh --appimagetool /path/to/appimagetool-x86_64.AppImage
+# 输出：dist/linux/EndlessVibe-VERSION-x86_64.AppImage
+```
+
+Windows 脚本使用静态 MSVC CRT，并审核可执行文件的系统 DLL 导入；Linux 脚本构建 AppDir，调用 appimagetool 并检查 AppImage 能否运行 `--version`。两种格式的 Web 资源都内嵌在可执行文件中，**不打包 config.toml、Owner Key 或私有状态**。完整步骤、离线构建和发行限制见 [打包与分发](docs/PACKAGING.md)。
+
 ### 2. 进入初始化向导
 
 解压发行包后可直接运行程序，不需要在使用者电脑上安装 Rust。首次初始化以及需要重新配置时，在终端执行：
@@ -468,6 +484,7 @@ cargo build --release
 | 文档 | 内容 |
 | --- | --- |
 | [Tools](docs/TOOLS.md) | MCP 工具及参数 |
+| [Packaging](docs/PACKAGING.md) | Windows 单 EXE、Linux AppImage、依赖检查与分发 |
 | [Execution](docs/EXECUTION.md) | Bubblewrap、Host、Toolchain、Job 与预检 |
 | [Platform Support](docs/PORTABILITY.md) | Linux、Windows、macOS 的移植状态与平台限制 |
 | [Security](docs/SECURITY.md) | 权限、安全边界与部署注意事项 |

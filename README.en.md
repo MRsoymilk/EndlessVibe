@@ -122,6 +122,22 @@ cargo build --release
 cargo test --locked
 ```
 
+**Distributable builds (one Windows EXE / one Linux AppImage):**
+
+```powershell
+# Windows 10/11 x64 with Rust MSVC and C++ Build Tools
+.\deploy\windows\Package.ps1
+# Output: dist\windows\endlessvibe.exe (no sidecar files)
+```
+
+```bash
+# Linux x86_64 / aarch64 with the official appimagetool installed
+./deploy/linux/package-appimage.sh --appimagetool /path/to/appimagetool-x86_64.AppImage
+# Output: dist/linux/EndlessVibe-VERSION-x86_64.AppImage
+```
+
+The Windows builder uses a statically linked MSVC CRT and audits OS DLL imports. The Linux builder assembles an AppDir and smoke-tests the resulting AppImage. Both include the Web UI in the executable and **exclude config.toml, Owner Key, and private state**. See [Packaging and Distribution](docs/PACKAGING.md) for offline builds and compatibility limits.
+
 ### 2. Start initialization
 
 A downloaded release executable does not require Rust on the recipient's computer. To initialize a new installation or reconfigure an existing one, open a terminal:
@@ -470,6 +486,7 @@ Keep changes focused, review diffs, and run relevant tests before proposing a co
 | Document | What it covers |
 | --- | --- |
 | [MCP Tools](docs/TOOLS.md) | Exposed tools, arguments, and behavior |
+| [Packaging](docs/PACKAGING.md) | Windows single EXE, Linux AppImage, dependency audits and distribution |
 | [Execution](docs/EXECUTION.md) | Bubblewrap, Host, toolchains, jobs, preflight |
 | [Platform Support](docs/PORTABILITY.md) | Portability status and OS-specific limitations |
 | [Security](docs/SECURITY.md) | Authorization, trust boundaries, deployment |
