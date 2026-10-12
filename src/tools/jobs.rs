@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone,Serialize,Deserialize)] pub struct JobRecord { pub id:String,pub workspace:String,#[serde(default)]pub project:String,pub program:String,pub request_id:String,pub fingerprint:String,pub status:String,pub created:u64,#[serde(default)]pub created_ms:u64,pub started:Option<u64>,#[serde(default)]pub started_ms:Option<u64>,pub finished:Option<u64>,pub exit_code:Option<i32>,pub output_bytes_total:u64,pub output_truncated:bool,pub backend:String,pub error:Option<String>,#[serde(default)]pub preflight:Value,#[serde(default)]pub summary:Value,#[serde(default)]pub summary_capture:Value,#[serde(default)]pub task_id:Option<String>,#[serde(default)]pub stage:Option<String> }
 #[derive(Serialize,Deserialize)] struct JobRef{id:String,fingerprint:String}
-pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,cache_gate:Arc<RwLock<()>>,admission:Mutex<Admission>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>> }
+pub struct Jobs { db:Arc<Store>,config:Arc<Config>,slots:Arc<Semaphore>,cache_gate:Arc<RwLock<()>>,admission:Mutex<Admission>,submission:tokio::sync::Mutex<()>,active:Mutex<HashMap<String,CancellationToken>>,recovery_locks:Mutex<Vec<tokio::sync::OwnedMutexGuard<()>>> }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum Admission{Accepting,ServiceUpdate,ShuttingDown}
 impl Admission{
@@ -58,12 +58,12 @@ const MCP_JOB_SUMMARY_MAX_BYTES:usize=16*1024;
 const MCP_JOB_TAIL_BYTES:usize=4096;
 fn sensitive_summary_key(key:&str)->bool{let key=key.to_ascii_lowercase();["authorization","access_token","refresh_token","password","passwd","secret","api_key","apikey","owner_key","private_key","credential"].iter().any(|part|key.contains(part))}
 fn sanitize_summary(value:&mut Value){match value{Value::Object(map)=>for(key,value)in map.iter_mut(){if sensitive_summary_key(key){*value=Value::String("[REDACTED]".into());}else{sanitize_summary(value);}},Value::Array(values)=>for value in values{sanitize_summary(value)},Value::String(text)=>{for marker in ["Bearer ","token=","password=","secret=","api_key="]{if let Some(pos)=text.to_ascii_lowercase().find(&marker.to_ascii_lowercase()){let end=text[pos..].find(char::is_whitespace).map(|v|pos+v).unwrap_or(text.len());text.replace_range(pos..end,"[REDACTED]");break;}}},_=>{}}}
-fn compact_preflight(value:&Value)->Value{let mut out=serde_json::Map::new();for key in ["backend","execution_profile","network","network_source","environment_keys","detected_programs","programs","toolchains"]{if let Some(value)=value.get(key){out.insert(key.into(),value.clone());}}Value::Object(out)}
+fn compact_preflight(value:&Value)->Value{let mut out=serde_json::Map::new();for key in ["backend","execution_profile","network","network_source","environment_keys","detected_programs","programs","toolchains","isolation"]{if let Some(value)=value.get(key){out.insert(key.into(),value.clone());}}Value::Object(out)}
 fn compact_summary(value:&Value)->Value{if value.is_null(){return Value::Null;}let text=serde_json::to_string(value).unwrap_or_default();if text.len()<=MCP_JOB_SUMMARY_MAX_BYTES{return value.clone();}let keys=value.as_object().map(|m|m.keys().take(32).cloned().collect::<Vec<_>>()).unwrap_or_default();json!({"omitted":true,"bytes":text.len(),"top_level_keys":keys,"message":"Job summary is retained server-side but omitted from the default MCP response because it is large."})}
 fn terminal(status:&str)->bool{!matches!(status,"queued"|"running")}
 fn count_before_label(text:&str,label:&str)->Option<u64>{let words=text.split_whitespace().collect::<Vec<_>>();for(index,word)in words.iter().enumerate(){if word.trim_matches(|c:char|!c.is_ascii_alphabetic())==label&&index>0{if let Ok(value)=words[index-1].trim_matches(|c:char|!c.is_ascii_digit()).parse(){return Some(value);}}}None}
 fn summarize_output(r:&JobRecord,bytes:&[u8])->Value{let text=String::from_utf8_lossy(bytes);let mut suites=0u64;let(mut passed,mut failed,mut ignored,mut measured,mut filtered)=(0u64,0u64,0u64,0u64,0u64);for line in text.lines().filter(|line|line.contains("test result:")){suites+=1;passed+=count_before_label(line,"passed").unwrap_or(0);failed+=count_before_label(line,"failed").unwrap_or(0);ignored+=count_before_label(line,"ignored").unwrap_or(0);measured+=count_before_label(line,"measured").unwrap_or(0);filtered+=count_before_label(line,"filtered").unwrap_or(0);}let last_line=text.lines().rev().map(str::trim).find(|line|!line.is_empty()).map(|line|util::bounded_text(line,512));if suites>0{json!({"kind":"test_suite","suite_summaries":suites,"passed":passed,"failed":failed,"ignored":ignored,"measured":measured,"filtered_out":filtered,"partial":r.output_truncated,"exit_code":r.exit_code,"last_line":last_line})}else{json!({"kind":"command","exit_code":r.exit_code,"partial":r.output_truncated,"last_line":last_line})}}
-fn capture_job_summary(path:&Path)->(Value,Value){
+pub(super) fn capture_job_summary(path:&Path)->(Value,Value){
     let mut options=OpenOptions::new();options.read(true);
     #[cfg(unix)]options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);
     #[cfg(windows)]options.custom_flags(0x0020_0000);
@@ -93,7 +93,7 @@ impl Output{
 }
 impl Jobs{
     pub fn new(db:Arc<Store>,config:Arc<Config>)->Result<Arc<Self>>{
-        let s=Arc::new(Self{db,slots:Arc::new(Semaphore::new(config.limits.max_jobs)),cache_gate:Arc::new(RwLock::new(())),admission:Mutex::new(Admission::Accepting),config,submission:tokio::sync::Mutex::new(()),active:Mutex::new(HashMap::new())});
+        let s=Arc::new(Self{db,slots:Arc::new(Semaphore::new(config.limits.max_jobs)),cache_gate:Arc::new(RwLock::new(())),admission:Mutex::new(Admission::Accepting),config,submission:tokio::sync::Mutex::new(()),active:Mutex::new(HashMap::new()),recovery_locks:Mutex::new(Vec::new())});
         let mut records=s.list_records(None,None,None,usize::MAX)?;
         for r in &mut records{let interrupted=matches!(r.status.as_str(),"queued"|"running");let legacy=r.task_id.is_none()&&r.stage.is_none();if legacy{let(task,stage)=tasks::automatic_job_context(&r.id);r.task_id=Some(task);r.stage=Some(stage);}if interrupted{if let Ok(path)=process::job_summary_host_path(&s.config,&r.workspace,&r.project,&r.id){let(summary,capture)=capture_job_summary(&path);r.summary=summary;r.summary_capture=capture;}r.status="interrupted".into();r.finished=Some(util::now());r.error=Some("Service restarted; this command is never automatically replayed".into());}if legacy||interrupted{s.save(r,None)?;}if legacy{if let Err(error)=tasks::backfill_legacy_job(&s.db,&r.workspace,&r.project,&r.id,&r.status,r.created,r.finished.unwrap_or(r.created)){tracing::warn!(error=%error,job_id=%r.id,"Could not backfill legacy job as automatic task");}}else if interrupted{if let(Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){if let Err(error)=tasks::record_job(&s.db,&r.workspace,&r.project,task,stage,&r.id,"interrupted"){tracing::warn!(error=%error,job_id=%r.id,"Could not update task checkpoint after restart");}}}}
         Ok(s)
@@ -133,6 +133,29 @@ impl Jobs{
         let _admission=self.accepting_admission()?;
         self.cache_gate.clone().try_read_owned().map_err(|_|crate::error::coded(
             "CACHE_BUSY",true,"Execution cache maintenance is in progress; retry this command after cleanup"))
+    }
+    pub(crate) fn with_authorization_reload<T>(&self,reload:impl FnOnce()->Result<T>)->Result<T>{
+        // Use the same order as submission/update: admission, then cache. A
+        // preflight owns a cache reader before it publishes an active Job, so
+        // active_count alone cannot prevent replacing its Project lock.
+        let _admission=self.admission.lock().map_err(|_|crate::error::coded(
+            "SERVICE_UNAVAILABLE",false,"Job admission state is unavailable; service restart required"))?;
+        // Submission resolves its Project before taking the cache reader.
+        // Only try-lock here: submission itself takes admission afterwards.
+        let _submission=if self.config.execution.backend=="appcontainer"{
+            Some(self.submission.try_lock().map_err(|_|crate::error::coded(
+                "PROJECT_BUSY",true,"A Windows command submission is resolving project authorization"))?)
+        }else{None};
+        let _cache_guard=if self.config.execution.backend=="appcontainer"{
+            let pending=self.recovery_locks.lock().map_err(|_|crate::error::coded(
+                "SANDBOX_CLEANUP_PENDING",false,"Windows sandbox recovery locks are unavailable"))?;
+            if !pending.is_empty(){return Err(crate::error::coded("SANDBOX_CLEANUP_PENDING",false,
+                "Windows sandbox cleanup is unresolved; project authorization cannot be reloaded before safe service recovery"));}
+            Some(self.cache_gate.clone().try_write_owned().map_err(|_|crate::error::coded(
+                "PROJECT_BUSY",true,"Finish Windows sandbox Jobs, preflight and cache operations before reloading project authorization"))?)
+        }else{None};
+        // Keep the guards until all Project objects and their locks are published.
+        reload()
     }
     pub fn begin_service_update(self:&Arc<Self>)->Result<ServiceUpdateGuard>{
         let mut admission=self.accepting_admission()?;
@@ -205,18 +228,67 @@ impl Jobs{
         let cache_guard=self.begin_submission()?;
         let project_programs=process::detect_project_programs(&w);
         let detected_programs=process::detect_command_programs(&w,&a.cwd,&a.program,&a.args);let preflight_programs=merge_preflight_programs(explicit_preflight_programs(&a),&detected_programs);let mut preflight=process::preflight_job(&rt.config,&a.program,&preflight_programs,shell).await?;preflight["detected_programs"]=json!(detected_programs);preflight["execution_profile"]=json!(execution_profile);preflight["network"]=json!(effective_network);preflight["network_source"]=json!(network_source);preflight["environment_keys"]=json!(a.environment.keys().cloned().collect::<Vec<_>>());
-        let job_id=util::random_secret()?;let summary_contract=process::job_summary_contract(&rt.config,&w.workspace_id,&w.config.id,&job_id)?;let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell,&project_programs,&a.environment,effective_network,&summary_contract.exposed_path)?;
+        let job_id=util::random_secret()?;let summary_contract=process::job_summary_contract(&rt.config,&w.workspace_id,&w.config.id,&job_id)?;let command=process::build_job_command(&rt.config,&w,&a.program,&a.args,&a.cwd,shell,&project_programs,&preflight_programs,&a.environment,effective_network,&summary_contract.exposed_path)?;
         let permit=self.slots.clone().try_acquire_owned().map_err(|_|crate::error::coded("COMMAND_SLOTS_BUSY",true,"All command slots are occupied; query existing jobs first"))?;
         let lock=w.lock.clone().try_lock_owned().map_err(|_|crate::error::coded_details("PROJECT_BUSY",true,"another operation is using this project",json!({"workspace":a.workspace.clone(),"project":a.project.clone()})))?;
         if a.task_id.is_none(){let(task,stage)=tasks::automatic_job_context(&job_id);a.task_id=Some(task);a.stage=Some(stage);}let now=util::now();let record=JobRecord{id:job_id,workspace:a.workspace,project:a.project,program:if shell{if cfg!(windows){"powershell".into()}else{"bash".into()}}else{a.program},request_id:a.request_id,fingerprint:fingerprint.clone(),status:"queued".into(),created:now,created_ms:util::now_millis(),started:None,started_ms:None,finished:None,exit_code:None,output_bytes_total:0,output_truncated:false,backend:rt.config.execution.backend.clone(),error:None,preflight:preflight.clone(),summary:Value::Null,summary_capture:json!({"status":"pending","reported":false,"cleanup_complete":true}),task_id:a.task_id,stage:a.stage};
         let cancel=self.persist_submission(&rt,&record,&key,&legacy_key,shell)?;
         rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":"queued"}));
         let result=json!({"job_id":record.id,"status":"queued","request_id":record.request_id,"preflight":compact_preflight(&preflight),"summary_contract":{"environment":"ENDLESSVIBE_JOB_SUMMARY","max_bytes":MAX_JOB_SUMMARY_BYTES},"task_id":record.task_id,"stage":record.stage,"reused":false,"canonical_workspace":record.workspace,"canonical_project":record.project,"legacy_addressing":legacy_address,"next":"Poll get_job. It includes a small terminal output tail; call get_job_output only when more log context is needed."});
-        let this=self.clone();let event_rt=rt.clone();let summary_path=summary_contract.host_path;tokio::spawn(async move{let _permit=permit;let _lock=lock;let _cache_guard=cache_guard;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout).await;if let Err(e)=result{record.status="failed".into();record.error=Some(util::bounded_text(&e.to_string(),1024));record.finished=Some(util::now());let _=this.save(&record,None);}let(summary,capture)=capture_job_summary(&summary_path);record.summary=summary;record.summary_capture=capture;let _=this.save(&record,None);if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){let _=tasks::record_job(&this.db,&record.workspace,&record.project,task,stage,&record.id,&record.status);}let audit_target=format!("{}/{}",record.workspace,record.project);let _=this.db.audit("job_finished",&audit_target,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}event_rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":record.status,"exit_code":record.exit_code,"summary_reported":record.summary_capture["reported"],"task_id":record.task_id,"stage":record.stage}));let _=this.prune();});
+        let this=self.clone();let event_rt=rt.clone();let summary_path=summary_contract.host_path;tokio::spawn(async move{let _permit=permit;let mut project_lock=Some(lock);let _cache_guard=cache_guard;let mut record=record;let result=this.worker(&mut record,command,cancel,timeout,event_rt.config_path.clone()).await;if let Err(e)=result{if crate::error::code(&e)=="SANDBOX_CLEANUP_PENDING"{this.stop_accepting();this.recovery_locks.lock().unwrap_or_else(|poison|poison.into_inner()).push(project_lock.take().expect("project lock is held during cleanup"));}record.status="failed".into();let message=if record.backend=="appcontainer"{format!("{e:#}")}else{e.to_string()};record.error=Some(util::bounded_text(&message,1024));record.finished=Some(util::now());let _=this.save(&record,None);}if record.summary_capture["status"]=="pending"{let(summary,capture)=capture_job_summary(&summary_path);record.summary=summary;record.summary_capture=capture;}let _=this.save(&record,None);if let (Some(task),Some(stage))=(record.task_id.as_deref(),record.stage.as_deref()){let _=tasks::record_job(&this.db,&record.workspace,&record.project,task,stage,&record.id,&record.status);}let audit_target=format!("{}/{}",record.workspace,record.project);let _=this.db.audit("job_finished",&audit_target,&record.status,&record.id);if let Ok(mut map)=this.active.lock(){map.remove(&record.id);}event_rt.publish_dashboard("job_changed",json!({"job_id":record.id,"workspace":record.workspace,"project":record.project,"program":record.program,"status":record.status,"exit_code":record.exit_code,"summary_reported":record.summary_capture["reported"],"task_id":record.task_id,"stage":record.stage}));let _=this.prune();});
         Ok(result)
     }
     fn prune(&self)->Result<()>{self.db.maintain(self.config.limits.retained_jobs).map(|_|())}
-    async fn worker(&self,r:&mut JobRecord,mut cmd:tokio::process::Command,cancel:CancellationToken,timeout:u64)->Result<()>{
+    async fn worker(&self,r:&mut JobRecord,command:process::JobCommand,cancel:CancellationToken,timeout:u64,config_path:std::path::PathBuf)->Result<()>{
+        #[cfg(not(windows))]let _=config_path;
+        match command{
+            process::JobCommand::Standard(command)=>self.worker_standard(r,command,cancel,timeout).await,
+            #[cfg(windows)]
+            process::JobCommand::AppContainer(plan)=>self.worker_appcontainer(r,plan,cancel,timeout,config_path).await,
+        }
+    }
+    #[cfg(windows)]
+    async fn worker_appcontainer(&self,r:&mut JobRecord,plan:super::windows_backend::Plan,cancel:CancellationToken,timeout:u64,config_path:std::path::PathBuf)->Result<()>{
+        if cancel.is_cancelled(){r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
+        // ACL enumeration must not block the asynchronous Jobs/control plane.
+        // The caller retains the project and cache guards during preparation.
+        let mut prepared=tokio::task::spawn_blocking(move||plan.prepare(&config_path)).await
+            .map_err(|error|crate::error::coded("SANDBOX_CLEANUP_PENDING",false,
+                format!("Windows sandbox preparation was interrupted; service recovery is required: {error}")))??;
+        if cancel.is_cancelled(){prepared.finish()?;r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
+        r.status="running".into();r.started=Some(util::now());r.started_ms=Some(util::now_millis());
+        if let Err(error)=self.save(r,None){prepared.finish()?;return Err(error);}
+        if let(Some(task),Some(stage))=(r.task_id.as_deref(),r.stage.as_deref()){
+            if let Err(error)=tasks::record_job(&self.db,&r.workspace,&r.project,task,stage,&r.id,"running"){
+                tracing::warn!(error=%error,job_id=%r.id,"Sandbox job is running but task checkpoint update failed");
+            }
+        }
+        let mut output=Output{bytes:vec![],offset:0,total:0};let mut last_save=Instant::now();
+        let result=prepared.run(&cancel,Duration::from_secs(timeout),|stream,bytes|{
+            if !bytes.is_empty(){output.append(stream,bytes,self.config.limits.max_output_bytes);}
+            if (bytes.is_empty()||last_save.elapsed()>=Duration::from_millis(250))&&output.total!=r.output_bytes_total{
+                r.output_bytes_total=output.total;r.output_truncated=output.offset>0;self.save(r,Some(&output))?;last_save=Instant::now();
+            }
+            Ok(())
+        }).await;
+        let summary=prepared.capture_summary();
+        let cleanup=prepared.finish();
+        if let Ok((summary,capture))=summary{r.summary=summary;r.summary_capture=capture;}
+        r.output_bytes_total=output.total;r.output_truncated=output.offset>0;
+        // Cleanup failure takes precedence over a database/output failure: it
+        // is what tells admission to retain the project lock for recovery.
+        cleanup?;
+        self.save(r,Some(&output))?;
+        let outcome=result?;
+        r.exit_code=Some(outcome.exit_code as i32);
+        r.preflight["isolation"]=json!({"kind":"less_privileged_appcontainer","token_verified":outcome.token_verified,
+            "job_empty":outcome.job_empty,"capability_count":1,"capabilities":["registryRead"],"network":false,"cleanup_complete":true});
+        r.status=if outcome.cancelled{"cancelled"}else if outcome.timed_out{"timed_out"}else if outcome.exit_code==0{"succeeded"}else{"failed"}.into();
+        r.finished=Some(util::now());
+        if outcome.timed_out{r.error=Some(format!("Execution exceeded {timeout} seconds; the Windows sandbox process tree was terminated"));}
+        self.save(r,Some(&output))
+    }
+    async fn worker_standard(&self,r:&mut JobRecord,mut cmd:tokio::process::Command,cancel:CancellationToken,timeout:u64)->Result<()>{
         if cancel.is_cancelled(){r.status="cancelled".into();r.finished=Some(util::now());return self.save(r,None);}
         #[cfg(windows)]
         let (mut child,job)=crate::tools::windows_job::spawn(&mut cmd,
@@ -255,13 +327,14 @@ mod admission_tests{
     use super::*;
     use crate::config::{ProjectConfig,WorkspaceConfig};
 
-    fn runtime()->(tempfile::TempDir,Arc<Runtime>){
+    fn runtime()->(tempfile::TempDir,Arc<Runtime>){runtime_with_backend("disabled")}
+    fn runtime_with_backend(backend:&str)->(tempfile::TempDir,Arc<Runtime>){
         let dir=tempfile::tempdir().unwrap();
         let root=dir.path().join("projects");
         std::fs::create_dir_all(root.join("app")).unwrap();
         let mut config=Config::default();
         config.security.data_dir=dir.path().join("state");
-        config.execution.backend="disabled".into();
+        config.execution.backend=backend.into();
         config.execution.auto_discover_toolchains=false;
         config.execution.path=std::env::join_paths([dir.path()]).unwrap().to_string_lossy().into_owned();
         util::private_dir(&config.security.data_dir).unwrap();
@@ -298,6 +371,48 @@ mod admission_tests{
     fn assert_code<T>(result:Result<T>,expected:&str){
         match result{Err(error)=>assert_eq!(crate::error::code(&error),expected),
             Ok(_)=>panic!("Expected {expected}")}
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn appcontainer_reload_cannot_replace_preflight_or_recovery_project_locks(){
+        let(_dir,rt)=runtime_with_backend("appcontainer");
+        let original=rt.project("root","app").unwrap();
+        let mut persisted=Config::load_file(&rt.config_path).unwrap();
+        persisted.workspaces[0].projects[0].id="renamed".into();
+        std::fs::write(&rt.config_path,toml::to_string_pretty(&persisted).unwrap()).unwrap();
+        // A submitter may already hold the old Project Arc before it takes
+        // its cache reader. Reload must exclude this earlier window as well.
+        let submitting=rt.jobs.submission.try_lock().unwrap();
+        assert_eq!(rt.jobs.active_count(),0);
+        assert_code(rt.dashboard_reload_config(),"PROJECT_BUSY");
+        assert!(rt.project("root","renamed").is_err());
+        drop(submitting);
+        // This is the real preflight guard, before active-token registration.
+        let preflight=rt.jobs.begin_submission().unwrap();
+        assert_eq!(rt.jobs.active_count(),0);
+        assert_code(rt.dashboard_reload_config(),"PROJECT_BUSY");
+        assert!(rt.project("root","renamed").is_err());
+        assert!(Arc::ptr_eq(&original.lock,&rt.project("root","app").unwrap().lock));
+        drop(preflight);
+        // Synthesize only an unresolved lock; no native process or ACL lease
+        // exists in this fixture. Production holds this guard until restart.
+        let held=original.lock.clone().try_lock_owned().unwrap();
+        rt.jobs.stop_accepting();
+        rt.jobs.recovery_locks.lock().unwrap().push(held);
+        assert_code(rt.dashboard_reload_config(),"SANDBOX_CLEANUP_PENDING");
+        assert!(rt.project("root","renamed").is_err());
+        assert!(Arc::ptr_eq(&original.lock,&rt.project("root","app").unwrap().lock));
+        assert_code(rt.sync_project("write_file","root","app",|_,project|{
+            std::fs::write(project.root.path.join("must-not-be-written"),b"forbidden")?;
+            Ok(json!({}))
+        }).await,"PROJECT_BUSY");
+        assert!(!original.root.path.join("must-not-be-written").exists());
+        rt.jobs.recovery_locks.lock().unwrap().clear();
+        *rt.jobs.admission.lock().unwrap()=Admission::Accepting;
+        assert_eq!(rt.dashboard_reload_config().unwrap()["reloaded"],true);
+        assert!(rt.project("root","app").is_err());
+        assert_eq!(rt.project("root","renamed").unwrap().root.path,original.root.path);
     }
 
     #[test]

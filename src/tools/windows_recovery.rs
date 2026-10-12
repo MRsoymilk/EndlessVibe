@@ -6,7 +6,7 @@
 // the Windows service has acquired its exclusive instance lock.
 
 use anyhow::{bail, Context, Result};
-use std::{fs, path::{Path,PathBuf}};
+use std::path::{Path,PathBuf};
 use windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile;
 
 const MAX_PENDING: usize = 128;
@@ -35,10 +35,9 @@ pub fn mark_pending(directory: &Path, profile_name: &str) -> Result<PathBuf> {
     if !valid_profile_name(profile_name) {
         bail!("Refusing to journal a profile outside the EndlessVibe namespace");
     }
-    crate::util::private_dir(directory)?;
-    let marker = directory.join(format!("{profile_name}{MARKER_SUFFIX}"));
-    crate::util::private_create(&marker, format!("v1:{profile_name}\n").as_bytes())?;
-    Ok(marker)
+    let journal = crate::tools::windows_acl::PrivateJournal::open(directory)?;
+    journal.create(&format!("{profile_name}{MARKER_SUFFIX}"),
+        format!("v1:{profile_name}\n").as_bytes())
 }
 
 /// Recover ONLY profiles whose exact protected records are present. The
@@ -47,30 +46,23 @@ pub fn mark_pending(directory: &Path, profile_name: &str) -> Result<PathBuf> {
 /// All records are validated before the first profile is deleted to avoid
 /// destroying valid entries on a partially tampered journal.
 pub fn recover_pending(directory: &Path) -> Result<usize> {
-    crate::util::private_dir(directory)?;
-    let root = crate::security::paths::Root::open(directory)
-        .context("Open protected AppContainer recovery journal")?;
-    let entries = root.entries(".")?;
-    if entries.len() > MAX_PENDING {
-        bail!("Too many pending AppContainer records (maximum {MAX_PENDING})");
-    }
+    let root = crate::tools::windows_acl::PrivateJournal::open(directory)
+        .context("Open natively verified AppContainer recovery journal")?;
+    let entries = root.entries(MAX_PENDING)?;
 
     let mut verified = Vec::with_capacity(entries.len());
     for entry in entries {
-        if entry.kind != "file" {
-            bail!("AppContainer recovery records must be regular files");
-        }
-        let name = entry.name.strip_suffix(MARKER_SUFFIX)
+        let name = entry.strip_suffix(MARKER_SUFFIX)
             .context("Unexpected file in AppContainer recovery journal")?;
         if !valid_profile_name(name) {
             bail!("Recovery refused a profile outside the EndlessVibe namespace");
         }
-        let record = root.read(&entry.name, 128)
+        let record = root.read(&entry, 128)
             .context("Read capability-pinned AppContainer recovery record")?;
         if record != format!("v1:{name}\n").as_bytes() {
             bail!("AppContainer recovery record does not match its filename");
         }
-        verified.push((name.to_owned(), entry.name));
+        verified.push((name.to_owned(), entry));
     }
 
     let mut removed = 0usize;
@@ -82,7 +74,7 @@ pub fn recover_pending(directory: &Path) -> Result<usize> {
         }
         // Remove the journal only after successful cleanup. Retain it on
         // errors so a future startup can retry or diagnose the failure.
-        fs::remove_file(directory.join(&marker))
+        root.remove(&marker)
             .context("Remove recovered AppContainer profile journal entry")?;
         removed += 1;
     }
@@ -92,6 +84,7 @@ pub fn recover_pending(directory: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn profile_names_are_exact_and_case_sensitive() {

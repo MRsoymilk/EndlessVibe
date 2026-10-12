@@ -13,6 +13,18 @@ pub mod windows_recovery;
 #[cfg(windows)]
 pub mod windows_appcontainer;
 #[cfg(windows)]
+pub mod windows_command;
+#[cfg(windows)]
+pub mod windows_acl;
+#[cfg(windows)]
+pub mod windows_execution_recovery;
+#[cfg(windows)]
+pub mod windows_toolchains;
+#[cfg(windows)]
+pub mod windows_tool_copy;
+#[cfg(windows)]
+pub mod windows_backend;
+#[cfg(windows)]
 pub mod windows_trusted_worker;
 #[cfg(windows)]
 pub mod windows_pe;

@@ -1194,7 +1194,7 @@ fn configure_native_job_fixture(config:&mut Config,allowed:bool){
     if allowed{config.execution.allowed_programs.push(native_job_program());}
 }
 fn native_job_command(f:&Fixture,mode:&str)->(String,Vec<String>){
-    assert!(["trusted_host","environment","project_environment","wait"].contains(&mode));
+    assert!(["trusted_host","environment","project_environment","wait","appcontainer"].contains(&mode));
     let project=f.rt.project("demo","demo").unwrap();
     std::fs::write(project.root.path.join(NATIVE_JOB_MODE_FILE),mode).unwrap();
     (native_job_program(),vec!["--exact".into(),"native_job_fixture_child".into(),
@@ -1219,6 +1219,14 @@ fn native_job_fixture_child(){
         },
         "project_environment"=>println!("{}",if std::env::var("PROJECT_SERVICE_URL").unwrap_or_default()
             =="http://127.0.0.1:19031"{"True"}else{"False"}),
+        "appcontainer"=>{
+            use std::io::Write;
+            println!("{NATIVE_JOB_READY}");
+            std::io::stdout().flush().unwrap();
+            std::fs::write("native-lpac-result.txt",b"written by the isolated native child\n").unwrap();
+            let summary=std::env::var_os("ENDLESSVIBE_JOB_SUMMARY").unwrap();
+            std::fs::write(summary,br#"{"fixture":"native_appcontainer","project_write":true}"#).unwrap();
+        },
         "wait"=>{
             use std::io::Write;
             println!("{NATIVE_JOB_READY}");
@@ -1240,6 +1248,175 @@ async fn wait_native_job_started(rt:&Arc<Runtime>,id:&str){
     panic!("Native fixture did not report readiness: {}",rt.jobs.get(id).unwrap());
 }
 async fn wait_job(rt:&Arc<Runtime>,id:&str)->Value{for _ in 0..150{let j=rt.jobs.get(id).unwrap();if !matches!(j["status"].as_str(),Some("queued"|"running")){return j;}tokio::time::sleep(Duration::from_millis(30)).await;}panic!("Job did not finish");}
+
+#[cfg(windows)]
+fn configure_appcontainer_job_fixture(config:&mut Config){
+    config.execution.backend="appcontainer".into();
+    config.execution.acknowledge_unsafe_host_execution=false;
+    config.execution.allow_shell=false;
+    config.execution.allow_network=false;
+    config.workspaces[0].projects[0].execution_profile="development".into();
+}
+#[cfg(windows)]
+async fn wait_appcontainer_job(rt:&Arc<Runtime>,id:&str,seconds:u64)->Value{
+    let until=tokio::time::Instant::now()+Duration::from_secs(seconds);
+    loop{
+        let state=rt.jobs.get(id).unwrap();
+        if !matches!(state["status"].as_str(),Some("queued"|"running"))&&rt.jobs.active_count()==0{
+            let project=rt.project(state["workspace"].as_str().unwrap(),state["project"].as_str().unwrap()).unwrap();
+            if project.lock.clone().try_lock_owned().is_ok(){return state;}
+        }
+        if tokio::time::Instant::now()>=until{
+            // Cancellation and shutdown are necessary even after an assertion
+            // deadline; do not leave a native process or ACL lease behind.
+            let _=rt.jobs.cancel(id);
+            rt.jobs.shutdown().await;
+            let output=rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:32768}).unwrap();
+            panic!("AppContainer job exceeded the {seconds}s observation limit: {state}; {output}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+#[cfg(windows)]
+fn assert_appcontainer_job_complete(f:&Fixture,job:&Value,output:&Value){
+    assert_eq!(job["status"],"succeeded","{job}; {output}");
+    assert_eq!(job["backend"],"appcontainer","{job}");
+    assert_eq!(job["exit_code"],0,"{job}; {output}");
+    let isolation=&job["preflight"]["isolation"];
+    assert_eq!(isolation["kind"],"less_privileged_appcontainer","{job}");
+    for key in ["token_verified","job_empty","cleanup_complete"]{
+        assert_eq!(isolation[key],true,"Missing native isolation evidence {key}: {job}");
+    }
+    assert_eq!(isolation["capability_count"],1,"{job}");
+    assert_eq!(isolation["capabilities"],json!(["registryRead"]),"{job}");
+    assert_eq!(isolation["network"],false,"{job}");
+    assert_eq!(job["summary_capture"]["status"],"captured","{job}; {output}");
+    assert_eq!(job["summary_capture"]["reported"],true,"{job}");
+    assert_eq!(job["summary_capture"]["cleanup_complete"],true,"{job}");
+    assert_eq!(f.rt.jobs.active_count(),0);
+    assert!(f.rt.project("demo","demo").unwrap().lock.clone().try_lock_owned().is_ok(),
+        "Project lock must be released after native cleanup");
+    for directory in ["appcontainer-acl","appcontainer-profiles","appcontainer-execution"]{
+        let path=f.rt.config.security.data_dir.join(directory);
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(),0,
+            "Completed native job retained a recovery record in {}",path.display());
+    }
+}
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_appcontainer_jobs_execute_native_tool_and_capture_summary(){
+    let f=fixture(|config|{
+        configure_appcontainer_job_fixture(config);
+        config.execution.auto_discover_toolchains=false;
+        // Cargo may hard-link test binaries across target directories. Copy
+        // this exact executable into the fixture's independent tools bin;
+        // granting target/deps would authorize unrelated build artifacts.
+        let executable=std::env::current_exe().unwrap();
+        let bin=config.security.data_dir.parent().unwrap().join("tools/native-job/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::copy(&executable,bin.join(executable.file_name().unwrap())).unwrap();
+        let mut paths=vec![bin];paths.extend(std::env::split_paths(&config.execution.path));
+        config.execution.path=std::env::join_paths(paths).unwrap().into_string().unwrap();
+        config.execution.allowed_programs=vec![native_job_program()];
+        config.limits.command_timeout_seconds=20;
+    });
+    let (program,args)=native_job_command(&f,"appcontainer");
+    let command=CommandArgs{workspace:"demo".into(),project:"demo".into(),program,args,
+        cwd:".".into(),request_id:"native-lpac-job".into(),timeout_seconds:Some(20),
+        preflight_programs:vec![],environment:Default::default(),network:None,task_id:None,stage:None};
+    let job=f.rt.jobs.submit(f.rt.clone(),command,false).await.unwrap();
+    assert_eq!(job["preflight"]["backend"],"appcontainer","{job}");
+    assert_eq!(job["preflight"]["execution_profile"],"development","{job}");
+    assert_eq!(job["preflight"]["network"],false,"{job}");
+    assert_eq!(job["preflight"]["network_source"],"appcontainer_offline","{job}");
+    assert!(f.rt.project("demo","demo").unwrap().lock.clone().try_lock_owned().is_err());
+    let id=job["job_id"].as_str().unwrap();
+    let finished=wait_appcontainer_job(&f.rt,id,30).await;
+    let output=f.rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:32768}).unwrap();
+    assert_appcontainer_job_complete(&f,&finished,&output);
+    assert!(output["output"].as_str().unwrap().contains(NATIVE_JOB_READY),"{output}");
+    assert_eq!(finished["summary"],json!({"fixture":"native_appcontainer","project_write":true}));
+    assert_eq!(std::fs::read(f.rt.project("demo","demo").unwrap().root.path.join("native-lpac-result.txt")).unwrap(),
+        b"written by the isolated native child\n");
+}
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_appcontainer_jobs_compile_and_test_offline_cargo_project(){
+    // Run this acceptance test separately from the short integration suite:
+    // both its real compiler job and its observation deadline are 90 seconds.
+    let f=fixture(|config|{
+        configure_appcontainer_job_fixture(config);
+        config.execution.auto_discover_toolchains=true;
+        config.execution.allowed_programs=vec!["cargo".into(),"rustc".into()];
+        config.limits.command_timeout_seconds=90;
+    });
+    let project=f.rt.project("demo","demo").unwrap();
+    std::fs::write(project.root.path.join("Cargo.toml"),r#"[package]
+name = "endlessvibe_native_lpac_fixture"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+
+[profile.dev]
+incremental = false
+"#).unwrap();
+    std::fs::write(project.root.path.join("Cargo.lock"),r#"version = 4
+
+[[package]]
+name = "endlessvibe_native_lpac_fixture"
+version = "0.0.0"
+"#).unwrap();
+    std::fs::write(project.root.path.join("src/main.rs"),r##"fn add(left:u64,right:u64)->u64 { left+right }
+fn main() { println!("{}",add(19,23)); }
+#[test]
+fn compiled_inside_native_appcontainer() {
+    assert_eq!(add(19,23),42);
+    let executable=std::env::current_exe().unwrap();
+    println!("ENDLESSVIBE_OFFLINE_CARGO_COMPILED_TEST_OK {}",executable.display());
+    std::fs::write("offline-cargo-result.txt",b"compiled and tested inside AppContainer\n").unwrap();
+    let summary=std::env::var_os("ENDLESSVIBE_JOB_SUMMARY").unwrap();
+    std::fs::write(summary,br#"{"fixture":"offline_cargo","compiled_test":true,"result":42}"#).unwrap();
+}
+"##).unwrap();
+    let command=CommandArgs{workspace:"demo".into(),project:"demo".into(),program:"cargo".into(),
+        args:["test","--offline","--locked","--target-dir","target/native-lpac","--","--nocapture",
+            "--test-threads=1"].map(str::to_owned).to_vec(),cwd:".".into(),
+        request_id:"native-lpac-offline-cargo".into(),timeout_seconds:Some(90),
+        preflight_programs:vec!["rustc".into(),"cl".into(),"link".into(),"lib".into()],
+        environment:Default::default(),network:None,task_id:None,stage:None};
+    let job=f.rt.jobs.submit(f.rt.clone(),command,false).await.unwrap_or_else(|error|
+        panic!("Real offline Cargo submission failed: {error:#}; configured PATH={}",f.rt.config.execution.path));
+    eprintln!("Native offline Cargo resolved toolchains: {}",job["preflight"]);
+    assert_eq!(job["preflight"]["backend"],"appcontainer","{job}");
+    assert_eq!(job["preflight"]["network"],false,"{job}");
+    assert_eq!(job["preflight"]["network_source"],"appcontainer_offline","{job}");
+    assert_eq!(job["preflight"]["toolchains"]["rust"]["available"],true,"{job}");
+    for program in ["cargo","rustc","cl","link","lib"]{
+        let row=job["preflight"]["programs"].as_array().unwrap().iter()
+            .find(|entry|entry["program"]==program).unwrap();
+        assert!(Path::new(row["path"].as_str().unwrap()).is_file(),"{row}");
+    }
+    assert!(project.lock.clone().try_lock_owned().is_err());
+    let id=job["job_id"].as_str().unwrap();
+    let finished=wait_appcontainer_job(&f.rt,id,90).await;
+    let output=f.rt.jobs.output(OutputArgs{job_id:id.into(),offset:0,limit:32768}).unwrap();
+    assert_appcontainer_job_complete(&f,&finished,&output);
+    let text=output["output"].as_str().unwrap();
+    assert!(text.contains("ENDLESSVIBE_OFFLINE_CARGO_COMPILED_TEST_OK"),"{output}");
+    assert!(text.contains("test result: ok. 1 passed; 0 failed"),"{output}");
+    assert_eq!(finished["summary"],json!({"fixture":"offline_cargo","compiled_test":true,"result":42}));
+    assert_eq!(std::fs::read(project.root.path.join("offline-cargo-result.txt")).unwrap(),
+        b"compiled and tested inside AppContainer\n");
+    let artifacts=project.root.path.join("target/native-lpac/debug/deps");
+    assert!(std::fs::read_dir(&artifacts).unwrap().any(|entry|{
+        let entry=entry.unwrap();let path=entry.path();
+        path.file_stem().is_some_and(|stem|stem.to_string_lossy().starts_with("endlessvibe_native_lpac_fixture-"))
+            &&path.extension().is_some_and(|extension|extension=="exe")
+            &&entry.metadata().unwrap().len()>0
+    }),"The sandbox must leave a real compiled test executable inside {}",artifacts.display());
+}
+
 #[tokio::test]
 async fn trusted_host_project_can_run_unlisted_local_tool_without_shell_api(){
  let f=fixture(|c|{

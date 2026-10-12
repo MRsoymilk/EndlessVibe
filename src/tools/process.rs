@@ -49,16 +49,17 @@ pub fn clean_environment(cmd:&mut Command,path:&str){
         if let Some(value)=std::env::var_os(key){cmd.env(key,value);}
     }
 }
+pub enum JobCommand{Standard(Command),#[cfg(windows)]AppContainer(crate::tools::windows_backend::Plan)}
 #[derive(Clone,Debug)]pub struct JobSummaryContract{pub host_path:PathBuf,pub exposed_path:String}
 pub fn job_summary_host_path(config:&Config,workspace:&str,project:&str,job_id:&str)->Result<PathBuf>{if job_id.is_empty()||job_id.len()>128||!job_id.bytes().all(|b|b.is_ascii_alphanumeric()||b"-_".contains(&b)){bail!("Invalid job ID for summary contract");}let cache=config.security.data_dir.join("exec-cache").join(workspace).join(project);crate::util::private_dir(&cache)?;Ok(cache.join(format!("job-summary-{job_id}.json")))}
 pub fn job_summary_contract(config:&Config,workspace:&str,project:&str,job_id:&str)->Result<JobSummaryContract>{
     let file=format!("job-summary-{job_id}.json");let host_path=job_summary_host_path(config,workspace,project,job_id)?;if host_path.exists(){bail!("Job summary path already exists; refusing to overwrite");}
-    let exposed_path=match config.execution.backend.as_str(){"bubblewrap"=>format!("/cache/{file}"),"host"=>host_path.to_string_lossy().into_owned(),"disabled"=>bail!("execution backend is disabled"),_=>bail!("Unknown execution backend")};Ok(JobSummaryContract{host_path,exposed_path})
+    let exposed_path=match config.execution.backend.as_str(){"bubblewrap"=>format!("/cache/{file}"),"host"|"appcontainer"=>host_path.to_string_lossy().into_owned(),"disabled"=>bail!("execution backend is disabled"),_=>bail!("Unknown execution backend")};Ok(JobSummaryContract{host_path,exposed_path})
 }
 fn simple_program(program:&str)->bool{!program.is_empty()&&program.len()<=64&&program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b))}
-fn validate_job_environment(environment:&BTreeMap<String,String>)->Result<()>{if environment.len()>64{bail!("environment accepts at most 64 variables");}let reserved=["HOME","PATH","CARGO_HOME","XDG_CACHE_HOME","LANG","LC_ALL","TERM","ENDLESSVIBE_JOB_SUMMARY"];let mut total=0usize;for(name,value)in environment{if !crate::config::valid_environment_name(name)||name.len()>128{bail!("environment variable names must match [A-Za-z_][A-Za-z0-9_]* and be at most 128 bytes");}if reserved.contains(&name.as_str()){bail!("environment variable {name} is reserved by EndlessVibe");}if value.contains('\0')||value.len()>65536{bail!("environment variable {name} contains NUL or exceeds 65536 bytes");}total=total.saturating_add(name.len()+value.len());}if total>131072{bail!("environment exceeds 131072 bytes");}Ok(())}
-fn validate_job_network(config:&Config,development:bool,requested:bool)->Result<()>{if requested&&config.execution.backend=="bubblewrap"&&!development&&!config.execution.allow_network{bail!("network access is disabled for isolated projects; use execution_profile=development for a trusted development project or enable global execution.allow_network");}Ok(())}
-pub fn effective_project_execution(config:&Config,project:&Project,job_environment:&BTreeMap<String,String>,job_network:Option<bool>)->Result<(BTreeMap<String,String>,bool,String,String)>{let mut environment=project.config.environment_map()?;for(name,value)in job_environment{environment.insert(name.clone(),value.clone());}validate_job_environment(&environment)?;let profile=project.config.execution_profile.clone();let network=job_network.unwrap_or_else(||project.config.development());validate_job_network(config,project.config.development(),network)?;let source=if job_network.is_some(){"job_override"}else if project.config.development(){"development_profile"}else{"isolated_profile"}.to_owned();Ok((environment,network,profile,source))}
+fn validate_job_environment(environment:&BTreeMap<String,String>)->Result<()>{if environment.len()>64{bail!("environment accepts at most 64 variables");}let reserved=["HOME","PATH","CARGO_HOME","XDG_CACHE_HOME","LANG","LC_ALL","TERM","ENDLESSVIBE_JOB_SUMMARY"];let mut total=0usize;for(name,value)in environment{if !crate::config::valid_environment_name(name)||name.len()>128{bail!("environment variable names must match [A-Za-z_][A-Za-z0-9_]* and be at most 128 bytes");}if reserved.iter().any(|reserved|if cfg!(windows){reserved.eq_ignore_ascii_case(name)}else{*reserved==name}){bail!("environment variable {name} is reserved by EndlessVibe");}if value.contains('\0')||value.len()>65536{bail!("environment variable {name} contains NUL or exceeds 65536 bytes");}total=total.saturating_add(name.len()+value.len());}if total>131072{bail!("environment exceeds 131072 bytes");}Ok(())}
+fn validate_job_network(config:&Config,development:bool,requested:bool)->Result<()>{if requested&&config.execution.backend=="appcontainer"{bail!("AppContainer jobs are offline; network=true is unsupported and no network capabilities are granted");}if requested&&config.execution.backend=="bubblewrap"&&!development&&!config.execution.allow_network{bail!("network access is disabled for isolated projects; use execution_profile=development for a trusted development project or enable global execution.allow_network");}Ok(())}
+pub fn effective_project_execution(config:&Config,project:&Project,job_environment:&BTreeMap<String,String>,job_network:Option<bool>)->Result<(BTreeMap<String,String>,bool,String,String)>{let mut environment=project.config.environment_map()?;for(name,value)in job_environment{environment.insert(name.clone(),value.clone());}validate_job_environment(&environment)?;#[cfg(windows)]if config.execution.backend=="appcontainer"{crate::tools::windows_backend::validate_environment(&environment)?;}let profile=project.config.execution_profile.clone();let network=job_network.unwrap_or_else(||config.execution.backend!="appcontainer"&&project.config.development());validate_job_network(config,project.config.development(),network)?;let source=if job_network.is_some(){"job_override"}else if config.execution.backend=="appcontainer"{"appcontainer_offline"}else if project.config.development(){"development_profile"}else{"isolated_profile"}.to_owned();Ok((environment,network,profile,source))}
 #[cfg(unix)]
 fn existing_unix_socket(path:&Path)->Option<PathBuf>{use std::os::unix::fs::FileTypeExt;let canonical=std::fs::canonicalize(path).ok()?;std::fs::metadata(&canonical).ok()?.file_type().is_socket().then_some(canonical)}
 #[cfg(windows)]
@@ -173,14 +174,18 @@ fn bubblewrap_base_command(config:&Config,programs:&[String],share_network:bool)
     for (source,target) in mounts{c.arg("--ro-bind").arg(source).arg(target);}
     Ok((c,path))
 }
+#[cfg(any(not(windows), test))]
 fn rust_toolchain_root()->Option<PathBuf>{
     let rustup=host_executable("rustup")?;let output=std::process::Command::new(rustup).args(["which","rustc"]).output().ok()?;if !output.status.success(){return None;}let rustc=PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());let bin=rustc.parent()?;if bin.file_name()? != "bin"{return None;}Some(bin.parent()?.to_owned())
 }
+#[cfg(any(not(windows), test))]
 fn toml_escape(value:&str)->String{value.replace('\\',"\\\\").replace('"',"\\\"")}
+#[cfg(any(not(windows), test))]
 fn suggested_toml(current_path:&str,path_entries:&[String],mounts:&[Value])->String{
     let mut path=path_entries.to_vec();path.extend(current_path.split(':').filter(|entry|!entry.is_empty()&&!path_entries.iter().any(|p|p==entry)).map(str::to_owned));let mut text=format!("[execution]\npath = \"{}\"\n",toml_escape(&path.join(":")));
     if !mounts.is_empty(){text.push_str("readonly_mounts = [\n");for mount in mounts{if let (Some(source),Some(target))=(mount.get("source").and_then(Value::as_str),mount.get("target").and_then(Value::as_str)){text.push_str(&format!("  {{ source = \"{}\", target = \"{}\" }},\n",toml_escape(source),toml_escape(target)));}}text.push_str("]\n");}text
 }
+#[cfg(any(not(windows), test))]
 fn mount_suggestion(program:&str,host_path:&str)->Option<Value>{
     let path=std::fs::canonicalize(host_path).unwrap_or_else(|_|PathBuf::from(host_path));let bin=path.parent()?.to_owned();
     if system_visible(&bin){return Some(json!({"kind":"path-only","path_entry":bin,"reason":"host path is already covered by the sandbox system mounts"}));}
@@ -204,12 +209,16 @@ async fn sandbox_paths(config:&Config,programs:&[String])->Result<BTreeMap<Strin
     let result=capture(probe,None,262144,10).await?;if result.code!=Some(0){bail!("bubblewrap program visibility probe failed: {}",crate::util::bounded_text(&String::from_utf8_lossy(&result.stderr),2048));}let stdout=String::from_utf8(result.stdout).context("Sandbox toolchain probe output is not UTF-8")?;let mut visible=BTreeMap::new();for line in stdout.lines(){let mut fields=line.split('\t');if fields.next()==Some("OK"){if let (Some(program),Some(path))=(fields.next(),fields.next()){visible.insert(program.to_owned(),path.to_owned());}}}Ok(visible)
 }
 pub async fn sandbox_diagnostics(config:&Config)->Result<Value>{
+    #[cfg(windows)]return crate::tools::windows_backend::diagnostics(config,&diagnostic_programs(config));
+    #[cfg(not(windows))]
+    {
     let programs=diagnostic_programs(config);let (effective_path,effective_mounts)=execution_environment(config,&programs);let sandbox=if config.execution.backend=="bubblewrap"{sandbox_paths(config,&programs).await?}else{BTreeMap::new()};let os=host_os_id();let mut suggested_paths=Vec::<String>::new();let mut suggested_mounts=Vec::<Value>::new();let rows=programs.iter().map(|program|{let host=discover_host_executable(program);let host_path=host.as_ref().map(|p|p.to_string_lossy().into_owned());let sandbox_path=sandbox.get(program).cloned();let status=if sandbox_path.is_some(){"available"}else if host_path.is_some(){"host-only"}else{"missing"};let suggestion=if status=="host-only"{host_path.as_deref().and_then(|path|mount_suggestion(program,path))}else{None};if let Some(value)=&suggestion{if let Some(path)=value.get("path_entry").and_then(Value::as_str){if !effective_path.split(':').any(|entry|entry==path)&&!suggested_paths.iter().any(|entry|entry==path){suggested_paths.push(path.to_owned());}}if value.get("kind").and_then(Value::as_str)==Some("readonly-mount"){let source=value.get("source").cloned().unwrap_or(Value::Null);let target=value.get("target").cloned().unwrap_or(Value::Null);if !suggested_mounts.iter().any(|m|m.get("source")==Some(&source)&&m.get("target")==Some(&target)){suggested_mounts.push(json!({"source":source,"target":target}));}}}json!({"program":program,"status":status,"reason":if sandbox_path.is_some(){Value::Null}else if host_path.is_some(){json!("sandbox_missing")}else{json!("host_missing")},"install_hint":if host_path.is_none(){json!(install_hint_for_os(&os,program))}else{Value::Null},"allowed":config.execution.allowed_programs.contains(program),"required":config.execution.required_programs.contains(program),"host_path":host_path,"sandbox_path":sandbox_path,"suggestion":suggestion})}).collect::<Vec<_>>();let mounts=effective_mounts.iter().map(|(source,target)|json!({"source":source,"target":target,"source_exists":source.exists(),"target_allowed":target.starts_with("/opt/")||target.starts_with("/cache-readonly/"),"automatic":!config.execution.readonly_mounts.iter().any(|m|m.source==*source&&m.target==*target)})).collect::<Vec<_>>();let toml=suggested_toml(&effective_path,&suggested_paths,&suggested_mounts);Ok(json!({"backend":config.execution.backend,"host_os":os,"path":effective_path,"configured_path":config.execution.path,"auto_discover_toolchains":config.execution.auto_discover_toolchains,"namespace_ok":config.execution.backend=="bubblewrap","programs":rows,"readonly_mounts":mounts,"suggested_config":{"prepend_path_entries":suggested_paths,"readonly_mounts":suggested_mounts,"toml":toml},"network":config.execution.allow_network,"shell":config.execution.allow_shell}))
+    }
 }
 fn job_preflight_programs(program:&str,requested:&[String],shell:bool)->Result<Vec<String>>{if requested.len()>32{bail!("preflight_programs accepts at most 32 program names");}let mut programs=requested.to_vec();if !shell{programs.push(program.to_owned());if program=="cargo"{programs.push("rustc".into());}}for item in &programs{if !simple_program(item){bail!("preflight_programs must contain simple executable names");}}programs.sort();programs.dedup();Ok(programs)}
 pub async fn preflight_job(config:&Config,program:&str,requested:&[String],shell:bool)->Result<Value>{
     let programs=job_preflight_programs(program,requested,shell)?;if programs.is_empty(){return Ok(json!({"backend":config.execution.backend,"programs":[],"toolchains":{"rust":{"requested":false,"available":false},"postgresql":{"requested":false,"available":false}}}));}
-    let visible:BTreeMap<String,String>=match config.execution.backend.as_str(){"bubblewrap"=>sandbox_paths(config,&programs).await?,"host"=>programs.iter().filter_map(|p|configured_executable(&config.execution.path,p).map(|path|(p.clone(),path.to_string_lossy().into_owned()))).collect(),"disabled"=>return Err(crate::error::coded("JOB_PREFLIGHT_FAILED",false,"execution backend is disabled")),_=>return Err(crate::error::coded("JOB_PREFLIGHT_FAILED",false,"unknown execution backend"))};
+    let visible:BTreeMap<String,String>=match config.execution.backend.as_str(){"bubblewrap"=>sandbox_paths(config,&programs).await?,"host"=>programs.iter().filter_map(|p|configured_executable(&config.execution.path,p).map(|path|(p.clone(),path.to_string_lossy().into_owned()))).collect(),#[cfg(windows)]"appcontainer"=>crate::tools::windows_toolchains::discover(config,&programs)?.programs.into_iter().map(|(name,path)|(name,path.to_string_lossy().into_owned())).collect(),"disabled"=>return Err(crate::error::coded("JOB_PREFLIGHT_FAILED",false,"execution backend is disabled")),_=>return Err(crate::error::coded("JOB_PREFLIGHT_FAILED",false,"unknown execution backend"))};
     let missing=programs.iter().filter(|p|!visible.contains_key(*p)).cloned().collect::<Vec<_>>();if !missing.is_empty(){let details=missing_program_details(&programs,&visible);let host_missing=details.iter().filter_map(|v|(v["state"]=="host_missing").then(||v["program"].as_str().unwrap_or("").to_owned())).collect::<Vec<_>>();let sandbox_missing=details.iter().filter_map(|v|(v["state"]=="sandbox_missing").then(||v["program"].as_str().unwrap_or("").to_owned())).collect::<Vec<_>>();let (effective_path,_)=execution_environment(config,&programs);return Err(crate::error::coded_details("JOB_PREFLIGHT_FAILED",false,format!("required job program(s) unavailable: {}",missing.join(", ")),json!({"backend":config.execution.backend,"missing":missing,"host_missing":host_missing,"sandbox_missing":sandbox_missing,"programs":details,"path":effective_path,"requested":programs,"auto_discover_toolchains":config.execution.auto_discover_toolchains})));}
     let rows=programs.iter().map(|p|json!({"program":p,"path":visible.get(p)})).collect::<Vec<_>>();let rust_requested=programs.iter().any(|p|matches!(p.as_str(),"cargo"|"rustc"));let postgres_names=["initdb","postgres","pg_isready","createdb"];let postgres_requested=programs.iter().any(|p|postgres_names.contains(&p.as_str()));let postgres_paths=postgres_names.iter().map(|p|((*p).to_owned(),visible.get(*p).cloned())).collect::<BTreeMap<_,_>>();Ok(json!({"backend":config.execution.backend,"programs":rows,"toolchains":{"rust":{"requested":rust_requested,"available":rust_requested&&visible.contains_key("cargo")&&visible.contains_key("rustc"),"cargo_path":visible.get("cargo"),"rustc_path":visible.get("rustc")},"postgresql":{"requested":postgres_requested,"available":postgres_requested&&postgres_names.iter().all(|p|visible.contains_key(*p)),"paths":postgres_paths}}}))
 }
@@ -224,7 +233,8 @@ pub async fn probe_bubblewrap(config:&Config)->Result<Vec<(String,String)>>{
 fn git_network_subcommand(args:&[String])->bool{args.iter().any(|arg|matches!(arg.as_str(),"push"|"fetch"|"pull"|"clone"|"ls-remote"|"remote"|"submodule"))}
 fn git_identity(config:&Config)->[(&'static str,&str);4]{[("GIT_AUTHOR_NAME",&config.git.author_name),("GIT_AUTHOR_EMAIL",&config.git.author_email),("GIT_COMMITTER_NAME",&config.git.author_name),("GIT_COMMITTER_EMAIL",&config.git.author_email)]}
 fn sandbox_git_identity(command:&mut Command,config:&Config){for(name,value)in git_identity(config){command.args(["--setenv",name,value]);}}
-pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool,project_programs:&[String],environment:&BTreeMap<String,String>,network:bool,summary_path:&str)->Result<Command>{
+pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],cwd:&str,shell:bool,project_programs:&[String],dependency_programs:&[String],environment:&BTreeMap<String,String>,network:bool,summary_path:&str)->Result<JobCommand>{
+    #[cfg(not(windows))]let _=dependency_programs;
     w.exec_allowed()?;validate_job_environment(environment)?;validate_job_network(config,w.config.development(),network)?;
     if program=="git"&&git_network_subcommand(args){bail!("Network Git subcommands are disabled in run_command; allow_git_mutation only permits local repository mutations");}
     if args.len()>128||args.iter().any(|a|a.contains('\0')||a.len()>65536)||args.iter().map(|a|a.len()).sum::<usize>()>131072{bail!("Command arguments exceed limits");}
@@ -235,6 +245,8 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
     if w.config.trusted_host()&&!trusted_host{bail!("trusted_host requires explicitly acknowledged host execution");}
     if !shell&&!trusted_host&&!config.execution.allowed_programs.iter().any(|p|p==program)&&!project_programs.iter().any(|p|p==program){bail!("Program is neither globally allowed nor detected from this project's toolchain manifests");}
     let host_cwd=w.root.directory_path(cwd)?;
+    #[cfg(windows)]
+    if config.execution.backend=="appcontainer"{return crate::tools::windows_backend::Plan::new(config,w,program,args,host_cwd,shell,project_programs,dependency_programs,environment).map(JobCommand::AppContainer);}
     let mut command=match config.execution.backend.as_str(){
         "disabled"=>bail!("Command execution backend is disabled"),
         "host"=>{
@@ -294,7 +306,7 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
             Ok(())
         });}
     }
-    Ok(command)
+    Ok(JobCommand::Standard(command))
 }
 
 #[cfg(test)]mod tests{
@@ -329,18 +341,21 @@ pub fn build_job_command(config:&Config,w:&Project,program:&str,args:&[String],c
         let summary=temp.path().join("job-summary.json").to_string_lossy().into_owned();
         assert!(!config.execution.allowed_programs.iter().any(|v|v==program));
         assert!(build_job_command(&config,&project,program,&args,
-            ".",false,&[],&env,true,&summary).is_err());
+            ".",false,&[],&[],&env,true,&summary).is_err());
+        // Auxiliary preflight visibility cannot authorize the entry command.
+        assert!(build_job_command(&config,&project,program,&args,
+            ".",false,&[],&[program.to_owned()],&env,true,&summary).is_err());
         project.config.execution_profile="trusted_host".into();
         assert!(config.validate().is_ok());
         assert!(build_job_command(&config,&project,program,&args,
-            ".",false,&[],&env,true,&summary).is_ok());
+            ".",false,&[],&[],&env,true,&summary).is_ok());
         assert!(build_job_command(&config,&project,"not-a-real-program", &[],
-            ".",false,&[],&env,true,&summary).is_err());
+            ".",false,&[],&[],&env,true,&summary).is_err());
         config.execution.backend="bubblewrap".into();
         // No Project is registered; bubblewrap itself is available only on Linux.
         assert_eq!(config.validate().is_ok(),cfg!(target_os="linux"));
         assert!(build_job_command(&config,&project,program,&[],
-            ".",false,&[],&env,true,&summary).is_err());
+            ".",false,&[],&[],&env,true,&summary).is_err());
     }
     #[test]fn required_programs_do_not_grant_run_permission(){let mut c=Config::default();c.execution.required_programs=vec!["postgres".into()];assert!(!c.execution.allowed_programs.contains(&"postgres".to_owned()));}
     #[test]fn diagnostics_always_include_joint_gate_tools(){let c=Config::default();let programs=diagnostic_programs(&c);for program in DIAGNOSTIC_PROGRAMS{assert!(programs.contains(&program.to_owned()));}}

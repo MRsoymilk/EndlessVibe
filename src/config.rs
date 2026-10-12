@@ -125,16 +125,17 @@ impl Config {
         if !(1..=16).contains(&self.limits.max_jobs) || !(1..=1000).contains(&self.limits.retained_jobs) || !(1..=3600).contains(&self.limits.command_timeout_seconds) { bail!("Invalid job/timeout limits"); }
         if !(4096..=16 * 1024 * 1024).contains(&self.limits.max_file_bytes) || self.limits.max_read_bytes == 0 || self.limits.max_read_bytes > self.limits.max_file_bytes || !(4096..=8 * 1024 * 1024).contains(&self.limits.max_output_bytes) { bail!("Invalid file/output limits"); }
         if !(1..=100_000).contains(&self.limits.search_max_files) || !(4096..=1024 * 1024 * 1024).contains(&self.limits.search_max_bytes){bail!("search limits must be 1..100000 files and 4096..1073741824 bytes");}
-        if !matches!(self.execution.backend.as_str(), "bubblewrap" | "host" | "disabled") { bail!("execution.backend must be bubblewrap, host, or disabled"); }
+        if !matches!(self.execution.backend.as_str(), "bubblewrap" | "appcontainer" | "host" | "disabled") { bail!("execution.backend must be bubblewrap, appcontainer, host, or disabled"); }
         if self.execution.backend == "host" && !self.execution.acknowledge_unsafe_host_execution { bail!("Host execution requires acknowledge_unsafe_host_execution=true; it has all permissions of the service account"); }
         if !cfg!(target_os="linux")&&self.execution.backend=="bubblewrap"{bail!("bubblewrap is Linux-only; choose host with explicit acknowledgement or disabled");}
+        if self.execution.backend=="appcontainer"{if !cfg!(windows){bail!("appcontainer is Windows-only");}if self.execution.allow_network{bail!("appcontainer is offline; set execution.allow_network=false");}}
         let paths=env::split_paths(&self.execution.path).collect::<Vec<_>>();
         if paths.is_empty()||paths.iter().any(|p|p.as_os_str().is_empty()||!p.is_absolute()){bail!("execution.path must contain only absolute PATH entries");}
         let valid_program=|program:&str|!program.is_empty()&&program.len()<=64&&program.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b));
         let mut programs=HashSet::new();for program in &self.execution.allowed_programs{if !valid_program(program)||!programs.insert(program){bail!("execution.allowed_programs must contain unique simple executable names");}}
         let mut required=HashSet::new();for program in &self.execution.required_programs{if !valid_program(program)||!required.insert(program){bail!("execution.required_programs must contain unique simple executable names");}}
         if self.execution.memory_limit_mb < 64 || self.execution.max_processes < 8 { bail!("Execution resource limits too small"); }
-        if self.execution.readonly_mounts.len()>64{bail!("execution.readonly_mounts accepts at most 64 entries");}let mut mount_targets=HashSet::new();for m in &self.execution.readonly_mounts { if !m.source.is_absolute() || !m.source.exists() || !(m.target.starts_with("/opt/") || m.target.starts_with("/cache-readonly/")) || m.target.components().any(|p| matches!(p, std::path::Component::ParentDir)) { bail!("Read-only mounts require an existing absolute source and a /opt/... or /cache-readonly/... destination"); }if !mount_targets.insert(m.target.clone()){bail!("execution.readonly_mounts target paths must be unique");} }
+        if self.execution.readonly_mounts.len()>64{bail!("execution.readonly_mounts accepts at most 64 entries");}let mut mount_targets=HashSet::new();for m in &self.execution.readonly_mounts { if self.execution.backend=="appcontainer"||(cfg!(windows)&&self.execution.backend!="bubblewrap"&&m.source==m.target){if !m.source.is_absolute()||!m.source.exists()||m.source!=m.target||m.source.components().any(|p|matches!(p,std::path::Component::ParentDir)){bail!("AppContainer read-only roots require one existing absolute native path with source=target and no ..");}}else if !m.source.is_absolute() || !m.source.exists() || !(m.target.starts_with("/opt/") || m.target.starts_with("/cache-readonly/")) || m.target.components().any(|p| matches!(p, std::path::Component::ParentDir)) { bail!("Read-only mounts require an existing absolute source and a /opt/... or /cache-readonly/... destination"); }if !mount_targets.insert(m.target.clone()){bail!("execution.readonly_mounts target paths must be unique");} }
         if self.transfer.listen.port()==0||self.transfer.display_name.trim().is_empty()||self.transfer.display_name.len()>64||self.transfer.display_name.contains(['\n','\r','\0']){bail!("Transfer listener requires a nonzero port and a short safe display name");}
         // Docker is disabled by default. On Windows a Unix socket path cannot
         // be absolute; validate socket paths only when the transport is enabled.
@@ -298,6 +299,38 @@ impl Config {
         assert!(c.validate().unwrap_err().to_string().contains("Windows"));
     }
     #[test] fn defaults_are_protected() { let c = Config::default(); assert!(c.validate().is_ok()); assert_eq!(c.execution.backend, if cfg!(target_os="linux"){"bubblewrap"}else{"disabled"}); assert!(!c.execution.allow_network); assert!(!c.execution.allow_shell); }
+    #[test]
+    fn appcontainer_requires_windows_and_offline_network(){
+        let mut c=Config::default();c.execution.backend="appcontainer".into();
+        assert_eq!(c.validate().is_ok(),cfg!(windows));
+        c.execution.allow_network=true;assert!(c.validate().is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn appcontainer_readonly_roots_are_existing_native_paths(){
+        let root=tempfile::tempdir().unwrap();let mut c=Config::default();
+        c.execution.backend="appcontainer".into();
+        c.execution.readonly_mounts=vec![ReadOnlyMount{source:root.path().to_owned(),target:root.path().to_owned()}];
+        assert!(c.validate().is_ok());
+        c.execution.readonly_mounts[0].target=root.path().join("other");
+        assert!(c.validate().is_err());
+        c.execution.readonly_mounts[0].source=root.path().join("missing");
+        c.execution.readonly_mounts[0].target=root.path().join("missing");
+        assert!(c.validate().is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn native_readonly_roots_can_be_preserved_when_disabling_appcontainer(){
+        let root=tempfile::tempdir().unwrap();let mut c=Config::default();
+        c.execution.readonly_mounts=vec![ReadOnlyMount{source:root.path().to_owned(),target:root.path().to_owned()}];
+        for backend in ["appcontainer","disabled","host"]{
+            c.execution.backend=backend.into();c.execution.acknowledge_unsafe_host_execution=backend=="host";
+            c.validate().expect("Switching away from the sandbox must preserve native read-only roots");
+        }
+        c.execution.backend="appcontainer".into();c.execution.acknowledge_unsafe_host_execution=false;
+        c.execution.readonly_mounts[0].target="/opt/tool".into();
+        assert!(c.validate().is_err());
+    }
     #[test] fn host_mode_needs_acknowledgement() { let mut c = Config::default(); c.execution.backend = "host".into(); assert!(c.validate().is_err()); }
     #[test] fn http_public_server_is_rejected() { let mut c = Config::default(); c.server.public_url = "http://example.com".into(); assert!(c.validate().is_err()); }
     #[test] fn ids_are_bounded() { assert!(valid_id("DemoApp")); assert!(!valid_id("../DemoApp")); assert!(!valid_id("")); }

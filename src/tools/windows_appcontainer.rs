@@ -78,7 +78,6 @@ impl Profile{
     /// Persist the profile identity *before* creating it so a service crash
     /// never leaves an untracked lowbox profile registered in Windows.
     fn create_journaled(journal_dir:&Path)->Result<Self>{
-        crate::util::private_dir(journal_dir)?;
         let random=crate::util::random_secret()?;
         let name=format!("EndlessVibe.Isolated.{}",&crate::util::digest(random)[..32]);
         let marker=crate::tools::windows_recovery::mark_pending(journal_dir,&name)?;
@@ -909,7 +908,7 @@ mod tests{
     fn recovery_does_not_trust_unrecognized_or_tampered_journal_names(){
         let temp=tempfile::tempdir().unwrap();
         let journal=temp.path().join("pending-profiles");
-        crate::util::private_dir(&journal).unwrap();
+        crate::tools::windows_acl::PrivateJournal::open(&journal).unwrap();
         let spoofed=journal.join("UnrelatedPackage.pending");
         fs::write(&spoofed,b"spoofed").unwrap();
         assert!(recover_orphan_profiles(&journal).is_err());

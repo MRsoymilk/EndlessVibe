@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 fn windows_sandbox_status(config:&Config)->Value{
     json!({
         "job_objects":{
-            "active_for_command_jobs":config.execution.backend=="host",
+            "active_for_command_jobs":matches!(config.execution.backend.as_str(),"host"|"appcontainer"),
             "resource_limits_only":true,
             "memory_limit_mb":config.execution.memory_limit_mb,
             "max_processes":config.execution.max_processes,
@@ -28,8 +28,24 @@ fn windows_sandbox_status(config:&Config)->Value{
             "rollback_attempt_on_failure":true,
         },
         "appcontainer":{
-            "backend_selectable":false,
-            "status":"fixed_operation_probe_only",
+            "backend_selectable":true,
+            "status":if config.execution.backend=="appcontainer"{"active"}else{"available"},
+            "command_jobs":{
+                "active":config.execution.backend=="appcontainer",
+                "isolation":"less_privileged_appcontainer",
+                "capability_count":1,
+                "capabilities":["registryRead"],
+                "network":false,
+                "project_access":"per_job_acl_lease",
+                "toolchain_access":"read_only",
+                "git_metadata_readonly_unless_authorized":true,
+                "live_stdout_stderr":true,
+                "timeout_and_cancellation":true,
+                "whole_job_exit_verified_before_acl_cleanup":true,
+                "cleanup_failure_blocks_new_jobs":true,
+                "host_fallback":false,
+            },
+            "fixed_worker_diagnostics_only":true,
             "local_self_check":"--probe-windows-sandbox",
             "production_worker_entrypoint":true,
             "signature_diagnostics":{
@@ -80,11 +96,12 @@ fn windows_sandbox_status(config:&Config)->Value{
             },
             "supported_operation":"hash_input",
             "protocol_version":crate::tools::sandbox_protocol::VERSION,
-            "arbitrary_program_execution":false,
+            "arbitrary_program_execution":true,
         },
         "profile_recovery":{
             "startup_scan_enabled":true,
             "requires_exclusive_service_lock":true,
+            "acl_leases_recovered_before_profiles":true,
         },
     })
 }
@@ -96,20 +113,34 @@ impl Runtime{
     pub fn new(mut config:Config,config_path:&Path)->Result<Arc<Self>>{
         config.validate()?;util::private_dir(&config.security.data_dir)?;config.security.data_dir=config.security.data_dir.canonicalize()?;
         let instance=util::single_instance(&config.security.data_dir.join("service.lock"))?;
+        let cfg=config_path.canonicalize().unwrap_or_else(|_|config_path.to_owned());
+        for mount in &config.execution.readonly_mounts{let source=mount.source.canonicalize()?;if config.security.data_dir.starts_with(&source)||source.starts_with(&config.security.data_dir)||cfg.starts_with(&source){bail!("Sandbox mounts must not expose EndlessVibe config, credentials or state");}}
+        // Open and validate current Projects under the instance lock before
+        // recovery resolves their manifest-authorized native tools. This does
+        // not execute project code or create the Jobs service.
+        let workspaces=workspace::load(&config,config_path)?;
         #[cfg(windows)]
         {
             // service.lock prevents a second instance from recovering an
             // AppContainer that still belongs to the running service.
+            // A durable prepared/empty state or a changed native boot ID is
+            // required before touching abandoned ACLs; service.lock alone
+            // cannot prove that a previous process tree finished exiting.
+            let proofs=crate::tools::windows_execution_recovery::verify_recovery(&config.security.data_dir)?;
+            let recovered_acls=crate::tools::windows_backend::recover_pending(&config,&workspaces,&proofs)?;
+            if recovered_acls>0{tracing::warn!(recovered_acls,"Recovered abandoned AppContainer ACL leases before profiles");}
             let journal=crate::tools::windows_recovery::journal_dir(&config.security.data_dir);
             let recovered=crate::tools::windows_recovery::recover_pending(&journal)?;
             if recovered>0{
                 tracing::warn!(recovered,"Recovered abandoned AppContainer profiles before accepting jobs");
             }
+            // Retain proofs on every earlier failure. Only fully completed
+            // ACL and profile recovery may remove the execution records.
+            let recovered_executions=proofs.finish()?;
+            if recovered_executions>0{tracing::warn!(recovered_executions,"Cleared verified Windows sandbox execution recovery records");}
         }
         for sub in ["tmp","backups","git-journal","empty-home","exec-cache"]{util::private_dir(&config.security.data_dir.join(sub))?;}
-        let cfg=config_path.canonicalize().unwrap_or_else(|_|config_path.to_owned());
-        for mount in &config.execution.readonly_mounts{let source=mount.source.canonicalize()?;if config.security.data_dir.starts_with(&source)||source.starts_with(&config.security.data_dir)||cfg.starts_with(&source){bail!("Sandbox mounts must not expose EndlessVibe config, credentials or state");}}
-        let workspaces=workspace::load(&config,config_path)?;let active_config_revision=config_edit::revision(config_path).unwrap_or_default();let persisted=if config_path.exists(){Config::load_file(config_path)?}else{config.clone()};let active_service_revision=service_config_revision(&persisted)?;let config_path=config_path.to_owned();let config=Arc::new(config);let db=Arc::new(Store::open(&config.security.data_dir.join("state.sqlite3"))?);let auth=Arc::new(Auth::new(config.clone(),db.clone())?);let jobs=Jobs::new(db.clone(),config.clone())?;let transfer=TransferManager::new(config.transfer.clone(),db.clone())?;let(dashboard_events,_)=broadcast::channel(256);
+        let active_config_revision=config_edit::revision(config_path).unwrap_or_default();let persisted=if config_path.exists(){Config::load_file(config_path)?}else{config.clone()};let active_service_revision=service_config_revision(&persisted)?;let config_path=config_path.to_owned();let config=Arc::new(config);let db=Arc::new(Store::open(&config.security.data_dir.join("state.sqlite3"))?);let auth=Arc::new(Auth::new(config.clone(),db.clone())?);let jobs=Jobs::new(db.clone(),config.clone())?;let transfer=TransferManager::new(config.transfer.clone(),db.clone())?;let(dashboard_events,_)=broadcast::channel(256);
         Ok(Arc::new(Self{config,db,auth,jobs,transfer,workspaces:RwLock::new(workspaces),shutdown:CancellationToken::new(),config_path,active_config_revision:RwLock::new(active_config_revision),active_service_revision,retired_projects:Mutex::new(vec![]),dashboard_events,config_edit_lock:Mutex::new(()),traffic_requests:AtomicU64::new(0),traffic_rx:AtomicU64::new(0),traffic_tx:AtomicU64::new(0),started:Instant::now(),started_unix:util::now(),_instance:instance}))
     }
     fn workspaces_snapshot(&self)->BTreeMap<String,Arc<Workspace>>{self.workspaces.read().unwrap_or_else(|e|e.into_inner()).clone()}
@@ -148,13 +179,15 @@ impl Runtime{
     pub fn body_limit(&self)->usize{self.config.limits.max_file_bytes.saturating_mul(6).saturating_add(65536)}
     pub fn workspace_project_counts(&self)->(usize,usize){let workspaces=self.workspaces_snapshot();(workspaces.len(),workspaces.values().map(|w|w.projects.len()).sum())}
     fn reload_authorization_inner(&self)->Result<Value>{
-        let persisted=Config::load_file(&self.config_path)?;let service_revision=service_config_revision(&persisted)?;
-        if service_revision!=self.active_service_revision{return Err(crate::error::coded("RELOAD_RESTART_REQUIRED",false,"service-level configuration changed; restart EndlessVibe before marking this config revision active"));}
-        let mut next=workspace::load(&persisted,&self.config_path)?;let revision=config_edit::revision(&self.config_path)?;
-        let old={let mut current=self.workspaces.write().unwrap_or_else(|e|e.into_inner());reuse_project_locks(&mut next,&current);std::mem::replace(&mut *current,next)};
-        {let mut retired=self.retired_projects.lock().map_err(|_|anyhow::anyhow!("Retired project table poisoned"))?;retired.retain(|p|p.lock.try_lock().is_err());for project in old.values().flat_map(|w|w.projects.values()){if project.lock.try_lock().is_err()&&!retired.iter().any(|existing|Arc::ptr_eq(&existing.lock,&project.lock)){retired.push(project.clone());}}}
-        *self.active_config_revision.write().unwrap_or_else(|e|e.into_inner())=revision.clone();let(workspace_count,project_count)=self.workspace_project_counts();let active_revision=revision.clone();
-        Ok(json!({"revision":revision,"active_revision":active_revision,"requires_restart":false,"workspace_count":workspace_count,"project_count":project_count,"reloaded":true}))
+        self.jobs.with_authorization_reload(||{
+            let persisted=Config::load_file(&self.config_path)?;let service_revision=service_config_revision(&persisted)?;
+            if service_revision!=self.active_service_revision{return Err(crate::error::coded("RELOAD_RESTART_REQUIRED",false,"service-level configuration changed; restart EndlessVibe before marking this config revision active"));}
+            let mut next=workspace::load(&persisted,&self.config_path)?;let revision=config_edit::revision(&self.config_path)?;
+            let old={let mut current=self.workspaces.write().unwrap_or_else(|e|e.into_inner());reuse_project_locks(&mut next,&current);std::mem::replace(&mut *current,next)};
+            {let mut retired=self.retired_projects.lock().map_err(|_|anyhow::anyhow!("Retired project table poisoned"))?;retired.retain(|p|p.lock.try_lock().is_err());for project in old.values().flat_map(|w|w.projects.values()){if project.lock.try_lock().is_err()&&!retired.iter().any(|existing|Arc::ptr_eq(&existing.lock,&project.lock)){retired.push(project.clone());}}}
+            *self.active_config_revision.write().unwrap_or_else(|e|e.into_inner())=revision.clone();let(workspace_count,project_count)=self.workspace_project_counts();let active_revision=revision.clone();
+            Ok(json!({"revision":revision,"active_revision":active_revision,"requires_restart":false,"workspace_count":workspace_count,"project_count":project_count,"reloaded":true}))
+        })
     }
     pub fn dashboard_reload_config(&self)->Result<Value>{let operation=self.begin_operation("dashboard_reload_config","","",json!({}));let result=(||{let _guard=self.config_edit_lock.lock().map_err(|_|anyhow::anyhow!("Config edit lock poisoned"))?;let value=self.reload_authorization_inner()?;self.publish_dashboard("config_changed",value.clone());Ok(value)})();self.finish_operation(operation,result)}
     pub fn dashboard_storage_maintenance(&self)->Result<Value>{let operation=self.begin_operation("dashboard_storage_maintenance","","",json!({}));let result=self.db.maintain(self.config.limits.retained_jobs);self.finish_operation(operation,result)}
@@ -177,7 +210,7 @@ impl Runtime{
             "diagnostics":diagnostics,
         }))
     }
-    pub fn snapshot(&self)->Value{let admission=self.jobs.admission_status();let workspaces=self.workspaces_snapshot();let projects=workspaces.values().map(|w|w.projects.len()).sum::<usize>();let development_projects=workspaces.values().flat_map(|w|w.projects.values()).filter(|p|p.config.development()).count();let network_enabled=self.config.execution.backend=="host"||self.config.execution.allow_network||development_projects>0;json!({"status":"running","name":"EndlessVibe","version":env!("CARGO_PKG_VERSION"),"listen_address":self.config.server.bind.to_string(),"port":self.config.server.bind.port(),"uptime_seconds":self.started.elapsed().as_secs(),"started_at_unix_seconds":self.started_unix,"checked_at_unix_seconds":util::now(),"security":{"authentication":"oauth2_pkce","anonymous_private_tools":false,"execution_backend":self.config.execution.backend,"shell_enabled":self.config.execution.allow_shell,"network_enabled":network_enabled,"development_project_count":development_projects,"network_mode":if self.config.execution.backend=="host"{"host_always"}else if development_projects>0{"project_profiles"}else if self.config.execution.allow_network{"per_job_opt_in"}else{"isolated"},"network_isolation":if self.config.execution.backend=="host"{"none_host_permissions"}else if development_projects>0{"isolated projects stay isolated; development projects share host network by default"}else if self.config.execution.allow_network{"isolated_by_default; network=true shares host network"}else{"isolated_or_disabled"}},"dashboard":{"enabled":true,"listen_address":"127.0.0.1:20001","url":"http://127.0.0.1:20001/"},"workspace_count":workspaces.len(),"project_count":projects,"active_jobs":self.jobs.active_count(),"accepting_jobs":admission["accepting_jobs"],"job_pause_reason":admission["pause_reason"],"transfer":{"enabled":self.transfer.config.enabled,"node_id":self.transfer.node_id,"listen":self.transfer.config.listen},"docker":{"enabled":self.config.docker.enabled,"container_count":self.config.docker.allowed_containers.len(),"project_socket_enabled":self.config.docker.allow_project_socket},"mcp":{"endpoint":"/mcp","method":"POST","transport":"streamable_http","session_mode":"stateless","protocol_version":"negotiated","implementation":"rmcp","sdk_version":crate::mcp::SDK_VERSION,"tool_schema_revision":crate::mcp::TOOL_SCHEMA_REVISION,"tool_count":crate::mcp::TOOL_NAMES.len(),"chatgpt_registration":"client_specific_not_asserted","tools":crate::mcp::TOOL_NAMES}})}
+    pub fn snapshot(&self)->Value{let admission=self.jobs.admission_status();let workspaces=self.workspaces_snapshot();let projects=workspaces.values().map(|w|w.projects.len()).sum::<usize>();let development_projects=workspaces.values().flat_map(|w|w.projects.values()).filter(|p|p.config.development()).count();let network_enabled=self.config.execution.backend!="appcontainer"&&(self.config.execution.backend=="host"||self.config.execution.allow_network||development_projects>0);json!({"status":"running","name":"EndlessVibe","version":env!("CARGO_PKG_VERSION"),"listen_address":self.config.server.bind.to_string(),"port":self.config.server.bind.port(),"uptime_seconds":self.started.elapsed().as_secs(),"started_at_unix_seconds":self.started_unix,"checked_at_unix_seconds":util::now(),"security":{"authentication":"oauth2_pkce","anonymous_private_tools":false,"execution_backend":self.config.execution.backend,"shell_enabled":self.config.execution.allow_shell,"network_enabled":network_enabled,"development_project_count":development_projects,"network_mode":if self.config.execution.backend=="host"{"host_always"}else if self.config.execution.backend=="appcontainer"{"appcontainer_offline"}else if development_projects>0{"project_profiles"}else if self.config.execution.allow_network{"per_job_opt_in"}else{"isolated"},"network_isolation":if self.config.execution.backend=="host"{"none_host_permissions"}else if self.config.execution.backend=="appcontainer"{"LPAC with zero network capabilities, including development projects"}else if development_projects>0{"isolated projects stay isolated; development projects share host network by default"}else if self.config.execution.allow_network{"isolated_by_default; network=true shares host network"}else{"isolated_or_disabled"}},"dashboard":{"enabled":true,"listen_address":"127.0.0.1:20001","url":"http://127.0.0.1:20001/"},"workspace_count":workspaces.len(),"project_count":projects,"active_jobs":self.jobs.active_count(),"accepting_jobs":admission["accepting_jobs"],"job_pause_reason":admission["pause_reason"],"transfer":{"enabled":self.transfer.config.enabled,"node_id":self.transfer.node_id,"listen":self.transfer.config.listen},"docker":{"enabled":self.config.docker.enabled,"container_count":self.config.docker.allowed_containers.len(),"project_socket_enabled":self.config.docker.allow_project_socket},"mcp":{"endpoint":"/mcp","method":"POST","transport":"streamable_http","session_mode":"stateless","protocol_version":"negotiated","implementation":"rmcp","sdk_version":crate::mcp::SDK_VERSION,"tool_schema_revision":crate::mcp::TOOL_SCHEMA_REVISION,"tool_count":crate::mcp::TOOL_NAMES.len(),"chatgpt_registration":"client_specific_not_asserted","tools":crate::mcp::TOOL_NAMES}})}
     pub fn dashboard_config(&self)->Result<Value>{let persisted=Config::load_file(&self.config_path)?;let revision=config_edit::revision(&self.config_path)?;let active_revision=self.active_config_revision.read().unwrap_or_else(|e|e.into_inner()).clone();let effective=workspace::load(&persisted,&self.config_path)?;let workspaces=effective.values().map(|w|json!({"id":w.config.id,"path":w.root.path,"project_count":w.projects.len(),"projects":w.projects.values().map(|p|p.summary()).collect::<Vec<_>>() })).collect::<Vec<_>>();let requires_restart=revision!=active_revision;Ok(json!({"revision":revision,"active_revision":active_revision,"requires_restart":requires_restart,"server":{"bind":persisted.server.bind.to_string(),"public_url":persisted.server.public_url,"allowed_hosts":persisted.server.allowed_hosts},"dashboard":{"listen_address":"127.0.0.1:20001","local_only":true},"security":{"authentication":"oauth2_pkce","allow_http_loopback":persisted.security.allow_http_loopback,"access_token_seconds":persisted.security.access_token_seconds,"refresh_token_seconds":persisted.security.refresh_token_seconds,"extra_redirect_uri_count":persisted.security.extra_redirect_uris.len()},"execution":{"backend":persisted.execution.backend,"active_backend":self.config.execution.backend,"host_os":std::env::consts::OS,"allow_shell":persisted.execution.allow_shell,"allow_network":persisted.execution.allow_network,"auto_discover_toolchains":persisted.execution.auto_discover_toolchains,"bubblewrap":persisted.execution.bubblewrap,"path":persisted.execution.path,"allowed_programs":persisted.execution.allowed_programs,"required_programs":persisted.execution.required_programs,"readonly_mounts":persisted.execution.readonly_mounts.iter().map(|m|json!({"source":m.source,"target":m.target})).collect::<Vec<_>>(),"memory_limit_mb":persisted.execution.memory_limit_mb,"max_processes":persisted.execution.max_processes},"limits":{"max_file_bytes":persisted.limits.max_file_bytes,"max_read_bytes":persisted.limits.max_read_bytes,"max_output_bytes":persisted.limits.max_output_bytes,"command_timeout_seconds":persisted.limits.command_timeout_seconds,"max_jobs":persisted.limits.max_jobs,"retained_jobs":persisted.limits.retained_jobs,"search_max_files":persisted.limits.search_max_files,"search_max_bytes":persisted.limits.search_max_bytes},"git":{"executable":persisted.git.executable,"author_name":persisted.git.author_name,"author_email":persisted.git.author_email},"transfer":{"enabled":persisted.transfer.enabled,"listen":persisted.transfer.listen,"advertise":persisted.transfer.advertise,"discover":persisted.transfer.discover,"display_name":persisted.transfer.display_name},"docker":{"enabled":persisted.docker.enabled,"socket":persisted.docker.socket,"allowed_containers":persisted.docker.allowed_containers,"allow_start":persisted.docker.allow_start,"allow_stop":persisted.docker.allow_stop,"allow_restart":persisted.docker.allow_restart,"allow_project_socket":persisted.docker.allow_project_socket},"mcp":{"tool_schema_revision":crate::mcp::TOOL_SCHEMA_REVISION,"tool_count":crate::mcp::TOOL_NAMES.len(),"tools":crate::mcp::TOOL_NAMES},"workspaces":workspaces,"note":"Sensitive credentials and token material are intentionally omitted. Project authorization changes can be hot-reloaded; service-level changes still require restart."}))}
     pub fn dashboard_update_execution_backend(&self,request:UpdateExecutionBackendRequest)->Result<Value>{
         let operation=self.begin_operation("dashboard_update_execution_backend","","",
@@ -221,19 +254,20 @@ impl Runtime{
 mod windows_sandbox_status_tests {
     use super::*;
     #[test]
-    fn appcontainer_is_reported_as_prototype_and_not_a_host_sandbox(){
+    fn appcontainer_capability_and_active_backend_are_reported_separately(){
         let mut config=Config::default();
         config.execution.backend="host".into();
         let reported=windows_sandbox_status(&config);
         assert_eq!(reported["job_objects"]["active_for_command_jobs"],true);
         assert_eq!(reported["job_objects"]["filesystem_isolation"],false);
         assert_eq!(reported["job_objects"]["network_isolation"],false);
-        assert_eq!(reported["appcontainer"]["backend_selectable"],false);
+        assert_eq!(reported["appcontainer"]["backend_selectable"],true);
+        assert_eq!(reported["appcontainer"]["command_jobs"]["active"],false);
         assert_eq!(reported["windows_service_update"]["enabled"],false);
         assert_eq!(reported["windows_service_update"]["native_helper"],true);
         assert_eq!(reported["windows_service_update"]["explicit_confirmation_and_two_digests"],true);
         assert_eq!(reported["windows_service_update"]["shell_required"],false);
-        assert_eq!(reported["appcontainer"]["status"],"fixed_operation_probe_only");
+        assert_eq!(reported["appcontainer"]["status"],"available");
         assert_eq!(reported["appcontainer"]["production_worker_entrypoint"],true);
         assert_eq!(reported["appcontainer"]["signature_diagnostics"]["embedded_winverifytrust_offline"],true);
         assert_eq!(reported["appcontainer"]["signature_diagnostics"]["catalog_signatures_checked"],false);
@@ -262,7 +296,15 @@ mod windows_sandbox_status_tests {
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["cancel_on_violation"],true);
         assert_eq!(reported["appcontainer"]["fixed_worker_logs"]["general_command_capture"],false);
         assert_eq!(reported["appcontainer"]["crash_recovery_journaled"],true);
-        assert_eq!(reported["appcontainer"]["arbitrary_program_execution"],false);
+        assert_eq!(reported["appcontainer"]["arbitrary_program_execution"],true);
+        config.execution.backend="appcontainer".into();
+        let active=windows_sandbox_status(&config);
+        assert_eq!(active["appcontainer"]["status"],"active");
+        assert_eq!(active["appcontainer"]["command_jobs"]["active"],true);
+        assert_eq!(active["appcontainer"]["command_jobs"]["capability_count"],1);
+        assert_eq!(active["appcontainer"]["command_jobs"]["capabilities"],json!(["registryRead"]));
+        assert_eq!(active["appcontainer"]["command_jobs"]["network"],false);
+        assert_eq!(active["appcontainer"]["command_jobs"]["host_fallback"],false);
         assert_eq!(reported["profile_recovery"]["startup_scan_enabled"],true);
         config.execution.backend="disabled".into();
         assert_eq!(windows_sandbox_status(&config)["job_objects"]["active_for_command_jobs"],false);
