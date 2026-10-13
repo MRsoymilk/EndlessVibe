@@ -240,13 +240,62 @@ async function savePeerGrants(peer,grants){
  status("已更新 "+peer.name+" 的授权（"+grants.length+" 个 Project），无需重新配对或重启");
  await refreshNodes(true);
 }
+// "Paired" is durable authorization, not a connectivity result. Only an
+// authenticated parent -> child TLS probe establishes the live state.
+export function peerHealthDescriptor(peer){
+ const state=peer.role==="parent" ? peer.connection_state||"unknown" : "unknown";
+ const last=peer.last_verified ? formatTime(peer.last_verified) : "尚未成功验证";
+ if(peer.role!=="parent"){
+  return {state:"unknown",label:"父节点状态未验证",
+    detail:peer.discovery_online
+      ?"近期收到父节点 LAN 广播（未经 TLS 验证）"
+      :"近期未收到父节点广播；子节点不主动探测父节点"};
+ }
+ if(state==="online"){
+  const latency=Number.isFinite(peer.probe_latency_ms)?` · ${peer.probe_latency_ms} ms`:"";
+  return {state,label:"在线 · TLS 已验证",detail:"最近验证："+formatTime(peer.last_checked)+latency};
+ }
+ if(state==="unreachable"){
+  return {state,label:"连接不可达",detail:"TLS 连续探测失败 · 最近在线："+last+"（可能服务关闭或网络中断）"};
+ }
+ if(state==="checking")return {state,label:"正在检测",detail:"正在验证 TLS 连接；短暂失败需再次确认 · 最近在线："+last};
+ if(state==="unsupported")return {state,label:"旧版节点 · 无法验证",detail:"子节点 TLS 端点可以连接，但旧版不支持健康探测；升级子节点后可显示准确在线状态"};
+ if(state==="disabled")return {state,label:"Transfer 已禁用",detail:"本机 Transfer 未启用 · 保留配对关系"};
+ return {state:"unknown",label:"连接状态未知",detail:"等待新的 TLS 探测 · 最近在线："+last};
+}
+function updateTrustedPresence(card,peer){
+ const info=peerHealthDescriptor(peer);
+ card.dataset.connectivity=info.state;
+ let badge=card.querySelector(".node-peer-health");
+ if(!badge){
+  badge=node("span","node-peer-health");
+  card.querySelector(".node-card-header")?.append(badge);
+ }
+ badge.dataset.state=info.state;
+ badge.textContent=info.label;
+ let detail=card.querySelector(".node-peer-health-detail");
+ if(!detail){
+  detail=node("div","node-peer-health-detail");
+  card.querySelector(".node-card-header")?.after(detail);
+ }
+ detail.textContent=info.detail;
+}
+function updateTrustedPresences(items){
+ const cards=new Map([...document.querySelectorAll("#node-trusted-list .node-card")]
+   .map(card=>[card.dataset.nodeId,card]));
+ for(const peer of items){
+  const card=cards.get(peer.node_id);
+  if(card)updateTrustedPresence(card,peer);
+ }
+}
 function renderTrusted(items){
  const root=clear("node-trusted-list",items.length?"":"尚无已配对节点");
  for(const p of items){
   const card=item(p.name,p.role==="parent"?"Child (managed)":"Parent (authorized)");
   card.dataset.nodeId=p.node_id;
+  updateTrustedPresence(card,p);
   line(card,p.node_id+" · "+p.endpoint);
-  line(card,p.discovery_online?"Recently discovered on LAN":"Not seen in recent LAN discovery · manual connection may still work");
+  line(card,p.discovery_online?"LAN broadcast: recently seen":"LAN broadcast: not recently seen (does not establish offline status)");
   if(p.role==="parent"){
    card.append(btn("Browse Projects",()=>browse(p)));
   }else{
@@ -310,6 +359,7 @@ export async function refreshNodes(force=false){
   // Do not discard checked permissions while an editor is open.
   if(force||!document.querySelector("#node-trusted-list details.node-grant-details[open]"))
    renderTrusted(peers.peers||[]);
+  else updateTrustedPresences(peers.peers||[]);
   renderTransferMetrics(metrics);
   updateNodeTopology(discovery,pending.pending||[],peers.peers||[],flows);
   setText("node-updated","Updated "+formatTime(Math.floor(Date.now()/1000)));

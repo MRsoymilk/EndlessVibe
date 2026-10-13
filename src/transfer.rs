@@ -5,7 +5,7 @@ use crate::{config::Transfer,store::Store,util};
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
-use std::{collections::{BTreeMap,BTreeSet},net::{Ipv4Addr,SocketAddr,SocketAddrV4},sync::{Arc,RwLock},time::Duration};
+use std::{collections::{BTreeMap,BTreeSet},net::{Ipv4Addr,SocketAddr,SocketAddrV4},sync::{Arc,RwLock},time::{Duration,Instant}};
 use tokio::{net::UdpSocket,time};
 use tokio_util::sync::CancellationToken;
 
@@ -13,12 +13,34 @@ const SERVICE:&str="endlessvibe-transfer-v1";
 const GROUP:Ipv4Addr=Ipv4Addr::new(239,255,77,77);
 const DISCOVERY_PORT:u16=20003;
 const MAX_PEERS:usize=128;
+const PEER_PROBE_INTERVAL:Duration=Duration::from_secs(5);
+const MAX_PROBES_PER_TICK:usize=16;
+const PEER_HEALTH_STALE_AFTER_SECS:u64=25;
+#[derive(Clone,Debug,Default)]
+struct PeerHealth {
+    checked_at:u64,
+    last_verified:Option<u64>,
+    failures:u8,
+    latency_ms:Option<u64>,
+    unsupported:bool,
+}
+fn connection_state(health:Option<&PeerHealth>,now:u64)->&'static str {
+    let Some(health)=health else{return "checking"};
+    if health.checked_at==0 || now.saturating_sub(health.checked_at)>PEER_HEALTH_STALE_AFTER_SECS {
+        return "unknown";
+    }
+    if health.unsupported {"unsupported"}
+    else if health.failures>=2 {"unreachable"}
+    else if health.failures>0 {"checking"}
+    else if health.last_verified.is_some() {"online"}
+    else {"checking"}
+}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Announce{pub service:String,pub node_id:String,pub name:String,pub port:u16}
 #[derive(Clone,Debug,Serialize)]
 pub struct Discovered{pub node_id:String,pub name:String,pub address:SocketAddr,pub last_seen:u64,pub online:bool}
-pub struct TransferManager{pub config:Transfer,pub node_id:String,pub db:Arc<Store>,discovered:RwLock<BTreeMap<String,Discovered>>}
+pub struct TransferManager{pub config:Transfer,pub node_id:String,pub db:Arc<Store>,discovered:RwLock<BTreeMap<String,Discovered>>,health:RwLock<BTreeMap<String,PeerHealth>>}
 // Discover LAN IPv4 interfaces explicitly instead of relying on the OS default
 // multicast route (often a VPN or virtual adapter on Windows).
 #[derive(Clone,Copy,Debug,Eq,PartialEq)]
@@ -136,10 +158,95 @@ fn refresh_discovery_memberships(socket:&std::net::UdpSocket,joined:&mut BTreeSe
 }
 fn valid_node_id(id:&str)->bool{id.len()==24&&id.bytes().all(|v|v.is_ascii_hexdigit())}
 impl TransferManager{
- pub fn new(config:Transfer,db:Arc<Store>)->Result<Arc<Self>>{let node_id=match db.get::<String>("transfer_meta","node_id")?{Some(id)if valid_node_id(&id)=>id,Some(_)=>bail!("Invalid persisted Transfer Node ID"),None=>{let raw=util::random_secret()?;let id=util::digest(raw);let id=id[..24].to_owned();db.put("transfer_meta","node_id",&id,0)?;id}};Ok(Arc::new(Self{config,node_id,db,discovered:RwLock::new(BTreeMap::new())}))}
+ pub fn new(config:Transfer,db:Arc<Store>)->Result<Arc<Self>>{let node_id=match db.get::<String>("transfer_meta","node_id")?{Some(id)if valid_node_id(&id)=>id,Some(_)=>bail!("Invalid persisted Transfer Node ID"),None=>{let raw=util::random_secret()?;let id=util::digest(raw);let id=id[..24].to_owned();db.put("transfer_meta","node_id",&id,0)?;id}};Ok(Arc::new(Self{config,node_id,db,discovered:RwLock::new(BTreeMap::new()),health:RwLock::new(BTreeMap::new())}))}
  pub fn announce(&self)->Announce{Announce{service:SERVICE.into(),node_id:self.node_id.clone(),name:self.config.display_name.clone(),port:self.config.listen.port()}}
  pub fn observe(&self,packet:&[u8],address:SocketAddr)->Result<bool>{if packet.len()>512{return Ok(false);}let Ok(item)=serde_json::from_slice::<Announce>(packet)else{return Ok(false)};if item.service!=SERVICE||!valid_node_id(&item.node_id)||item.node_id==self.node_id||item.port==0||item.name.is_empty()||item.name.len()>64{return Ok(false);}let address=SocketAddr::new(address.ip(),item.port);let mut known=self.discovered.write().map_err(|_|anyhow::anyhow!("Transfer registry poisoned"))?;if known.len()>=MAX_PEERS&&!known.contains_key(&item.node_id){let oldest=known.iter().min_by_key(|(_,v)|v.last_seen).map(|(k,_)|k.clone());if let Some(k)=oldest{known.remove(&k);}}known.insert(item.node_id.clone(),Discovered{node_id:item.node_id,name:item.name,address,last_seen:util::now(),online:true});Ok(true)}
  pub fn discoveries(&self)->Value{let now=util::now();let devices=self.discovered.read().map(|peers|peers.values().map(|p|{let mut value=serde_json::to_value(p).unwrap_or(Value::Null);value["online"]=json!(now.saturating_sub(p.last_seen)<=20);value}).collect::<Vec<_>>()).unwrap_or_default();json!({"node_id":self.node_id,"name":self.config.display_name,"enabled":self.config.enabled,"listen":self.config.listen,"local_role":self.local_role().unwrap_or("unknown"),"discovery_protocol":SERVICE,"peers":devices})}
+ fn note_probe(&self,node_id:&str,passed:bool,latency_ms:u64){
+    let Ok(mut health)=self.health.write() else{
+        tracing::warn!("Transfer peer health registry poisoned");return;
+    };
+    let entry=health.entry(node_id.to_owned()).or_default();
+    entry.checked_at=util::now();
+    entry.unsupported=false;
+    if passed {
+        entry.last_verified=Some(entry.checked_at);
+        entry.failures=0;
+        entry.latency_ms=Some(latency_ms);
+    }else{
+        entry.failures=entry.failures.saturating_add(1);
+        entry.latency_ms=None;
+    }
+ }
+ fn note_unsupported_probe(&self,node_id:&str){
+    let Ok(mut health)=self.health.write() else{return;};
+    let entry=health.entry(node_id.to_owned()).or_default();
+    entry.checked_at=util::now();
+    entry.unsupported=true;
+    entry.failures=0;
+    entry.latency_ms=None;
+ }
+ async fn monitor_peers(self:Arc<Self>,shutdown:CancellationToken)->Result<()> {
+    let mut tick=time::interval(PEER_PROBE_INTERVAL);
+    tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let mut next_offset=0usize;
+    loop{
+        tokio::select!{
+            _=shutdown.cancelled()=>break,
+            _=tick.tick()=>{
+                // Only the parent holds the approved token and can actively verify a child.
+                let peers=match self.peers(){
+                    Ok(value)=>value,
+                    Err(error)=>{tracing::debug!(error=%error,"Cannot enumerate peers for health probes");continue;}
+                };
+                let mut ids=peers["peers"].as_array().into_iter().flatten()
+                    .filter(|p|p["role"]=="parent")
+                    .filter_map(|p|p["node_id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                ids.sort();
+                let active=ids.iter().cloned().collect::<BTreeSet<_>>();
+                if let Ok(mut health)=self.health.write(){health.retain(|id,_|active.contains(id));}
+                if ids.is_empty(){next_offset=0;continue;}
+                let count=ids.len().min(MAX_PROBES_PER_TICK);
+                let targets=(0..count).map(|index|ids[(next_offset+index)%ids.len()].clone())
+                    .collect::<Vec<_>>();
+                next_offset=(next_offset+count)%ids.len();
+                let mut probes=tokio::task::JoinSet::new();
+                for node_id in targets{
+                    let transfer=self.clone();
+                    probes.spawn(async move{
+                        let start=Instant::now();
+                        match transfer.probe_child(&node_id).await {
+                            Ok(secure::HealthProbeResult::Verified)=>
+                                transfer.note_probe(&node_id,true,start.elapsed().as_millis() as u64),
+                            Ok(secure::HealthProbeResult::Unsupported)=>
+                                transfer.note_unsupported_probe(&node_id),
+                            Err(error)=>{
+                                transfer.note_probe(&node_id,false,start.elapsed().as_millis() as u64);
+                                tracing::debug!(node_id=%node_id,error=%error,"Transfer peer health probe failed");
+                            }
+                        }
+                    });
+                }
+                while !probes.is_empty(){
+                    tokio::select!{
+                        _=shutdown.cancelled()=>{
+                            probes.abort_all();
+                            while probes.join_next().await.is_some(){}
+                            return Ok(());
+                        },
+                        joined=probes.join_next()=>{
+                            if let Some(Err(error))=joined{
+                                tracing::debug!(error=%error,"Transfer peer health task failed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+ }
  pub async fn run(self:Arc<Self>,shutdown:CancellationToken,rt:Arc<crate::runtime::Runtime>)->Result<()>{
   if !self.config.enabled{return Ok(());}
   let emitter=async{
@@ -203,8 +310,9 @@ impl TransferManager{
     Ok::<_,anyhow::Error>(())
   };
   let tls=self.clone().run_tls(shutdown.clone(),Some(rt));
-  let(a,b,c,d)=tokio::join!(emitter,receiver,tls,pairing);
-  a?;b?;c?;d?;Ok(())
+  let monitor=self.clone().monitor_peers(shutdown.clone());
+  let(a,b,c,d,e)=tokio::join!(emitter,receiver,tls,pairing,monitor);
+  a?;b?;c?;d?;e?;Ok(())
  }
 }
 #[cfg(test)]mod tests{
@@ -236,5 +344,27 @@ use super::*;
         "255.255.255.254".parse().unwrap(),31,None),None);
 }
 
+#[test]
+fn pinned_tls_health_requires_two_failures_and_rechecks_expiry(){
+ let now=1000;
+ assert_eq!(connection_state(None,now),"checking");
+ let mut h=PeerHealth{checked_at:now,last_verified:Some(now),failures:0,latency_ms:Some(17),unsupported:false};
+ assert_eq!(connection_state(Some(&h),now),"online");
+ h.failures=1;
+ assert_eq!(connection_state(Some(&h),now),"checking");
+ h.failures=2;
+ assert_eq!(connection_state(Some(&h),now),"unreachable");
+ h.failures=0;
+ h.checked_at=now+1;
+ h.last_verified=Some(now+1);
+ assert_eq!(connection_state(Some(&h),now+1),"online");
+ assert_eq!(connection_state(Some(&h),now+PEER_HEALTH_STALE_AFTER_SECS+2),"unknown");
+ let never=PeerHealth{checked_at:now,last_verified:None,failures:0,latency_ms:None,unsupported:false};
+ assert_eq!(connection_state(Some(&never),now),"checking");
+ h.unsupported=true;
+ assert_eq!(connection_state(Some(&h),now+1),"unsupported");
+ h.unsupported=false;
+ assert_eq!(connection_state(Some(&h),now+1),"online");
+}
 #[test]fn transfer_id_persists_and_discovery_is_bounded(){let temp=tempfile::tempdir().unwrap();let db=Arc::new(Store::open(&temp.path().join("db")).unwrap());let first=TransferManager::new(Transfer::default(),db.clone()).unwrap();let second=TransferManager::new(Transfer::default(),db).unwrap();assert_eq!(first.node_id,second.node_id);let announce=Announce{service:SERVICE.into(),node_id:"abcdef123456abcdef123456".into(),name:"Child".into(),port:20002};let msg=serde_json::to_vec(&announce).unwrap();assert!(first.observe(&msg,"192.168.1.99:34567".parse().unwrap()).unwrap());let nodes=first.discoveries();assert_eq!(nodes["peers"][0]["address"],"192.168.1.99:20002");assert_eq!(nodes["peers"][0]["online"],true);assert!(!first.observe(b"{invalid","192.168.1.99:1".parse().unwrap()).unwrap());assert!(!first.observe(&serde_json::to_vec(&first.announce()).unwrap(),"127.0.0.1:100".parse().unwrap()).unwrap());}
 }

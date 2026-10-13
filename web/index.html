@@ -50,6 +50,7 @@
 <section class="page" data-page="nodes">
 <div class="page-title"><div><p class="eyebrow">LAN NODE MESH</p><h2>Nodes</h2><p>局域网发现、加密配对与远程 Project 管理。父节点发起请求，子节点核对六位验证码后选择同意或拒绝；无需双方重复批准。</p></div><span id="node-updated">等待扫描</span></div>
 <div class="node-summary"><div class="node-role-summary"><strong id="node-role" class="node-role" data-role="unassigned">角色待确定</strong><span id="node-identity">Transfer disabled</span></div><button id="node-refresh" type="button">Refresh nodes</button></div>
+<p class="node-health-help node-muted">父节点每 5 秒通过认证的 TLS 连接验证子节点。连续 2 次失败时显示“连接不可达”，恢复后自动恢复在线；配对和 Project 授权不会被清除。旧版子节点不支持健康探测时显示“状态未验证”，不会误判为离线。LAN 广播只表示最近被发现，不等于连接存活。</p>
 <div class="node-metrics" id="node-metrics" aria-label="Transfer reliability metrics">
 <article><span>Recorded requests</span><strong id="node-metric-total">—</strong></article>
 <article><span>Needs review</span><strong id="node-metric-review">—</strong></article>

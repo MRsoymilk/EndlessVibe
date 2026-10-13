@@ -7,7 +7,7 @@ use std::sync::Arc;
 mod legacy_remote;
 pub const SDK_VERSION:&str="3.5.0";
 /// Bump whenever any exposed MCP tool name, argument schema, security metadata or semantics change.
-pub const TOOL_SCHEMA_REVISION:&str="2026-10-11.5";
+pub const TOOL_SCHEMA_REVISION:&str="2026-10-13.1";
 pub const TOOL_NAMES:&[&str]=&["hello","get_service_status","get_sandbox_diagnostics","windows_service_update_plan","windows_service_update","windows_service_update_status","list_workspaces","list_projects","inspect_project","list_directory","read_file","write_file","apply_patch","create_directory","search_code","run_command","run_shell","get_job","get_job_output","cancel_job","list_jobs","start_task","get_task_checkpoint","continue_task","list_task_checkpoints","git_status","git_diff","git_log","git_commit","git_push","docker_list","docker_inspect","docker_logs","docker_stats","docker_compose","docker_start","docker_stop","docker_restart","node_list","node_read","node_write"];
 #[derive(Clone)]pub struct EndlessVibeMcp{rt:Arc<Runtime>}
 const MCP_TEXT_MIRROR_MAX_BYTES:usize=2048;
@@ -140,7 +140,7 @@ impl EndlessVibeMcp{
     #[tool(meta=tool_meta("git_commit"),description="Commit only explicitly reviewed project file snapshots. For long work, provide task_id + stage; a successful commit becomes the durable checkpoint for that stage. No hooks, signing, push, reset or clean.",annotations(read_only_hint=false,destructive_hint=true,idempotent_hint=false,open_world_hint=false))]
     async fn git_commit(&self,Parameters(a):Parameters<CommitArgs>)->CallToolResult{let w=a.workspace.clone();let p=a.project.clone();if let Some(out)=legacy_remote::forward_write(&self.rt,"git_commit",&w,&p,&a).await{return out;}let op=begin(&self.rt,"git_commit",&w,&p,&a);let result=self.rt.asynchronous_project("git_commit",&w,&p,move|rt,project|async move{git::commit(&rt,&project,a).await}).await;answer_logged(&self.rt,op,result)}
 
-    #[tool(meta=tool_meta("node_list"),description="List local discovered Transfer nodes and trusted paired nodes. Discovery is unauthenticated; only paired nodes may be called. Uses local-only state, does not expose pairing credentials.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    #[tool(meta=tool_meta("node_list"),description="List locally discovered and paired Transfer nodes. Paired child connection_state is checked over pinned TLS by the parent: online, checking, unreachable, unsupported (legacy child), unknown or disabled. LAN discovery is unauthenticated and does not prove reachability. No pairing credentials are exposed.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
     fn node_list(&self)->CallToolResult{let op=empty(&self.rt,"node_list");let result=self.rt.transfer.peers().map(|mut p|{p["discovery"]=self.rt.transfer.discoveries();p});answer_logged(&self.rt,op,result)}
 
     #[tool(meta=tool_meta("node_read"),description="Read a paired child Project through encrypted Transfer. Provide node_id, tool (list_workspaces, list_projects, inspect_project, list_directory, read_file, search_code, git_status, git_diff, git_log, get_task_checkpoint, continue_task, list_task_checkpoints, request_status or request_history) and the same arguments as the corresponding local tool. Each call is authorized again by the child; local behavior and SHA/diff constraints are unchanged.",annotations(read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]

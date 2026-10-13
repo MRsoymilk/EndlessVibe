@@ -13,6 +13,20 @@ const MAX_WIRE:usize=2*1024*1024;
 const PAIR_TTL:u64=300;
 const PAIRS:&str="transfer_peers";
 const PENDING:&str="transfer_pending";
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub(crate) enum HealthProbeResult{Verified,Unsupported}
+fn health_probe_response(reply:&Value,node_id:&str)->Result<HealthProbeResult>{
+    // Older paired children understand "call" but not "health_probe":
+    // do not report those otherwise-working nodes as offline.
+    if reply["ok"]==false
+        && reply["error"].as_str()==Some("Transfer request type is not supported"){
+        return Ok(HealthProbeResult::Unsupported);
+    }
+    if reply["ok"]!=true||reply["kind"]!="health_ack"||reply["node_id"]!=node_id{
+        bail!("Pinned TLS health probe did not return a valid acknowledgement");
+    }
+    Ok(HealthProbeResult::Verified)
+}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant{pub workspace:String,pub project:String,pub read:bool,pub write:bool,pub execute:bool,pub git:bool}
@@ -230,7 +244,14 @@ impl TransferManager{
         rows.into_iter().map(|s|Ok(serde_json::from_str(&s)?)).collect()
     })?;
     let discovered=self.discoveries();
+    let now=util::now();
+    let health=self.health.read().map_err(|_|anyhow::anyhow!("Transfer health registry poisoned"))?;
     let peers=items.iter().map(|p| -> Result<Value>{
+        let probe=health.get(&p.node_id);
+        // Outbound pinned-TLS probes only apply when THIS node is the parent.
+        let connection=if !self.config.enabled {"disabled"}
+            else if p.role=="parent" {super::connection_state(probe,now)}
+            else {"unknown"};
         let seen=discovered["peers"].as_array()
             .and_then(|items|items.iter().find(|d|d["node_id"]==p.node_id));
         Ok(json!({
@@ -238,7 +259,11 @@ impl TransferManager{
             "role":p.role,"paired_at":p.paired_at,"grants":p.grants,
             "grants_revision":grants_revision(p)?,
             "discovery_online":seen.and_then(|v|v["online"].as_bool()).unwrap_or(false),
-            "discovered_last_seen":seen.and_then(|v|v["last_seen"].as_u64())
+            "discovered_last_seen":seen.and_then(|v|v["last_seen"].as_u64()),
+            "connection_state":connection,
+            "last_checked":probe.map(|v|v.checked_at).filter(|t|*t>0),
+            "last_verified":probe.and_then(|v|v.last_verified),
+            "probe_latency_ms":if connection=="online"{probe.and_then(|v|v.latency_ms)}else{None}
         }))
     }).collect::<Result<Vec<_>>>()?;
     Ok(json!({"peers":peers}))
@@ -319,8 +344,37 @@ impl TransferManager{
         }))
     })
  }
- pub fn revoke_pair(&self,node_id:&str)->Result<Value>{if !valid_node(node_id){bail!("Invalid Node ID");}self.db.transaction(|tx|{let item:Option<Peer>=crate::store::get(tx,PAIRS,node_id)?;if let Some(ref p)=item{if p.role=="child"{crate::store::delete(tx,"transfer_meta","parent_node")?;}crate::store::delete(tx,PAIRS,node_id)?;}Ok(json!({"revoked":item.is_some(),"node_id":node_id}))})}
+ pub fn revoke_pair(&self,node_id:&str)->Result<Value>{
+    if !valid_node(node_id){bail!("Invalid Node ID");}
+    let result=self.db.transaction(|tx|{
+        let item:Option<Peer>=crate::store::get(tx,PAIRS,node_id)?;
+        if let Some(ref p)=item{
+            if p.role=="child"{crate::store::delete(tx,"transfer_meta","parent_node")?;}
+            crate::store::delete(tx,PAIRS,node_id)?;
+        }
+        Ok(json!({"revoked":item.is_some(),"node_id":node_id}))
+    })?;
+    if let Ok(mut health)=self.health.write(){health.remove(node_id);}
+    Ok(result)
+ }
  pub fn incoming_peer(&self,node_id:&str,token:&str)->Result<Peer>{let peer:Peer=self.db.get(PAIRS,node_id)?.context("Transfer peer is not paired")?;if peer.role!="child"{bail!("This peer cannot control local Projects");}let hash=util::digest(token);if token.len()<32||!bool::from(subtle::ConstantTimeEq::ct_eq(hash.as_bytes(),peer.token_hash.as_bytes())){bail!("Invalid Transfer peer credential");}Ok(peer)}
+ /// Read-only authenticated liveness probe. Does not access a Project,
+ /// create an operation log, or reuse the slow tool-call retry path.
+ pub(crate) async fn probe_child(&self,node_id:&str)->Result<HealthProbeResult>{
+    if !self.config.enabled{bail!("Transfer is disabled");}
+    if !valid_node(node_id){bail!("Invalid target Node ID");}
+    let peer:Peer=self.db.get(PAIRS,node_id)?.context("Node is not paired")?;
+    if peer.role!="parent"||peer.token.is_empty(){bail!("Only the parent may probe its paired child");}
+    let packet=json!({"kind":"health_probe","node_id":self.node_id,"token":peer.token});
+    let(answer,fingerprint)=request(peer.endpoint,Some(peer.cert_sha.clone()),packet,3).await?;
+    if fingerprint!=peer.cert_sha{bail!("Pinned TLS certificate changed");}
+    health_probe_response(&answer,&peer.node_id)
+ }
+ fn respond_to_health_probe(&self,wire:&Wire)->Result<Value>{
+    if wire.kind!="health_probe"||!valid_node(&wire.node_id){bail!("Invalid health request");}
+    self.incoming_peer(&wire.node_id,&wire.token)?;
+    Ok(json!({"ok":true,"kind":"health_ack","node_id":self.node_id}))
+ }
  pub async fn call_node(&self,node_id:&str,tool:&str,args:Value)->Result<Value>{self.call_node_with_request_id(node_id,tool,args,None).await}
  pub async fn call_node_with_request_id(&self,node_id:&str,tool:&str,args:Value,request_id:Option<&str>)->Result<Value>{if !self.config.enabled{bail!("Transfer is disabled");}if !valid_node(node_id){bail!("Invalid target Node ID");}let peer:Peer=self.db.get(PAIRS,node_id)?.context("Node is not paired")?;if peer.role!="parent"||peer.token.is_empty(){bail!("Only an approved parent may forward Project calls to a child");}let id=if let Some(id)=request_id{id.to_owned()}else if tool=="run_command"{args.get("request_id").and_then(Value::as_str).map(str::to_owned).unwrap_or(util::random_secret()?)}else{util::random_secret()?};let req=json!({"kind":"call","node_id":self.node_id,"token":peer.token,"tool":tool,"id":id,"args":args});let first=request(peer.endpoint,Some(peer.cert_sha.clone()),req.clone(),90).await;
  let(answer,fingerprint)=match first{Ok(result)=>result,Err(error) if retryable_tool(tool)=>{tracing::debug!(node_id=%node_id,tool,error=%error,"Retrying safe Transfer read after connection failure");request(peer.endpoint,Some(peer.cert_sha.clone()),req,90).await?},Err(error)=>return Err(error)};
@@ -357,6 +411,7 @@ impl TransferManager{
        let response=match wire.kind.as_str(){
         "pair_hello"=>manager.receive_pair(&wire,addr,&digest),
         "pair_status"=>manager.pairing_status(&wire),
+        "health_probe"=>manager.respond_to_health_probe(&wire),
         "call"=>{
          let rt=rt.context("Transfer Project routing is not active")?;
          crate::transfer::router::dispatch(rt,manager.clone(),wire)
@@ -436,6 +491,20 @@ async fn tls_partial_frame_and_disconnected_response_never_duplicate_mutation(){
  assert!(parent.approve_pair(PairApprove{id,grants:vec![]},&rt).is_err());
  parent.reconcile_pending().await.unwrap();
  let peer:Peer=parent.db.get(PAIRS,&rt.transfer.node_id).unwrap().unwrap();
+ // An authenticated probe needs no Project grant and creates no operation log.
+ let before_probe_count=rt.db.transaction(|tx|Ok(tx.query_row(
+  "SELECT COUNT(*) FROM operation_log",[],|r|r.get::<_,i64>(0))?)).unwrap();
+ assert_eq!(parent.probe_child(&rt.transfer.node_id).await.unwrap(),HealthProbeResult::Verified);
+ parent.note_probe(&rt.transfer.node_id,true,10);
+ let verified=parent.peers().unwrap();
+ assert_eq!(verified["peers"][0]["connection_state"],"online");
+ assert_eq!(verified["peers"][0]["probe_latency_ms"],10);
+ let unauthenticated:Wire=serde_json::from_value(json!({
+  "kind":"health_probe","node_id":parent.node_id,"token":"invalid"})).unwrap();
+ assert!(rt.transfer.respond_to_health_probe(&unauthenticated).is_err());
+ let after_probe_count=rt.db.transaction(|tx|Ok(tx.query_row(
+  "SELECT COUNT(*) FROM operation_log",[],|r|r.get::<_,i64>(0))?)).unwrap();
+ assert_eq!(before_probe_count,after_probe_count);
  let connector=TlsConnector::from(tls_client_config(Some(peer.cert_sha.clone())).unwrap());
 
  // A valid TLS session that drops midway through a length-prefixed JSON message
@@ -481,6 +550,29 @@ async fn tls_partial_frame_and_disconnected_response_never_duplicate_mutation(){
   "SELECT COUNT(*) FROM operation_log WHERE tool='transfer_create_directory'",[],|r|r.get::<_,i64>(0))?)).unwrap();
  assert_eq!(after,before);
  shutdown.cancel();server.await.unwrap().unwrap();
+ // Parent continues trusting the child, but no longer reports it as online
+ // after the remote TLS listener stops. The pairing is not revoked.
+ assert!(parent.probe_child(&rt.transfer.node_id).await.is_err());
+ parent.note_probe(&rt.transfer.node_id,false,0);
+ assert_eq!(parent.peers().unwrap()["peers"][0]["connection_state"],"checking");
+ parent.note_probe(&rt.transfer.node_id,false,0);
+ let stopped=parent.peers().unwrap();
+ assert_eq!(stopped["peers"][0]["connection_state"],"unreachable");
+ assert_eq!(stopped["peers"][0]["last_verified"].as_u64().is_some(),true);
+ assert_eq!(stopped["peers"][0]["node_id"],rt.transfer.node_id);
+ assert_eq!(stopped["peers"][0]["role"],"parent");
+ // Restarting the same child restores the original pinned-TLS connection
+ // without pairing or granting new Project permissions.
+ let restart_shutdown=CancellationToken::new();
+ let restarted=tokio::spawn(rt.transfer.clone().run_tls(restart_shutdown.clone(),Some(rt.clone())));
+ tokio::time::sleep(Duration::from_millis(100)).await;
+ assert_eq!(parent.probe_child(&rt.transfer.node_id).await.unwrap(),HealthProbeResult::Verified);
+ parent.note_probe(&rt.transfer.node_id,true,12);
+ let recovered=parent.peers().unwrap();
+ assert_eq!(recovered["peers"][0]["connection_state"],"online");
+ assert_eq!(recovered["peers"][0]["probe_latency_ms"],12);
+ restart_shutdown.cancel();
+ restarted.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -511,6 +603,19 @@ async fn tls_shutdown_drains_or_aborts_stalled_partial_frames(){
  let outcome=tokio::time::timeout(Duration::from_secs(1),recv(&mut connection)).await
   .expect("Stalled TLS session was not closed after shutdown");
  assert!(outcome.is_err());
+}
+#[test]
+fn health_probe_response_distinguishes_legacy_from_unreachable(){
+ let id="0123456789abcdef01234567";
+ assert_eq!(
+  health_probe_response(&json!({"ok":true,"kind":"health_ack","node_id":id}),id).unwrap(),
+  HealthProbeResult::Verified);
+ assert_eq!(
+  health_probe_response(&json!({"ok":false,"error":"Transfer request type is not supported"}),id).unwrap(),
+  HealthProbeResult::Unsupported);
+ assert!(health_probe_response(&json!({"ok":true,"kind":"health_ack","node_id":"wrong"}),id).is_err());
+ assert!(health_probe_response(&json!({"ok":false,"error":"Transfer peer is not paired"}),id).is_err());
+ assert!(health_probe_response(&json!({"ok":false,"error":"unauthorized"}),id).is_err());
 }
 #[test]fn retry_policy_never_replays_mutations(){for tool in ["read_file","list_directory","git_status","get_task_checkpoint","continue_task","get_job","get_job_output"]{assert!(retryable_tool(tool),"{tool}");}for tool in ["write_file","apply_patch","create_directory","run_command","cancel_job","git_commit","git_push","run_shell"]{assert!(!retryable_tool(tool),"{tool}");}}
 #[test]fn code_is_stable_and_permissions_fail_closed(){assert_eq!(code("cert","token"),code("cert","token"));assert_ne!(code("cert","token"),code("cert2","token"));assert!(!lan("8.8.8.8:20002".parse().unwrap()));assert!(lan("127.0.0.1:20002".parse().unwrap()));}}

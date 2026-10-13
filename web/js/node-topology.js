@@ -56,14 +56,31 @@ export function deriveNodeTopology(discovery = {}, pending = [], trusted = []) {
     if (!id || id === localId || remote.has(id)) continue;
     const role = remoteRole(peer);
     const grants = Array.isArray(peer.grants) ? peer.grants : [];
+    const connectivity=peer.role==="parent" ?
+      safeString(peer.connection_state,"unknown") : "unknown";
+    const healthLabel={
+      online:"在线 · TLS 已验证",
+      unreachable:"连接不可达 · 已配对",
+      checking:"连接检测中 · 已配对",
+      unsupported:"旧版节点 · 无法验证",
+      disabled:"Transfer 已禁用",
+      unknown:"连接状态未知 · 已配对"
+    };
     remote.set(id, {
       key: id, id, kind: "trusted", role,
       name: safeString(peer.name, "已信任节点"), endpoint: safeString(peer.endpoint),
-      state: "trusted", status: "PINNED TLS · 已配对",
+      state: "trusted", connectivity,
+      lastVerified:peer.last_verified||null,
+      latencyMs:peer.probe_latency_ms??null,
+      status:role==="child" ? healthLabel[connectivity]||healthLabel.unknown :
+        "PINNED TLS · 已配对",
       // Absence of multicast discovery does not establish that TLS is offline.
-      note: role === "parent"
-        ? (grants.length ? "本机已授予 " + grants.length + " 个 Project" : "本机尚未授予 Project")
-        : "Project 访问仍由子节点授权控制",
+      note: connectivity==="unreachable" ? "TLS 探测失败 · 可能已关闭或网络中断" :
+        connectivity==="checking" ? "正在确认节点连接" :
+        connectivity==="unsupported" ? "子节点版本过旧 · 不支持 TLS 健康探测" :
+        role === "parent" ?
+          (grants.length ? "本机已授予 " + grants.length + " 个 Project" : "本机尚未授予 Project") :
+          "Project 访问仍由子节点授权控制",
       discovery: peer.discovery_online === true ? "最近收到 LAN 广播" : "近期未发现广播 · 连通性未知",
       grants
     });
@@ -118,6 +135,9 @@ export function deriveNodeTopology(discovery = {}, pending = [], trusted = []) {
     nodes: [local, ...peers], edges, localRole,
     counts: {
       trusted: peers.filter(p => p.kind === "trusted").length,
+      unreachable: peers.filter(p => p.kind === "trusted" && p.connectivity === "unreachable").length,
+      online: peers.filter(p => p.kind === "trusted" && p.connectivity === "online").length,
+      unsupported: peers.filter(p => p.kind === "trusted" && p.connectivity === "unsupported").length,
       pending: peers.filter(p => p.kind === "pending" && p.state !== "rejected").length,
       discovered: peers.filter(p => p.kind === "discovered").length
     }
@@ -219,7 +239,8 @@ function renderFlowLabels() {
   for (const edge of view.model.edges) {
     const parts = view.paths.get(edge.key);
     if (!parts?.event) continue;
-    const latest = view.flowAvailable ?
+    const linkPeer=view.model.nodes.find(n => n.key===edge.peerKey);
+    const latest = view.flowAvailable && linkPeer?.connectivity!=="unreachable" ?
       activeNodeFlowEvent(view.flows.get(edge.peerKey), nowSeconds) : null;
     const text = latest ? eventLabel(edge, latest) : "";
     setText(parts.event, shortEventText(text));
@@ -289,6 +310,14 @@ function showDetail(item) {
   const note = element("p", "", item.note);
   host.append(head, summary, note);
   if (item.discovery) host.append(element("p", "node-topology-detail-muted", item.discovery));
+  if (item.kind === "trusted" && item.connectivity === "unreachable") {
+    host.append(element("p", "node-topology-health-warning",
+      "节点当前不可达：请检查子节点 EndlessVibe 服务、网络和 Transfer 端口。配对及授权仍保留。"));
+  }
+  if (item.kind === "trusted" && item.role === "child" && item.lastVerified) {
+    host.append(element("p", "node-topology-detail-muted",
+      "最近 TLS 验证成功：" + new Date(item.lastVerified*1000).toLocaleString()));
+  }
   if (item.kind === "trusted" && item.role === "parent" && item.grants.length) {
     host.append(element("p", "node-topology-detail-muted",
       "授权 Project: " + item.grants.map(g => g.workspace + "/" + g.project).join(", ")));
@@ -599,6 +628,7 @@ export function updateNodeTopology(discovery, pending, peers, flowResponse = nul
     }
     card.dataset.kind = item.kind;
     card.dataset.state = item.state;
+    card.dataset.connectivity = item.connectivity||"unknown";
     card.classList.toggle("is-selected", view.selected === item.key);
     card.setAttribute("aria-pressed", String(view.selected === item.key));
     setText(card.querySelector(".node-topology-card-role"), roleTitle(item.role));
@@ -638,6 +668,11 @@ export function updateNodeTopology(discovery, pending, peers, flowResponse = nul
     parts.path.classList.toggle("is-dimmed", dimmed);
     parts.label.classList.toggle("is-dimmed", dimmed);
     parts.event?.classList.toggle("is-dimmed", dimmed);
+    const peer=model.nodes.find(item=>item.key===edge.peerKey);
+    const unreachable=peer?.connectivity==="unreachable";
+    parts.path.classList.toggle("is-unreachable", unreachable);
+    parts.label.classList.toggle("is-unreachable", unreachable);
+    parts.event?.classList.toggle("is-unreachable", unreachable);
   }
   if (view.discoveredY !== null) {
     if (!view.sectionLabel) {
@@ -656,10 +691,13 @@ export function updateNodeTopology(discovery, pending, peers, flowResponse = nul
   if (!model.nodes.some(n => n.key === view.selected)) view.selected = "local";
   showDetail(model.nodes.find(n => n.key === view.selected));
   setText(document.getElementById("node-topology-count"),
-    model.counts.trusted + " 已配对 · " + model.counts.pending +
+    model.counts.trusted + " 已配对 · " + model.counts.online + " 在线 · " +
+    model.counts.unreachable + " 不可达 · " + model.counts.unsupported + " 旧版待升级 · " + model.counts.pending +
     " 待确认 · " + model.counts.discovered + " 仅发现");
   const hint = !discovery.enabled ? "Transfer 未启用；可在 Config 中启用后重启服务。" :
-    model.counts.trusted ? "已配对节点可按授权发送操作请求，结果沿反向通道返回。" :
+    model.counts.unreachable ? model.counts.unreachable+" 个子节点 TLS 探测连续失败（可能服务关闭或网络中断），配对和授权保持不变。" :
+    model.counts.unsupported ? model.counts.unsupported+" 个旧版子节点不支持健康探测，连接状态未验证；升级子节点后可自动识别在线。" :
+    model.counts.trusted ? "已配对节点仅在 TLS 验证通过时标记在线；没有 LAN 广播不等于离线。" :
     "尚无可信数据通道；先完成配对，再单独授权 Project。";
   setText(document.getElementById("node-topology-summary"), hint);
 }

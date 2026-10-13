@@ -130,6 +130,7 @@ mod dashboard_sandbox_page_tests{
         const HTML:&str=include_str!("../web/index.html");
         const NODES:&str=include_str!("../web/js/nodes.js");
         const TOPOLOGY:&str=include_str!("../web/js/node-topology.js");
+        const TOPOLOGY_CSS:&str=include_str!("../web/node-topology.css");
         const ROUTES:&str=include_str!("server.rs");
         assert_eq!(HTML.matches("id=\"node-topology-canvas\"").count(),1);
         assert!(HTML.contains("/assets/node-topology.css"));
@@ -142,6 +143,12 @@ mod dashboard_sandbox_page_tests{
         assert!(ROUTES.contains(".route(\"/api/nodes/flow-events\",get(web::node_flow_events))"));
         assert!(TOPOLOGY.contains("export function matchNodeFlowEvents"));
         assert!(TOPOLOGY.contains("export function activeNodeFlowEvent"));
+        assert!(NODES.contains("export function peerHealthDescriptor"));
+        assert!(NODES.contains("updateTrustedPresences(peers.peers||[])"));
+        assert!(TOPOLOGY.contains("model.counts.unreachable"));
+        assert!(TOPOLOGY.contains("parts.path.classList.toggle(\"is-unreachable\""));
+        assert!(TOPOLOGY_CSS.contains(".node-topology-link.is-unreachable{animation:none"));
+        assert!(TOPOLOGY_CSS.contains(".node-peer-health[data-state=\"unreachable\"]"));
         assert!(TOPOLOGY.contains("FLOW_FINISHED_TTL_SECONDS = 15"));
         assert!(TOPOLOGY.contains("FLOW_RUNNING_TTL_SECONDS = 90"));
         assert!(TOPOLOGY.contains("setTimeout(renderFlowLabels, delay)"));
