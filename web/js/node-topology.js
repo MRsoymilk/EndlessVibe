@@ -10,6 +10,9 @@ const RIGHT_X = 730;
 const CENTER_X = 405;
 const MIN_ZOOM = 0.22;
 const MAX_ZOOM = 2.25;
+// Show completed calls briefly; cap stale "running" calls if the service stops reporting updates.
+const FLOW_FINISHED_TTL_SECONDS = 15;
+const FLOW_RUNNING_TTL_SECONDS = 90;
 
 let view = null;
 
@@ -170,9 +173,7 @@ export function matchNodeFlowEvents(model, response, maxPerPeer = 6) {
   return byPeer;
 }
 
-function eventLabel(edge, event, available) {
-  if (!available) return "本机日志暂不可用";
-  if (!event) return edge.kind === "request" ? "暂无近期请求" : "暂无近期结果";
+function eventLabel(edge, event) {
   const seq = "#" + event.seq;
   const tool = safeString(event.tool, "unknown");
   if (edge.kind === "request") {
@@ -189,19 +190,54 @@ function shortEventText(text, max = 39) {
   const value = String(text);
   return value.length > max ? value.slice(0, max - 1) + "…" : value;
 }
+// A newly observed call supersedes the previous call even if the previous
+// result completed more recently. Expired calls must never reappear from history.
+// Use the server's generated_at clock for timestamps; browser clocks can differ.
+export function flowEventExpiresAt(event) {
+  if (!event || !Number.isFinite(event.started) || event.started <= 0) return 0;
+  if (event.status === "running") return event.started + FLOW_RUNNING_TTL_SECONDS;
+  const finished = Number.isFinite(event.finished) && event.finished > 0 ?
+    event.finished : event.started;
+  return finished + FLOW_FINISHED_TTL_SECONDS;
+}
+export function activeNodeFlowEvent(events, serverNowSeconds) {
+  if (!Array.isArray(events) || !events.length ||
+      !Number.isFinite(serverNowSeconds)) return null;
+  const latest = events[0];
+  return flowEventExpiresAt(latest) > serverNowSeconds ? latest : null;
+}
 function renderFlowLabels() {
   if (!view?.model) return;
+  if (view.flowExpiryTimer !== null) {
+    clearTimeout(view.flowExpiryTimer);
+    view.flowExpiryTimer = null;
+  }
+  const clock = view.flowClock;
+  const nowSeconds = clock ?
+    clock.serverSeconds + (performance.now() - clock.tick) / 1000 : Date.now() / 1000;
+  let nextExpiry = Infinity;
   for (const edge of view.model.edges) {
     const parts = view.paths.get(edge.key);
     if (!parts?.event) continue;
-    const latest = view.flows.get(edge.peerKey)?.[0];
-    const text = eventLabel(edge, latest, view.flowAvailable);
+    const latest = view.flowAvailable ?
+      activeNodeFlowEvent(view.flows.get(edge.peerKey), nowSeconds) : null;
+    const text = latest ? eventLabel(edge, latest) : "";
     setText(parts.event, shortEventText(text));
-    const state = latest?.status || "empty";
-    parts.event.dataset.state = view.flowAvailable ? state : "unavailable";
-    parts.event.setAttribute("aria-label", text);
+    if (latest) {
+      parts.event.dataset.state = latest.status || "unknown";
+      parts.event.setAttribute("aria-label", text);
+      nextExpiry = Math.min(nextExpiry, flowEventExpiresAt(latest));
+    } else {
+      parts.event.removeAttribute("data-state");
+      parts.event.removeAttribute("aria-label");
+    }
     const title = parts.event.querySelector("title");
     if (title) title.textContent = text;
+  }
+  // Expire even when polling pauses, the tab is hidden or no new calls arrive.
+  if (Number.isFinite(nextExpiry)) {
+    const delay = Math.max(25, Math.ceil((nextExpiry - nowSeconds) * 1000) + 25);
+    view.flowExpiryTimer = setTimeout(renderFlowLabels, delay);
   }
 }
 
@@ -508,7 +544,7 @@ export function mountNodeTopology() {
   view = {
     canvas, scene, svg, cardsLayer, paths: new Map(), cards: new Map(),
     positions: new Map(), manual: new Set(), model: null, selected: "local",
-    flowAvailable: false, flows: new Map(),
+    flowAvailable: false, flows: new Map(), flowClock: null, flowExpiryTimer: null,
     x: 0, y: 0, scale: 1, drag: null, userMoved: false, discoveredY: null,
     sectionLabel: null, zoomLabel: document.getElementById("node-topology-zoom"),
     detail: document.getElementById("node-topology-detail")
@@ -526,6 +562,7 @@ export function mountNodeTopology() {
   canvas.addEventListener("pointercancel", onPointerUp);
   canvas.addEventListener("keydown", onCanvasKey);
   window.addEventListener("resize", () => {if (view && !view.userMoved) fitTopology();});
+  document.addEventListener("visibilitychange", () => {if (!document.hidden) renderFlowLabels();});
 }
 
 export function updateNodeTopology(discovery, pending, peers, flowResponse = null) {
@@ -543,6 +580,9 @@ export function updateNodeTopology(discovery, pending, peers, flowResponse = nul
   view.positions = newPositions;
   view.model = model;
   view.flowAvailable = flowResponse?.scope === "local_only" && Array.isArray(flowResponse.events);
+  const serverSeconds = Number(flowResponse?.generated_at);
+  view.flowClock = view.flowAvailable && Number.isFinite(serverSeconds) && serverSeconds > 0 ?
+    {serverSeconds, tick: performance.now()} : null;
   view.flows = matchNodeFlowEvents(model, flowResponse);
   view.discoveredY = layout.discoveredY;
 

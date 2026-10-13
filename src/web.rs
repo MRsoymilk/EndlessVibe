@@ -141,6 +141,11 @@ mod dashboard_sandbox_page_tests{
         assert!(NODES.contains("/api/nodes/flow-events?limit=120"));
         assert!(ROUTES.contains(".route(\"/api/nodes/flow-events\",get(web::node_flow_events))"));
         assert!(TOPOLOGY.contains("export function matchNodeFlowEvents"));
+        assert!(TOPOLOGY.contains("export function activeNodeFlowEvent"));
+        assert!(TOPOLOGY.contains("FLOW_FINISHED_TTL_SECONDS = 15"));
+        assert!(TOPOLOGY.contains("FLOW_RUNNING_TTL_SECONDS = 90"));
+        assert!(TOPOLOGY.contains("setTimeout(renderFlowLabels, delay)"));
+        assert!(HTML.contains("已结束的操作保留 15 秒后自动隐藏"));
         assert!(TOPOLOGY.contains("/operations?seq="));
         assert!(TOPOLOGY.contains("export function deriveNodeTopology"));
         assert!(TOPOLOGY.contains("export function layoutNodeTopology"));
