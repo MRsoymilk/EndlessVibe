@@ -292,6 +292,8 @@ mkdir -p "$HOME/projects"
 ./target/release/endlessvibe
 ```
 
+**运行中的 Web 管理：** 打开本机 `http://127.0.0.1:20001/projects`，在「新增 Workspace」中填写唯一的 ID 与已存在的根目录绝对路径。保存后尝试热重载，无需重启即可在下方「添加 Project」选择新 Workspace；如果页面提示热重载失败，应按提示重启。不会自动授权根目录内的任何 Project，也不允许 Workspace 根目录与其他 Workspace 或配置/状态目录重叠。该入口仅在本机 Dashboard 中开放，不会暴露到公网 MCP 端口。
+
 Project 必须位于登记的 Workspace 根目录内。添加时可用 `--read-only` 或 `--no-exec` 收紧权限。Linux 已有配置可在需要时运行 `./target/release/endlessvibe --check-sandbox` 检查 Bubblewrap 和工具链；诊断、凭据维护及进程管理命令不会自动创建缺失配置。
 
 ## 局域网模式（无需公网 ChatGPT URL）

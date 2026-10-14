@@ -93,8 +93,18 @@
 </section>
 
 <section class="page" data-page="projects">
-<div class="page-title"><div><p class="eyebrow">PROJECT MANAGEMENT</p><h2>Projects</h2><p>管理 Workspace 下的 Project、权限与本地 Git 状态。</p></div><span id="projects-restart-badge" class="badge-note">检查配置状态</span></div>
+<div class="page-title"><div><p class="eyebrow">PROJECT MANAGEMENT</p><h2>Projects</h2><p>管理 Workspace、Project、权限与本地 Git 状态。</p></div><span id="projects-restart-badge" class="badge-note">检查配置状态</span></div>
 <div class="config-grid">
+<section class="config-card full workspace-create-card" aria-labelledby="workspace-create-title">
+<div class="config-heading"><h3 id="workspace-create-title">新增 Workspace</h3><span>WRITE CONFIG</span></div>
+<p class="config-note">指定一个已存在的独立目录作为 Workspace 根目录。不能与现有 Workspace、配置或状态目录重叠；创建后不会自动授权任何 Project。</p>
+<form id="add-workspace-form" class="config-form workspace-create-form">
+<label for="add-workspace-id">Workspace ID<input id="add-workspace-id" type="text" maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="例如 research" autocomplete="off" required></label>
+<label for="add-workspace-path" class="path-field">Root Directory<input id="add-workspace-path" type="text" placeholder="请输入已存在目录的绝对路径" autocomplete="off" required></label>
+<button type="submit" id="add-workspace-save">新增 Workspace</button>
+<div id="workspace-write-status" class="write-status workspace-create-status" role="status" aria-live="polite"></div>
+</form>
+</section>
 <section class="config-card full"><div class="config-heading"><h3>添加 Project</h3><span>WRITE CONFIG</span></div><p class="config-note">写入 config.toml；目标目录须已存在且位于所选 Workspace 内。支持 Windows、Linux 和 macOS 的绝对路径；实际工作空间地址仅展示当前配置，不会自动填入新项目路径。保存后尝试热重载；服务级配置变化可能需要重启。</p><form id="add-project-form" class="config-form"><label>Workspace<select id="add-project-workspace" required></select></label><label>Project ID<input id="add-project-id" type="text" maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" placeholder="留空时使用目录名"></label><label class="path-field">Absolute Path<input id="add-project-path" type="text" required placeholder="请输入现有项目的绝对路径"></label><label>Execution Profile<select id="add-project-profile"><option value="development" selected>development</option><option value="isolated">isolated</option><option value="trusted_host">trusted_host · 所有本机工具（高风险）</option></select></label><div class="permission-editor"><label><input id="add-project-write" type="checkbox" checked> write</label><label><input id="add-project-exec" type="checkbox" checked> exec</label><label><input id="add-project-commit" type="checkbox" checked> commit</label><label><input id="add-project-git-mutation" type="checkbox"> git rw</label><label><input id="add-project-git-push" type="checkbox"> push</label></div><button type="submit" id="add-project-save">保存并添加</button><div id="config-write-status" class="write-status" role="status" aria-live="polite"></div></form></section>
 <section class="config-card full"><div class="config-heading"><h3>Workspace → Project</h3><span>ACCESS / GIT</span></div><p class="config-note">Git 状态为本地只读快照；Project 正在执行操作时显示 busy。</p><div id="workspace-config" class="workspace-config"></div></section>
 </div>

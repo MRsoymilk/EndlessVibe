@@ -336,6 +336,18 @@ const zhToEn = new Map(Object.entries({
   "Transfer 配置已保存。重启 EndlessVibe 后生效。":"Transfer settings saved. Restart EndlessVibe to apply them.",
   "Transfer 设置有未保存的修改":"Unsaved Transfer settings",
   "其他":"Other",
+  // Workspace management in the normal Projects Dashboard.
+  "新增 Workspace":"Add Workspace",
+  "管理 Workspace、Project、权限与本地 Git 状态。":"Manage Workspaces, Projects, permissions and local Git status.",
+  "指定一个已存在的独立目录作为 Workspace 根目录。不能与现有 Workspace、配置或状态目录重叠；创建后不会自动授权任何 Project。":"Choose an existing independent directory as the Workspace root. It cannot overlap other Workspaces or protected config/state paths. No Projects are authorized automatically.",
+  "请输入已存在目录的绝对路径":"Enter an existing absolute directory path",
+  "例如 research":"e.g. research",
+  "Workspace 根目录不能为空":"Workspace root directory is required",
+  "此 Workspace ID 已存在，请使用不同的 ID":"This Workspace ID already exists. Choose another ID.",
+  "Workspace ID 只能包含字母、数字、_、-，最长 64 个字符":"Workspace ID must use letters, digits, underscore or hyphen, at most 64 characters.",
+  "创建中…":"Creating…",
+  "正在校验根目录并保存 Workspace…":"Validating the directory and saving Workspace…",
+  "配置已发生变化，正在获取最新版本；请检查输入后重试。":"Configuration changed; loading the latest version. Check the fields and retry.",
   // Init-only wizard (never part of the normal Dashboard).
   "初始化向导":"Setup wizard",
   "仅在运行":"Only available when running",
@@ -419,7 +431,7 @@ const enToZh = new Map(Object.entries({
   "Cancel job":"取消任务","Create directory":"创建目录",
   "Write file":"写入文件","Apply patch":"应用补丁","Git commit":"Git 提交",
   "Operation":"操作","Arguments JSON":"参数 JSON","Project ID":"项目 ID",
-  "Execution Profile":"执行配置","Absolute Path":"绝对路径",
+  "Execution Profile":"执行配置","Absolute Path":"绝对路径","Root Directory":"根目录",
   "Workspace / Project":"工作空间 / 项目","Add Project":"添加项目",
   "Save Git":"保存 Git 配置","Save limits":"保存限制","Save Transfer settings":"保存 Transfer 配置",
   "Save Docker settings":"保存 Docker 配置",
@@ -460,6 +472,13 @@ const enToZh = new Map(Object.entries({
 }));
 
 const partialEn = [
+  [" 创建成功并已热生效。可在下方继续添加 Project。"," created and hot-reloaded. Add a Project below."],
+  [" 已写入配置，但热重载失败："," was saved, but hot reload failed: "],
+  ["；重启前新授权可能不可用。","; new permissions may require a restart."],
+  [" 工作空间列表刷新失败："," Workspace list refresh failed: "],
+  ["，请手动刷新页面。","; please refresh the page manually."],
+  ["配置冲突且刷新失败：","Config conflict and refresh failed: "],
+  ["创建失败：","Create failed: "],
   ["保存失败：","Save failed: "],["已保存 ","Saved "],["保存中","Saving"],
   ["已批准节点 ","Approved node "],["没有授权可见的 Project","No authorized Projects visible"],
   [" 的本地配对？两端均须撤销才能完全解除双向信任。"," from this device? Both nodes must revoke pairing to fully remove trust."],

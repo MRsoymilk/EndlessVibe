@@ -278,6 +278,22 @@ html[data-theme="light"] .header-status.offline {background:#fff0f2;border-color
 #sandbox-security-message{line-height:1.65;}
 @media(max-width:850px){.sandbox-state-grid,.sandbox-stage-list{grid-template-columns:1fr;}}
 
+/* Projects: create new Workspace using the existing compact config editor. */
+.workspace-create-form{
+  grid-template-columns:minmax(160px,.85fr) minmax(270px,1.8fr) auto;
+  gap:12px;align-items:end;
+}
+.workspace-create-form>button[type="submit"]{
+  white-space:nowrap;min-height:35px;padding:8px 14px;
+}
+.workspace-create-form .workspace-create-status{
+  grid-column:1/-1;margin:0;overflow-wrap:anywhere;
+}
+@media(max-width:760px){
+  .workspace-create-form{grid-template-columns:minmax(0,1fr);}
+  .workspace-create-form>button[type="submit"]{width:100%;justify-self:stretch;}
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {transition: none !important; scroll-behavior: auto !important;}
 }

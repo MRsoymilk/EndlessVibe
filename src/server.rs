@@ -105,6 +105,7 @@ pub fn create_dashboard_router(rt:Arc<Runtime>)->Router{
         .route("/api/operations/{seq}",get(web::operation))
         .route("/api/jobs/{job_id}",get(web::job_detail))
         .route("/api/events",get(web::events))
+        .route("/api/workspaces",post(web::add_workspace))
         .route("/api/projects",post(web::add_project))
         .route("/api/projects/{workspace}/{project}",patch(web::update_project))
         .route("/health",get(web::status))

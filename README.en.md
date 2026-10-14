@@ -294,6 +294,8 @@ mkdir -p "$HOME/projects"
 ./target/release/endlessvibe
 ```
 
+**Manage Workspaces from the running Web Dashboard:** Open `http://127.0.0.1:20001/projects` on the host, then use **Add Workspace** with a unique ID and an existing absolute root directory. The new Workspace is hot-reloaded where possible and becomes selectable in the **Add Project** form; follow the restart notice if reload cannot take effect. No Projects are automatically granted, and overlapping Workspace or protected state/config roots are rejected. This interface is local-only and is not exposed by the public MCP listener.
+
 Projects must be inside the registered Workspace root. Use `--read-only` or `--no-exec` to reduce permissions during registration. With an existing Linux configuration, run `./target/release/endlessvibe --check-sandbox` when needed to inspect Bubblewrap and toolchains. Diagnostics, credential maintenance, and process-management commands do not initialize a missing configuration.
 
 ## LAN-only mode (no public ChatGPT URL)

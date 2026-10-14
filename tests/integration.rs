@@ -87,14 +87,105 @@ async fn setup_router_and_normal_dashboard_have_separate_surfaces(){
             StatusCode::OK,"Wizard lacks {path}");
     }
     let normal=server::create_dashboard_router(f.rt.clone());
-    for path in ["/setup","/api/setup","/api/workspaces","/assets/js/setup.js","/assets/setup.css"]{
+    for path in ["/setup","/api/setup","/assets/js/setup.js","/assets/setup.css"]{
         assert_eq!(http(&normal,"GET",path,Body::empty(),None,None,None).await.status(),
             StatusCode::NOT_FOUND,"Normal Dashboard exposes {path}");
     }
+    assert_eq!(http(&normal,"GET","/api/workspaces",Body::empty(),None,None,None).await.status(),
+        StatusCode::METHOD_NOT_ALLOWED,"Workspace changes must use POST");
     let page=http(&normal,"GET","/",Body::empty(),None,None,None).await;
     let html=String::from_utf8(to_bytes(page.into_body(),128*1024).await.unwrap().to_vec()).unwrap();
     assert!(!html.contains("data-page=\"setup\"")&&!html.contains("href=\"/setup\""));
 }
+#[tokio::test]
+async fn normal_dashboard_creates_workspace_with_hot_reload_and_local_security(){
+    let f=fixture(|_|{});
+    let dashboard=server::create_dashboard_router(f.rt.clone());
+    let external=server::create_router(f.rt.clone());
+    let root=f._dir.path().join("research");
+    let project_path=root.join("analysis");
+    std::fs::create_dir_all(&project_path).unwrap();
+    let page=String::from_utf8(to_bytes(
+        http(&dashboard,"GET","/projects",Body::empty(),None,None,None)
+            .await.into_body(),128*1024).await.unwrap().to_vec()).unwrap();
+    for id in ["add-workspace-form","add-workspace-id","add-workspace-path",
+        "add-workspace-save","workspace-write-status"]{
+        assert!(page.contains(&format!("id=\"{id}\"")),"Projects page missing {id}");
+    }
+    let script=include_str!("../web/app.js");
+    assert!(script.contains("handleAddWorkspace(event)"));
+    assert!(script.contains("sendJson(\"/api/workspaces\",\"POST\""));
+    assert!(script.contains("expected_revision:configRevision,id,path"));
+    assert!(script.contains("select.value=id"));
+    let initial=json_body(http(&dashboard,"GET","/api/config",
+        Body::empty(),None,None,None).await).await;
+    assert_eq!(initial["workspaces"].as_array().unwrap().len(),1);
+    let body=json!({"expected_revision":initial["revision"],"id":"research","path":root});
+    let post=|host:&str,origin:Option<&str>,data:Value|{
+        let mut request=Request::builder().method("POST").uri("/api/workspaces")
+            .header(header::HOST,host).header(header::CONTENT_TYPE,"application/json");
+        if let Some(origin)=origin {request=request.header(header::ORIGIN,origin);}
+        request.body(Body::from(data.to_string())).unwrap()
+    };
+    let before=std::fs::read(&f.rt.config_path).unwrap();
+    for (host,origin) in [("localhost",None),
+        ("localhost",Some("https://outside.example")),
+        ("outside.example",Some("http://localhost:20001"))]{
+        let result=dashboard.clone().oneshot(post(host,origin,body.clone())).await.unwrap();
+        assert_eq!(result.status(),StatusCode::FORBIDDEN);
+    }
+    assert_eq!(std::fs::read(&f.rt.config_path).unwrap(),before);
+    assert_eq!(external.clone().oneshot(post("localhost",Some("http://localhost:20001"),
+        body.clone())).await.unwrap().status(),StatusCode::NOT_FOUND);
+    let saved=dashboard.clone().oneshot(post("localhost",
+        Some("http://localhost:20001"),body.clone())).await.unwrap();
+    assert_eq!(saved.status(),StatusCode::OK);
+    let saved=json_body(saved).await;
+    assert_eq!(saved["requires_restart"],false);
+    assert_eq!(saved["workspace"]["id"],"research");
+    assert_eq!(saved["workspace"]["project_count"],0);
+    assert_eq!(f.rt.workspace_project_counts(),(2,1));
+    assert!(f.rt.project("research","analysis").is_err(),
+        "Workspace creation must not authorize any Project");
+    let current=json_body(http(&dashboard,"GET","/api/config",
+        Body::empty(),None,None,None).await).await;
+    assert_eq!(current["requires_restart"],false);
+    assert_eq!(current["workspaces"].as_array().unwrap().len(),2);
+    assert_eq!(current["active_revision"],current["revision"]);
+    assert!(current["workspaces"].as_array().unwrap().iter().any(|w|
+        w["id"]=="research" && w["project_count"]==0));
+    let status=json_body(http(&dashboard,"GET","/api/status",
+        Body::empty(),None,None,None).await).await;
+    assert_eq!(status["workspace_count"],2);
+    assert_eq!(status["project_count"],1);
+    assert_eq!(dashboard.clone().oneshot(post("localhost",
+        Some("http://localhost:20001"),body)).await.unwrap().status(),
+        StatusCode::CONFLICT,"Stale revision must not overwrite configuration");
+    let revision=current["revision"].clone();
+    for (id,path) in [("research",root.clone()),("nested",root.join("analysis")),
+        ("state",f.rt.config.security.data_dir.clone())] {
+        let response=dashboard.clone().oneshot(post("localhost",
+            Some("http://localhost:20001"),
+            json!({"expected_revision":revision,"id":id,"path":path}))).await.unwrap();
+        assert_eq!(response.status(),StatusCode::BAD_REQUEST,"{id} should be rejected");
+    }
+    assert_eq!(f.rt.workspace_project_counts(),(2,1));
+    // New Workspace is immediately selectable for ordinary Project management.
+    let request=Request::builder().method("POST").uri("/api/projects")
+        .header(header::HOST,"localhost").header(header::ORIGIN,"http://localhost:20001")
+        .header(header::CONTENT_TYPE,"application/json")
+        .body(Body::from(json!({"expected_revision":revision,"workspace":"research",
+            "project":"analysis","path":project_path,"allow_write":false,
+            "allow_exec":false,"allow_git_commit":false,"execution_profile":"isolated"})
+            .to_string())).unwrap();
+    let added=dashboard.clone().oneshot(request).await.unwrap();
+    assert_eq!(added.status(),StatusCode::OK);
+    let added=json_body(added).await;
+    assert_eq!(added["requires_restart"],false);
+    assert_eq!(f.rt.workspace_project_counts(),(2,2));
+    assert!(f.rt.project("research","analysis").is_ok());
+}
+
 #[tokio::test]
 async fn dashboard_setup_is_local_and_distinguishes_saved_from_active_connection(){
     let f=fixture(|c|{let state=c.security.data_dir.clone();*c=Config::local_setup();c.security.data_dir=state;});
